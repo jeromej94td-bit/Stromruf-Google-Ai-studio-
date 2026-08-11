@@ -1,0 +1,12 @@
+{
+  "tasks": {
+    "dev": "deno run --allow-all --allow-env src/index.ts",
+    "test": "deno test --allow-all --allow-env"
+  },
+  "imports": {
+    "std/": "https://deno.land/std@0.208.0/",
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.38.0",
+    "@anthropic-ai/sdk": "https://esm.sh/@anthropic-ai/sdk@0.10.0"
+  },
+  "nodeModules": "./node_modules"
+}
