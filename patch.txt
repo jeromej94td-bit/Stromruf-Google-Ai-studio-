@@ -1,0 +1,36 @@
+--- app/src/main/java/com/example/repository/StromrufRepository.kt
++++ app/src/main/java/com/example/repository/StromrufRepository.kt
+@@ -165,4 +165,30 @@
+     ): ByteArray? {
+         return SupabaseDbClient.downloadAnnahmeDokument(context, doc)
+     }
++
++    // --- Customer Messages ---
++    val allCustomerMessages: kotlinx.coroutines.flow.Flow<List<com.example.database.CustomerMessageEntity>> = dao.getAllCustomerMessages()
++
++    fun getCustomerMessagesForContact(contactId: String): kotlinx.coroutines.flow.Flow<List<com.example.database.CustomerMessageEntity>> {
++        return dao.getCustomerMessagesForContact(contactId)
++    }
++
++    suspend fun insertCustomerMessage(message: com.example.database.CustomerMessageEntity) {
++        dao.insertCustomerMessage(message)
++    }
++
++    suspend fun markCustomerMessageSent(id: String) {
++        dao.updateCustomerMessageStatus(
++            id = id,
++            status = "sent",
++            sentAt = System.currentTimeMillis(),
++            errorMessage = null
++        )
++    }
++
++    suspend fun markCustomerMessageFailed(id: String, error: String) {
++        dao.updateCustomerMessageStatus(
++            id = id,
++            status = "failed",
++            sentAt = null,
++            errorMessage = error
++        )
++    }
+ }

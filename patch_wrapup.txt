@@ -1,0 +1,19 @@
+                var showCustomerMessageComposer by remember { mutableStateOf(false) }
+                
+                Button(
+                    onClick = { showCustomerMessageComposer = true },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F172A)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Kundennachricht aus Notiz erstellen", fontSize = 14.sp)
+                }
+                
+                if (showCustomerMessageComposer) {
+                    androidx.compose.ui.window.Dialog(onDismissRequest = { showCustomerMessageComposer = false }) {
+                        com.example.ui.screens.CallNoteComposer(viewModel = (LocalContext.current as? MainActivity)?.viewModel ?: return@Dialog, contact = data.existingContact, onDismiss = { showCustomerMessageComposer = false })
+                    }
+                }
+

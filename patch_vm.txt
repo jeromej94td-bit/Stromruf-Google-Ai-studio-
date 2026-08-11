@@ -1,0 +1,30 @@
+--- app/src/main/java/com/example/viewmodel/StromrufViewModel.kt
++++ app/src/main/java/com/example/viewmodel/StromrufViewModel.kt
+@@ -10,6 +10,12 @@
+ import kotlinx.coroutines.flow.*
+ import kotlinx.coroutines.launch
+ import java.util.Calendar
++import java.util.UUID
++import android.net.Uri
++import com.example.util.OpenAiClient
++import com.example.util.CustomerMailSender
++import com.example.database.CustomerMessageEntity
+ 
+ data class ActiveCallState(
+     val phone: String,
+@@ -21,6 +27,15 @@
+     val name: String,
+     val reason: String?,
+     val startTime: Long = System.currentTimeMillis()
++)
++
++data class CustomerMessageDraftState(
++    val rawNote: String = "",
++    val transcript: String = "",
++    val subject: String = "",
++    val body: String = "",
++    val isLoading: Boolean = false,
++    val error: String? = null
+ )
+ 
+ class StromrufViewModel(application: Application) : AndroidViewModel(application) {

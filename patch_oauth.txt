@@ -1,0 +1,50 @@
+--- app/src/main/java/com/example/MainActivity.kt
++++ app/src/main/java/com/example/MainActivity.kt
+@@ -163,6 +163,7 @@
+     }
+ 
++    private lateinit var mailAccountManager: com.example.util.MailAccountManager
+     private val viewModel: StromrufViewModel by viewModels {
+         StromrufViewModelFactory(StromrufRepository(this, AppDatabase.getDatabase(this).stromrufDao()))
+     }
+@@ -204,6 +205,8 @@
+     @android.annotation.SuppressLint("MissingPermission")
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
++        mailAccountManager = com.example.util.MailAccountManager(this)
++        handleOAuthIntent(intent)
+         enableEdgeToEdge()
+ 
+@@ -250,6 +253,27 @@
+         intent?.let { checkCallNotificationIntent(it) }
++    }
++
++    override fun onNewIntent(intent: Intent) {
++        super.onNewIntent(intent)
++        setIntent(intent)
++        handleOAuthIntent(intent)
++    }
++
++    private fun handleOAuthIntent(intent: Intent?) {
++        val data = intent?.data ?: return
++        if (data.scheme != "com.aistudio.stromruf.gkrfws") return
++
++        val provider = when {
++            data.toString().contains("gmail", ignoreCase = true) -> "gmail"
++            data.toString().contains("google", ignoreCase = true) -> "gmail"
++            data.toString().contains("outlook", ignoreCase = true) -> "outlook"
++            data.toString().contains("microsoft", ignoreCase = true) -> "outlook"
++            else -> com.example.util.SecureIntegrationSettings(this).getDefaultMailProvider()
++        }
++
++        mailAccountManager.handleAuthorizationResponse(intent, provider) { success, error ->
++            runOnUiThread {
++                Toast.makeText(
++                    this,
++                    if (success) "Mailkonto verbunden." else "Mailkonto konnte nicht verbunden werden: ${error ?: "Unbekannter Fehler"}",
++                    Toast.LENGTH_LONG
++                ).show()
++            }
++        }
+     }
+ 
