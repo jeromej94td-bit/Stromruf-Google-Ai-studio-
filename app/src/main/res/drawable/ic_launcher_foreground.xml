@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 1. Ambient Drop Shadow of the entire logo for 3D depth and contrast -->
+    <group
+        android:translateX="2"
+        android:translateY="4">
+        <!-- Shadow for Ring/Handset -->
+        <path
+            android:fillColor="#3D00140E"
+            android:pathData="M 54,30 C 67.25,30 78,40.75 78,54 C 78,67.25 67.25,78 54,78 C 44,78 35.34,71.86 31.84,63.09 C 30.69,60.2 32.55,57 35.68,57 L 41.34,57 C 43.19,57 44.83,58.26 45.24,60.07 C 46.99,67.75 53.84,72.5 61.2,69.9 C 66.86,67.9 71.1,62.1 71.9,55.5 C 72.8,48.1 68.1,41.4 61,40.1 C 58,39.56 55.43,40.83 54.21,43.08 L 50.1,50.71 L 43.43,38 Z" />
+        <!-- Shadow for Lightning Bolt -->
+        <path
+            android:fillColor="#3D00140E"
+            android:pathData="M 33,75 L 51,57 L 44,57 L 70,31 L 58,31 L 79,25 L 72,46 L 65,39 L 47,57 L 54,57 Z" />
+    </group>
+
+    <!-- 2. The Stylish Open Ring (Metallic Turquoise and Neon-Green gradient) -->
+    <path
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M 54,28 A 26,26 0 0 1 76,70">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:endX="82"
+                android:endY="54"
+                android:startX="54"
+                android:startY="26"
+                android:type="linear">
+                <item android:color="#00F0FF" android:offset="0.0" />
+                <item android:color="#00FF87" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 3. The Left-Side Telephone Handset Segment -->
+    <!-- Incorporates the distinct handset handles, earpiece (top) and mouthpiece (bottom) connected via the crescent -->
+    <!-- Inner silver-turquoise core of the handset -->
+    <path
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M 48,31 A 26,26 0 0 0 46,77">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:endX="30"
+                android:endY="76"
+                android:startX="46"
+                android:startY="32"
+                android:type="linear">
+                <item android:color="#A3FBE3" android:offset="0.0" />
+                <item android:color="#4BE3B5" android:offset="0.5" />
+                <item android:color="#1EA880" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Earpiece Cap (at the top-left of the receiver) -->
+    <path android:strokeLineJoin="round" android:strokeLineCap="round"
+        android:pathData="M 41,26 L 52,32 C 53.5,32.8 54,34.8 53.2,36.3 L 51,40.5 C 50.2,42 48.2,42.5 46.7,41.7 L 36,35.5 C 34.5,34.7 34,32.7 34.8,31.2 L 37,27 C 37.8,25.5 39.8,25 41,26 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="52"
+                android:endY="34"
+                android:startX="38"
+                android:startY="26"
+                android:type="linear">
+                <item android:color="#FFFFFF" android:offset="0.0" />
+                <item android:color="#5CFFD0" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Mouthpiece Cap (at the bottom-left/center of the receiver) -->
+    <path android:strokeLineJoin="round" android:strokeLineCap="round"
+        android:pathData="M 48,68 L 59,74 C 60.5,74.8 61,76.8 60.2,78.3 L 58,82.5 C 57.2,84 55.2,84.5 53.7,83.7 L 43,77.5 C 41.5,76.7 41,74.7 41.8,73.2 L 44,69 C 44.8,67.5 46.8,67 48,68 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="64"
+                android:endY="78"
+                android:startX="48"
+                android:startY="70"
+                android:type="linear">
+                <item android:color="#5CFFD0" android:offset="0.0" />
+                <item android:color="#149470" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 4. Dynamic Lightning Bolt Arrow (High-Contrast Neon-Lime & White Glow) -->
+    <path android:strokeLineJoin="round" android:strokeLineCap="round"
+        android:pathData="M 31,76 L 49,58 L 42,58 L 68,32 L 57,32 L 77,25 L 70,45 L 63,38 L 46,56 L 53,56 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="78"
+                android:endY="24"
+                android:startX="32"
+                android:startY="74"
+                android:type="linear">
+                <item android:color="#00FF87" android:offset="0.0" />
+                <item android:color="#FFFFFF" android:offset="0.75" />
+                <item android:color="#00FF87" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 5. Inner Laser-Sharp White Core of Lightning Bolt (Ultra brightness) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 34,73 L 47,58 L 44,58 L 67,34 L 61,34 L 74,28 L 69,41 L 64,36 L 47,54 L 51,54 Z" />
+
+    <!-- 6. Glowing Electric Spark & Electric Arcs overlay (Right neon crescent sparkle) -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M 76,42 Q 81,49 76,56"
+        android:strokeWidth="1.8"
+        android:strokeColor="#00FF87"
+        android:strokeLineCap="round" />
+
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M 30,44 Q 24,51 30,58"
+        android:strokeWidth="1.5"
+        android:strokeColor="#00F0FF"
+        android:strokeLineCap="round" />
+
+    <!-- Sparkle star in upper-right area -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 85,30 Q 88,30 88,27 Q 88,30 91,30 Q 88,30 88,33 Q 88,30 85,30 Z" />
+
+    <!-- Sparkle star in bottom-left area -->
+    <path
+        android:fillColor="#00FF87"
+        android:pathData="M 21,70 Q 24,70 24,67 Q 24,70 27,70 Q 24,70 24,73 Q 24,70 21,70 Z" />
+
+</vector>
