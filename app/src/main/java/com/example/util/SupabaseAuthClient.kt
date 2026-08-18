@@ -1,10 +1,7 @@
 package com.example.util
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.util.Log
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -19,32 +16,6 @@ object SupabaseAuthClient {
     
     private val client = OkHttpClient()
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-
-    private fun sessionPrefs(context: Context): SharedPreferences {
-        val appContext = context.applicationContext
-        val masterKey = MasterKey.Builder(appContext)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        val encrypted = EncryptedSharedPreferences.create(
-            appContext,
-            "supabase_session_secure",
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-
-        // One-time migration from older app versions that used plain preferences.
-        val legacy = appContext.getSharedPreferences("supabase_session", Context.MODE_PRIVATE)
-        if (legacy.contains("access_token") || legacy.contains("refresh_token") || legacy.contains("user_email")) {
-            encrypted.edit()
-                .putString("access_token", legacy.getString("access_token", null))
-                .putString("refresh_token", legacy.getString("refresh_token", null))
-                .putString("user_email", legacy.getString("user_email", null))
-                .commit()
-            legacy.edit().clear().commit()
-        }
-        return encrypted
-    }
 
     sealed class AuthResult {
         data class Success(val email: String, val token: String, val refreshToken: String = "") : AuthResult()
@@ -123,26 +94,31 @@ object SupabaseAuthClient {
     }
 
     fun getSessionToken(context: Context): String? {
-        return sessionPrefs(context).getString("access_token", null)
+        val prefs = context.getSharedPreferences("supabase_session", Context.MODE_PRIVATE)
+        return prefs.getString("access_token", null)
     }
 
     fun getRefreshToken(context: Context): String? {
-        return sessionPrefs(context).getString("refresh_token", null)
+        val prefs = context.getSharedPreferences("supabase_session", Context.MODE_PRIVATE)
+        return prefs.getString("refresh_token", null)
     }
 
     fun getSessionEmail(context: Context): String? {
-        return sessionPrefs(context).getString("user_email", null)
+        val prefs = context.getSharedPreferences("supabase_session", Context.MODE_PRIVATE)
+        return prefs.getString("user_email", null)
     }
 
     fun saveSession(context: Context, token: String, email: String) {
-        sessionPrefs(context).edit()
+        val prefs = context.getSharedPreferences("supabase_session", Context.MODE_PRIVATE)
+        prefs.edit()
             .putString("access_token", token)
             .putString("user_email", email)
             .apply()
     }
 
     fun saveSession(context: Context, token: String, refreshToken: String, email: String) {
-        sessionPrefs(context).edit()
+        val prefs = context.getSharedPreferences("supabase_session", Context.MODE_PRIVATE)
+        prefs.edit()
             .putString("access_token", token)
             .putString("refresh_token", refreshToken)
             .putString("user_email", email)
@@ -150,7 +126,8 @@ object SupabaseAuthClient {
     }
 
     fun clearSession(context: Context) {
-        sessionPrefs(context).edit().clear().apply()
+        val prefs = context.getSharedPreferences("supabase_session", Context.MODE_PRIVATE)
+        prefs.edit().clear().apply()
     }
 
     fun getTokenClaim(token: String, claim: String): String? {

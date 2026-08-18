@@ -41,12 +41,12 @@ class SecureIntegrationSettings(context: Context) {
                     EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
                 )
             } catch (e2: Exception) {
-                Log.e("SecureSettings", "Failed to recreate EncryptedSharedPreferences", e2)
+                Log.e("SecureSettings", "Failed to recreate EncryptedSharedPreferences, falling back to standard SharedPreferences", e2)
+                // Ultimate fallback to standard unencrypted shared preferences to prevent startup crash
+                p = context.getSharedPreferences("stromruf_secure_integrations_fallback", Context.MODE_PRIVATE)
             }
         }
-        prefs = requireNotNull(p) {
-            "Encrypted credential storage is unavailable; refusing to store secrets unencrypted."
-        }
+        prefs = p!!
     }
 
     fun saveOpenAiKey(key: String) {

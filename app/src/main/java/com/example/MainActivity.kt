@@ -159,25 +159,6 @@ fun arePhoneNumbersMatching(p1: String, p2: String): Boolean {
     return false
 }
 
-private fun isMissingContactDisplayName(name: String?): Boolean {
-    val trimmed = name?.trim().orEmpty()
-    return trimmed.isBlank() ||
-        trimmed.equals("Unbekannt", ignoreCase = true) ||
-        trimmed.equals("Unbekannter Teilnehmer", ignoreCase = true) ||
-        trimmed.equals("Unbekannter Anrufer", ignoreCase = true) ||
-        trimmed.equals("Unbekannter Kunde", ignoreCase = true) ||
-        trimmed.equals("Anonym", ignoreCase = true)
-}
-
-private fun resolveContactDisplayName(rawName: String?, phone: String, contacts: List<ContactEntity>): String {
-    val matchedContact = contacts.find { arePhoneNumbersMatching(it.phone, phone) }
-    return if (isMissingContactDisplayName(rawName)) {
-        matchedContact?.name ?: rawName.orEmpty()
-    } else {
-        rawName.orEmpty()
-    }
-}
-
 class MainActivity : ComponentActivity() {
 
     companion object {
@@ -1419,7 +1400,7 @@ fun StromrufMainDashboard(
     var lastCallName by remember { mutableStateOf("") }
     var lastCallActive by remember { mutableStateOf(false) }
 
-    LaunchedEffect(realCallActive, activeNumber, activeName) {
+    LaunchedEffect(realCallActive) {
         if (realCallActive) {
             var num = activeNumber
             var name = activeName
@@ -1429,11 +1410,10 @@ fun StromrufMainDashboard(
                 name = com.example.service.DialerInCallService.activeCallName.value
             }
             if (num.isNotBlank()) {
-                val resolvedName = resolveContactDisplayName(name, num, contacts)
                 lastCallNumber = num
-                lastCallName = resolvedName
+                lastCallName = name
                 lastCallActive = true
-                viewModel.initializeWrapUpForActiveCall(num, resolvedName)
+                viewModel.initializeWrapUpForActiveCall(num, name)
             }
         } else {
             if (lastCallActive && lastCallNumber.isNotBlank()) {
@@ -1577,21 +1557,6 @@ fun StromrufMainDashboard(
             }
         }
 
-        val incomingContactPhone = com.example.service.DialerInCallService.activeCallNumber.value
-        val incomingServiceName = com.example.service.DialerInCallService.activeCallName.value
-        val matchingIncomingContact = remember(contacts, incomingContactPhone) {
-            contacts.find { arePhoneNumbersMatching(it.phone, incomingContactPhone) }
-        }
-        val resolvedIncomingName = resolveContactDisplayName(incomingServiceName, incomingContactPhone, contacts)
-        val resolvedIncomingCompany =
-            com.example.service.DialerInCallService.activeCallCompany.value.ifBlank {
-                matchingIncomingContact?.company.orEmpty()
-            }
-        val resolvedIncomingReason =
-            com.example.service.DialerInCallService.activeCallReason.value.ifBlank {
-                matchingIncomingContact?.callReason.orEmpty()
-            }
-
         // Bottom Overlay Banner if minimized
         if (isIncomingCall && isIncomingCallMinimized) {
             Box(
@@ -1600,10 +1565,10 @@ fun StromrufMainDashboard(
                     .padding(bottom = 80.dp)
             ) {
                 IncomingCallBottomOverlay(
-                    contactName = resolvedIncomingName,
-                    contactPhone = incomingContactPhone,
-                    contactCompany = resolvedIncomingCompany,
-                    contactReason = resolvedIncomingReason,
+                    contactName = com.example.service.DialerInCallService.activeCallName.value,
+                    contactPhone = com.example.service.DialerInCallService.activeCallNumber.value,
+                    contactCompany = com.example.service.DialerInCallService.activeCallCompany.value,
+                    contactReason = com.example.service.DialerInCallService.activeCallReason.value,
                     onAnswer = {
                         com.example.service.DialerInCallService.answerCall()
                     },
@@ -1620,10 +1585,10 @@ fun StromrufMainDashboard(
         // Full Screen Incoming Call Screen (Ringing & not minimized)
         if (isIncomingCall && !isIncomingCallMinimized) {
             IncomingCallScreen(
-                contactName = resolvedIncomingName,
-                contactPhone = incomingContactPhone,
-                contactCompany = resolvedIncomingCompany,
-                contactReason = resolvedIncomingReason,
+                contactName = com.example.service.DialerInCallService.activeCallName.value,
+                contactPhone = com.example.service.DialerInCallService.activeCallNumber.value,
+                contactCompany = com.example.service.DialerInCallService.activeCallCompany.value,
+                contactReason = com.example.service.DialerInCallService.activeCallReason.value,
                 contactNotes = com.example.service.DialerInCallService.activeCallNotes.value,
                 onAnswer = {
                     com.example.service.DialerInCallService.answerCall()
@@ -1653,20 +1618,19 @@ fun StromrufMainDashboard(
             val matchingContact = remember(contacts, contactPhone) {
                 contacts.find { arePhoneNumbersMatching(it.phone, contactPhone) }
             }
-            val resolvedContactName = resolveContactDisplayName(contactName, contactPhone, contacts)
 
             OngoingCallDialog(
-                contactName = resolvedContactName,
+                contactName = contactName,
                 contactPhone = contactPhone,
                 onHangUp = { finalDuration ->
                     com.example.service.DialerInCallService.hangUp()
-                    viewModel.startWrapUpForDirectCall(contactPhone, resolvedContactName, finalDuration)
+                    viewModel.startWrapUpForDirectCall(contactPhone, contactName, finalDuration)
                 },
                 isAutoCallActive = isAutoCallActive,
                 onHangUpAndPause = { finalDuration ->
                     viewModel.pauseAutoCall()
                     com.example.service.DialerInCallService.hangUp()
-                    viewModel.startWrapUpForDirectCall(contactPhone, resolvedContactName, finalDuration)
+                    viewModel.startWrapUpForDirectCall(contactPhone, contactName, finalDuration)
                 },
                 wrapUpData = wrapUpData,
                 onNoteChange = { viewModel.setWrapUpNote(it) },
