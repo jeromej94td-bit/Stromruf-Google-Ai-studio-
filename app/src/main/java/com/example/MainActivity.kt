@@ -168,6 +168,70 @@ class MainActivity : ComponentActivity() {
     private var clipboardListener: android.content.ClipboardManager.OnPrimaryClipChangedListener? = null
     private var isProgrammaticCopy = false
     private lateinit var mailAccountManager: com.example.util.MailAccountManager
+
+    private suspend fun buildEffectiveHotBoxLists(
+        context: android.content.Context,
+        localDao: com.example.database.StromrufDao,
+        existingLists: Collection<String>
+    ): LinkedHashSet<String> {
+
+        val result = linkedSetOf<String>()
+
+        fun addClean(values: Iterable<String>) {
+            values.forEach { value ->
+                val clean = value.trim()
+                if (clean.isNotEmpty()) {
+                    result.add(clean)
+                }
+            }
+        }
+
+        // 1. Bereits in der App bekannte Listen behalten.
+        addClean(existingLists)
+
+        // 2. Explizite Hotbox-Listen aus Supabase laden.
+        try {
+            val remoteLists =
+                com.example.util.SupabaseDbClient.fetchHotBoxLists(context)
+
+            addClean(remoteLists)
+        } catch (e: Exception) {
+            android.util.Log.e(
+                "HotBoxSync",
+                "Hotbox list table could not be loaded",
+                e
+            )
+        }
+
+        // 3. WICHTIG:
+        // Hotbox-Namen zus√§tzlich direkt aus den Kontakten rekonstruieren.
+        // Dadurch erscheinen auch Hotboxen, die √ºber MCP / ChatGPT /
+        // Backend erstellt wurden, selbst wenn hot_box_lists im Android
+        // Client wegen Cache/RLS/Sync noch nicht verf√ºgbar ist.
+        try {
+            val contactLists = localDao
+                .getAllContactsList()
+                .asSequence()
+                .filter { it.isHotBox }
+                .mapNotNull {
+                    it.hotBoxListName
+                        ?.trim()
+                        ?.takeIf { name -> name.isNotEmpty() }
+                }
+                .distinct()
+                .toList()
+
+            addClean(contactLists)
+        } catch (e: Exception) {
+            android.util.Log.e(
+                "HotBoxSync",
+                "Could not derive Hotbox lists from contacts",
+                e
+            )
+        }
+
+        return result
+    }
     private val viewModel: StromrufViewModel by viewModels {
         StromrufViewModelFactory(StromrufRepository(this, AppDatabase.getDatabase(this).stromrufDao()))
     }
@@ -418,14 +482,14 @@ class MainActivity : ComponentActivity() {
                         ).show()
                     }
 
-                    // --- Load Hotbox lists from Supabase after successful sync ---
-                    val remoteLists = com.example.util.SupabaseDbClient.fetchHotBoxLists(context)
-                    if (remoteLists.isEmpty()) {
-                        // Supabase is empty, upload locally saved lists
-                        com.example.util.SupabaseDbClient.replaceHotBoxLists(context, hotBoxLists)
-                    } else {
-                        // Cloud lists exist, update ViewModel with them
-                        viewModel.setHotBoxLists(remoteLists.toSet())
+                    // --- Load Hotbox lists from Supabase & contacts after successful sync ---
+                    val effectiveLists = buildEffectiveHotBoxLists(
+                        context = context,
+                        localDao = localDao,
+                        existingLists = viewModel.hotBoxLists.value
+                    )
+                    if (effectiveLists.isNotEmpty()) {
+                        viewModel.setHotBoxLists(effectiveLists)
                     }
                     hotBoxCloudReady = true
 
@@ -437,12 +501,16 @@ class MainActivity : ComponentActivity() {
                         )
 
                         // Poll Hotbox lists every 15 seconds
-                        val latestRemoteLists = com.example.util.SupabaseDbClient.fetchHotBoxLists(context)
+                        val latestEffectiveLists = buildEffectiveHotBoxLists(
+                            context = context,
+                            localDao = localDao,
+                            existingLists = viewModel.hotBoxLists.value
+                        )
                         if (
-                            latestRemoteLists.isNotEmpty() &&
-                            latestRemoteLists.toSet() != viewModel.hotBoxLists.value
+                            latestEffectiveLists.isNotEmpty() &&
+                            latestEffectiveLists.toSet() != viewModel.hotBoxLists.value.toSet()
                         ) {
-                            viewModel.setHotBoxLists(latestRemoteLists.toSet())
+                            viewModel.setHotBoxLists(latestEffectiveLists)
                         }
                     }
                 } else {
@@ -9857,6137 +9925,157 @@ fun HistorieTabContent(
 
                         // Laufzeit in Jahren
                         OutlinedTextField(
-                            value = termYears,
-                            onValueChange = { termYears = it },
-                            label = { Text("Laufzeit (Jahre)", color = Color.White.copy(alpha = 0.6f)) },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = Color(0xFF00FF87),
-                                unfocusedBorderColor = Color.White.copy(alpha = 0.2f)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = { convertingHeissAngebot = null },
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-                            ) {
-                                Text("Abbrechen")
-                            }
-
-                            Button(
-                                onClick = {
-                                    val consVal = consumption.toLongOrNull() ?: 0L
-                                    val termVal = termYears.toIntOrNull() ?: 1
-                                    
-                                    viewModel.saveAnnahme(
-                                        type = selectedType,
-                                        customerType = selectedCustomerType,
-                                        consumption = consVal,
-                                        termYears = termVal,
-                                        customerNumber = customerNumber
-                                    )
-                                    
-                                    // Also remove the hot offer
-                                    viewModel.deleteHeissAngebot(item.id)
-                                    
-                                    Toast.makeText(
-                                        context,
-                                        "Abschluss erfolgreich erfasst und hei√ües Angebot gel√∂scht! üéØ",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                    
-                                    convertingHeissAngebot = null
-                                },
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
-                            ) {
-                                Text("Speichern ‚úîÔ∏è", color = Color.White)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-        // System Call Log permission banner if not granted
-        val hasCallLogPermission = com.example.util.ContactsUtil.hasCallLogPermission(context)
-        if (!hasCallLogPermission) {
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = "Warnung",
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Systemtelefon-Synchronisierung",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.onErrorContainer
-                            )
-                            Text(
-                                text = "Gew√§hren Sie Berechtigungen, um Gespr√§chszeiten ab dem 01.01.2026 einzulesen.",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Button(
-                            onClick = {
-                                (context as? android.app.Activity)?.requestPermissions(
-                                    arrayOf(android.Manifest.permission.READ_CALL_LOG), 103
-                                )
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text("Erteilen", fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Period Selector
-        item {
-            Column {
-                Text(
-                    text = "Aktivit√§t & Statistik",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                )
-                Text(
-                    text = "Verfolgen Sie Ihre Erreichbarkeit und Anrufmuster √ºber verschiedene Intervalle.",
-                    style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-
-                // Filter Modes (Standard / Monat / Zeitraum)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-                        .padding(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    val filterModes = listOf(
-                        "standard" to "Heute",
-                        "monat" to "Monat",
-                        "custom" to "Zeitraum"
-                    )
-                    filterModes.forEach { (key, label) ->
-                        val isSelected = filterType == key
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                .clickable { filterType = key }
-                                .padding(vertical = 10.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = label,
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                when (filterType) {
-                    "standard" -> {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                                .padding(4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            val periods = listOf("tag" to "Heute", "woche" to "7 Tage", "monat" to "30 Tage", "gesamt" to "Gesamt")
-                            periods.forEach { (key, label) ->
-                                val isSelected = selectedPeriod == key
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isSelected) MaterialTheme.colorScheme.secondary else Color.Transparent)
-                                        .clickable { selectedPeriod = key }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelMedium.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isSelected) MaterialTheme.colorScheme.onSecondary else MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    "monat" -> {
-                        if (monthsList.isNotEmpty()) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                monthsList.forEachIndexed { index, (label, _) ->
-                                    val isSelected = selectedMonthIndex == index
-                                    val containerColor = if (isSelected) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                                    val textColor = if (isSelected) MaterialTheme.colorScheme.onSecondary else MaterialTheme.colorScheme.onSurfaceVariant
-                                    
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(20.dp))
-                                            .background(containerColor)
-                                            .clickable { selectedMonthIndex = index }
-                                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = label,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = textColor
-                                        )
-                                    }
-                                }
-                            }
-                        } else {
-                            Text(
-                                text = "Keine Monate verf√ºgbar",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    "custom" -> {
-                        val sdf = SimpleDateFormat("dd.MM.yyyy", Locale.GERMANY)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Button(
-                                onClick = {
-                                    val calendar = Calendar.getInstance()
-                                    customStartDate?.let { calendar.timeInMillis = it }
-                                    android.app.DatePickerDialog(
-                                        context,
-                                        { _, year, month, dayOfMonth ->
-                                            val resCal = Calendar.getInstance().apply {
-                                                set(year, month, dayOfMonth, 0, 0, 0)
-                                                set(Calendar.MILLISECOND, 0)
-                                            }
-                                            customStartDate = resCal.timeInMillis
-                                        },
-                                        calendar.get(Calendar.YEAR),
-                                        calendar.get(Calendar.MONTH),
-                                        calendar.get(Calendar.DAY_OF_MONTH)
-                                    ).show()
-                                },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f),
-                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                modifier = Modifier.weight(1f).border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), RoundedCornerShape(8.dp)),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(vertical = 10.dp, horizontal = 8.dp)
-                            ) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(imageVector = Icons.Default.DateRange, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Column {
-                                        Text("VON", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
-                                        Text(
-                                            text = customStartDate?.let { sdf.format(Date(it)) } ?: "Ausw√§hlen",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-
-                            Button(
-                                onClick = {
-                                    val calendar = Calendar.getInstance()
-                                    customEndDate?.let { calendar.timeInMillis = it }
-                                    android.app.DatePickerDialog(
-                                        context,
-                                        { _, year, month, dayOfMonth ->
-                                            val resCal = Calendar.getInstance().apply {
-                                                set(year, month, dayOfMonth, 0, 0, 0)
-                                                set(Calendar.MILLISECOND, 0)
-                                            }
-                                            customEndDate = resCal.timeInMillis
-                                        },
-                                        calendar.get(Calendar.YEAR),
-                                        calendar.get(Calendar.MONTH),
-                                        calendar.get(Calendar.DAY_OF_MONTH)
-                                    ).show()
-                                },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f),
-                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                modifier = Modifier.weight(1f).border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), RoundedCornerShape(8.dp)),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(vertical = 10.dp, horizontal = 8.dp)
-                            ) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(imageVector = Icons.Default.DateRange, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Column {
-                                        Text("BIS", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
-                                        Text(
-                                            text = customEndDate?.let { sdf.format(Date(it)) } ?: "Ausw√§hlen",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-
-                            IconButton(
-                                onClick = {
-                                    customStartDate = null
-                                    customEndDate = null
-                                },
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
-                                    .size(44.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = "Zur√ºcksetzen",
-                                    tint = MaterialTheme.colorScheme.error
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Summary Cards Section
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Card(
-                        modifier = Modifier.weight(1f).border(1.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text("ANRUFE GESAMT", style = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, fontSize = 9.sp, color = Color(0xFF64748B)))
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("${filteredLogs.size}", style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary))
-                        }
-                    }
-                    Card(
-                        modifier = Modifier.weight(1f).border(1.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text("ERREICH-QUOTE", style = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, fontSize = 9.sp, color = Color(0xFF64748B)))
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("$reachabilityRate%", style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0EA5E9)))
-                        }
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Card(
-                        modifier = Modifier.weight(1f).border(1.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text("GESPR√ÑCHSZEIT", style = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, fontSize = 9.sp, color = Color(0xFF64748B)))
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(formattedTotalDuration, style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981)))
-                        }
-                    }
-                    Card(
-                        modifier = Modifier.weight(1f).border(1.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text("√ò DAUER", style = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, fontSize = 9.sp, color = Color(0xFF64748B)))
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(formattedAvgDuration, style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFEAB308)))
-                        }
-                    }
-                }
-            }
-        }
-
-        // Detailed stats breakdown by callType
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = null,
-                            tint = Color(0xFF00FF87),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Auswertung nach Anruftyp",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                        )
-                    }
-                    Text(
-                        text = "Erreichte Kontakte und investierte Gespr√§chszeit f√ºr den Zeitraum (${
-                            when (filterType) {
-                                "standard" -> when (selectedPeriod) {
-                                    "tag" -> "Heute"
-                                    "woche" -> "7 Tage"
-                                    "monat" -> "30 Tage"
-                                    else -> "Gesamt"
-                                }
-                                "monat" -> if (monthsList.isNotEmpty() && selectedMonthIndex in monthsList.indices) monthsList[selectedMonthIndex].first else "Gew√§hlter Monat"
-                                "custom" -> {
-                                    val sdf = SimpleDateFormat("dd.MM", Locale.GERMANY)
-                                    val s = customStartDate?.let { sdf.format(Date(it)) } ?: "Anfang"
-                                    val e = customEndDate?.let { sdf.format(Date(it)) } ?: "Ende"
-                                    "$s - $e"
-                                }
-                                else -> "Auswahl"
-                            }
-                        }).",
-                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        TypeStatColumn(
-                            modifier = Modifier.weight(1f),
-                            title = "Hotbox üî•",
-                            reachedCount = reachedHotbox,
-                            totalCount = totalHotbox,
-                            durationText = formatDurationShort(durationHotbox),
-                            borderColor = Color(0xFFEF4444)
-                        )
-
-                        TypeStatColumn(
-                            modifier = Modifier.weight(1f),
-                            title = "Einw√§hlen ‚ö°",
-                            reachedCount = reachedEinwaehlen,
-                            totalCount = totalEinwaehlen,
-                            durationText = formatDurationShort(durationEinwaehlen),
-                            borderColor = Color(0xFF10B981)
-                        )
-
-                        TypeStatColumn(
-                            modifier = Modifier.weight(1f),
-                            title = "R√ºckruf üìû",
-                            reachedCount = reachedRueckruf,
-                            totalCount = totalRueckruf,
-                            durationText = formatDurationShort(durationRueckruf),
-                            borderColor = Color(0xFF3B82F6)
-                        )
-                    }
-                }
-            }
-        }
-
-        // Daily Gespr√§chszeit-Verlauf Bar Chart Card
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth().border(1.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    val chartTitleSuffix = when (filterType) {
-                        "standard" -> when (selectedPeriod) {
-                            "tag" -> "Heute"
-                            "woche" -> "7 Tage"
-                            "monat" -> "30 Tage"
-                            else -> "Gesamt"
-                        }
-                        "monat" -> {
-                            if (monthsList.isNotEmpty() && selectedMonthIndex in monthsList.indices) {
-                                monthsList[selectedMonthIndex].first
-                            } else {
-                                "Monat"
-                            }
-                        }
-                        "custom" -> {
-                            val sdf = SimpleDateFormat("dd.MM", Locale.GERMANY)
-                            val s = customStartDate?.let { sdf.format(Date(it)) } ?: "Anfang"
-                            val e = customEndDate?.let { sdf.format(Date(it)) } ?: "Ende"
-                            "$s - $e"
-                        }
-                        else -> ""
-                    }
-
-                    val chartTitle = "Anzahl der Anrufe ($chartTitleSuffix)"
-                    val chartSubtitle = "Anzahl der dokumentierten Telefongespr√§che pro Intervall."
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DateRange,
-                            contentDescription = null,
-                            tint = Color(0xFF00FF87),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = chartTitle,
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                        )
-                    }
-                    Text(
-                        text = chartSubtitle,
-                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-
-                    // Color Legend for Erreicht / Nicht erreicht
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(10.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF10B981))
-                            )
-                            Text(
-                                text = "Erreicht",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(10.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF94A3B8))
-                            )
-                            Text(
-                                text = "Nicht erreicht",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    // Selector row for Chart Mode (gesamt, hotbox, einwaehlen, rueckruf)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 16.dp)
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
-                            .padding(2.dp),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        val chartModes = listOf(
-                            "gesamt" to "Gesamt",
-                            "hotbox" to "Hotbox üî•",
-                            "einwaehlen" to "Einw√§hlen ‚ö°",
-                            "rueckruf" to "R√ºckruf üìû"
-                        )
-                        chartModes.forEach { (key, label) ->
-                            val isSelected = chartMode == key
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                    .clickable { chartMode = key }
-                                    .padding(vertical = 6.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        }
-                    }
-
-                    val maxChartValue = chartData.map { it.totalCount }.maxOrNull()?.coerceAtLeast(1L) ?: 1L
-
-                    val activeColor = when (chartMode) {
-                        "gesamt" -> Color(0xFF00FF87)
-                        "hotbox" -> Color(0xFFEF4444)
-                        "einwaehlen" -> Color(0xFF10B981)
-                        "rueckruf" -> Color(0xFF3B82F6)
-                        else -> Color(0xFF00FF87)
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(150.dp)
-                    ) {
-                        if (chartData.isEmpty()) {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "Keine Daten f√ºr diesen Zeitraum",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                )
-                            }
-                        } else {
-                            val barCount = chartData.size
-                            if (barCount <= 8) {
-                                Row(
-                                    modifier = Modifier.fillMaxSize(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.Bottom
-                                ) {
-                                    chartData.forEach { bar ->
-                                        Column(
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            verticalArrangement = Arrangement.Bottom,
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Text(
-                                                text = "${bar.totalCount}",
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = if (bar.totalCount > 0) activeColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                                modifier = Modifier.padding(bottom = 4.dp),
-                                                maxLines = 1
-                                            )
-
-                                            Column(
-                                                modifier = Modifier
-                                                    .fillMaxWidth(0.6f)
-                                                    .height(110.dp),
-                                                verticalArrangement = Arrangement.Bottom,
-                                                horizontalAlignment = Alignment.CenterHorizontally
-                                            ) {
-                                                if (bar.totalCount > 0) {
-                                                    val totalHeightFraction = (bar.totalCount.toFloat() / maxChartValue.toFloat()).coerceIn(0.05f, 1f)
-                                                    Column(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .fillMaxHeight(totalHeightFraction)
-                                                            .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
-                                                    ) {
-                                                        if (bar.notReachedCount > 0) {
-                                                            Box(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .weight(bar.notReachedCount.toFloat())
-                                                                    .background(Color(0xFF94A3B8)) // Gray for nicht erreicht
-                                                            )
-                                                        }
-                                                        if (bar.reachedCount > 0) {
-                                                            Box(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .weight(bar.reachedCount.toFloat())
-                                                                    .background(Color(0xFF10B981)) // Green for erreicht
-                                                            )
-                                                        }
-                                                    }
-                                                } else {
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .height(4.dp)
-                                                            .clip(RoundedCornerShape(2.dp))
-                                                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                                                    )
-                                                }
-                                            }
-
-                                            Spacer(modifier = Modifier.height(4.dp))
-
-                                            Text(
-                                                text = bar.label,
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1
-                                            )
-                                        }
-                                    }
-                                }
-                            } else {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .horizontalScroll(rememberScrollState()),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    verticalAlignment = Alignment.Bottom
-                                ) {
-                                    chartData.forEach { bar ->
-                                        Column(
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            verticalArrangement = Arrangement.Bottom,
-                                            modifier = Modifier.width(48.dp)
-                                        ) {
-                                            Text(
-                                                text = "${bar.totalCount}",
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = if (bar.totalCount > 0) activeColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                                modifier = Modifier.padding(bottom = 4.dp),
-                                                maxLines = 1
-                                            )
-
-                                            Column(
-                                                modifier = Modifier
-                                                    .fillMaxWidth(0.6f)
-                                                    .height(110.dp),
-                                                verticalArrangement = Arrangement.Bottom,
-                                                horizontalAlignment = Alignment.CenterHorizontally
-                                            ) {
-                                                if (bar.totalCount > 0) {
-                                                    val totalHeightFraction = (bar.totalCount.toFloat() / maxChartValue.toFloat()).coerceIn(0.05f, 1f)
-                                                    Column(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .fillMaxHeight(totalHeightFraction)
-                                                            .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
-                                                    ) {
-                                                        if (bar.notReachedCount > 0) {
-                                                            Box(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .weight(bar.notReachedCount.toFloat())
-                                                                    .background(Color(0xFF94A3B8)) // Gray for nicht erreicht
-                                                            )
-                                                        }
-                                                        if (bar.reachedCount > 0) {
-                                                            Box(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .weight(bar.reachedCount.toFloat())
-                                                                    .background(Color(0xFF10B981)) // Green for erreicht
-                                                            )
-                                                        }
-                                                    }
-                                                } else {
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .height(4.dp)
-                                                            .clip(RoundedCornerShape(2.dp))
-                                                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                                                    )
-                                                }
-                                            }
-
-                                            Spacer(modifier = Modifier.height(4.dp))
-
-                                            Text(
-                                                text = bar.label,
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Call list for the selected time interval
-        item {
-            Text(
-                text = "Protokollierte Anrufe (${filteredLogs.size})",
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                modifier = Modifier.padding(top = 8.dp)
-            )
-        }
-
-        if (filteredLogs.isEmpty()) {
-            item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                            shape = RoundedCornerShape(12.dp)
-                        )
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Keine Anrufe in diesem Zeitraum dokumentiert.",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-                    )
-                }
-            }
-        } else {
-            groupedLogs.forEach { (startOfDay, dayLogs) ->
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 16.dp, bottom = 4.dp)
-                    ) {
-                        Text(
-                            text = getDayGroupLabel(startOfDay),
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary,
-                                letterSpacing = 0.5.sp
-                            ),
-                            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
-                        )
-                        HorizontalDivider(
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                            thickness = 1.dp
-                        )
-                    }
-                }
-
-                items(dayLogs, key = { (log, _) -> log.id }) { (log, matchingContact) ->
-                    val meta = getOutcomeMeta(log.outcome)
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp)),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            // Row 1: Name & Hotbox on left, Time on the right
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    modifier = Modifier.weight(1f, fill = false)
-                                ) {
-                                    Text(
-                                        text = matchingContact?.name ?: log.contactName ?: "Unbekannter Kunde",
-                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (matchingContact?.isHotBox == true) {
-                                        Text(
-                                            text = "üî•",
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = "${sdfTime.format(Date(log.timestamp))} Uhr",
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.sp
-                                        ),
-                                        maxLines = 1
-                                    )
-                                }
-                            }
-
-                            // Row 2: Phone number
-                            Text(
-                                text = log.phone,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            )
-
-                            // Row 3: Badges (CallType, Outcome, Duration)
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                // CallType badge
-                                val (typeLabel, typeColor) = when (log.callType) {
-                                    "hotbox" -> "Hotbox üî•" to Color(0xFFEF4444)
-                                    "einwaehlen" -> "Einw√§hlen ‚ö°" to Color(0xFF10B981)
-                                    "rueckruf" -> "R√ºckruf üìû" to Color(0xFF3B82F6)
-                                    else -> "Manuell" to Color(0xFF64748B)
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .background(typeColor.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = typeLabel,
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = typeColor
-                                        )
-                                    )
-                                }
-
-                                // Outcome badge
-                                Box(
-                                    modifier = Modifier
-                                        .background(meta.color.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = meta.label,
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = meta.color
-                                        )
-                                    )
-                                }
-
-                                // Duration if answered/reached
-                                if (log.durationSeconds > 0) {
-                                    val formattedDuration = formatDurationShort(log.durationSeconds)
-                                    Text(
-                                        text = "‚è± $formattedDuration",
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    )
-                                }
-                            }
-
-                            // Note row if note exists
-                            if (!log.note.isNullOrBlank()) {
-                                Text(
-                                    text = log.note,
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
-                                        .padding(8.dp)
-                                )
-                            }
-
-                            HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 2.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                thickness = 1.dp
-                            )
-
-                            // Action buttons at the bottom right
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                // Save / Edit contact button
-                                val icon = if (matchingContact == null) Icons.Default.Add else Icons.Default.Edit
-                                val tooltip = if (matchingContact == null) "Als Kontakt speichern" else "Kontakt bearbeiten"
-                                val tintColor = if (matchingContact == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
-                                
-                                IconButton(
-                                    onClick = { contactToSave = log },
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .background(tintColor.copy(alpha = 0.15f), CircleShape)
-                                ) {
-                                    Icon(
-                                        imageVector = icon,
-                                        contentDescription = tooltip,
-                                        tint = tintColor,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-
-                                // Calendar / Schedule follow-up button
-                                IconButton(
-                                    onClick = {
-                                        historyFollowUpInitialName = matchingContact?.name ?: log.contactName ?: "Kunde"
-                                        historyFollowUpInitialPhone = log.phone
-                                        showAddFollowUpDialogByHistory = true
-                                    },
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f), CircleShape)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.DateRange,
-                                        contentDescription = "Wiedervorlage planen",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-
-                                // Callback button
-                                IconButton(
-                                    onClick = { viewModel.initiateCall(log.phone, matchingContact?.name ?: log.contactName, callType = "rueckruf") },
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .background(Color(0xFF10B981).copy(alpha = 0.15f), CircleShape)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Call,
-                                        contentDescription = "Zur√ºckrufen",
-                                        tint = Color(0xFF10B981),
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    }
-
-    if (contactToSave != null) {
-        val currentLog = contactToSave!!
-        val matchingContact = remember(contacts, currentLog.phone) {
-            val normalizedLogPhone = normalizePhoneNumberFast(currentLog.phone)
-            contacts.firstOrNull {
-                val normalizedContactPhone = normalizePhoneNumberFast(it.phone)
-                normalizedContactPhone == normalizedLogPhone || arePhoneNumbersMatching(it.phone, currentLog.phone)
-            }
-        }
-        SaveContactFromHistoryDialog(
-            log = currentLog,
-            existingContact = matchingContact,
-            hotBoxLists = hotBoxLists,
-            onDismiss = { contactToSave = null },
-            onSave = { name, phone, company, email, isHot, listName ->
-                viewModel.addManualContact(
-                    name = name,
-                    phone = phone,
-                    company = company,
-                    email = email,
-                    isHotBox = isHot,
-                    hotBoxListName = listName
-                )
-                contactToSave = null
-            }
-        )
-    }
-
-    if (newAnnahmeAlert != null) {
-        AlertDialog(
-            onDismissRequest = {
-                viewModel.dismissNewAnnahmeDocumentAlert()
-            },
-            title = {
-                Text("Neue Annahme eingegangen")
-            },
-            text = {
-                Text(
-                    "Die Datei ‚Äû${newAnnahmeAlert?.fileName}‚Äú " +
-                    "wurde neu in Supabase angelegt und ist jetzt " +
-                    "unter History ‚Üí ‚ãÆ ‚Üí Annahme verf√ºgbar."
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.dismissNewAnnahmeDocumentAlert()
-                        showAnnahmeDokumenteDialog = true
-                        viewModel.syncAnnahmeDokumenteNow()
-                    }
-                ) {
-                    Text("Annahme √∂ffnen")
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.dismissNewAnnahmeDocumentAlert()
-                    }
-                ) {
-                    Text("Sp√§ter")
-                }
-            }
-        )
-    }
-
-    if (showAddFollowUpDialogByHistory) {
-        AddFollowUpDialog(
-            contacts = contacts,
-            initialName = historyFollowUpInitialName,
-            initialPhone = historyFollowUpInitialPhone,
-            onDismiss = { showAddFollowUpDialogByHistory = false },
-            onConfirm = { name, phone, note, dueAt, callReason ->
-                viewModel.addManualFollowUp(name, phone, note, dueAt, callReason)
-                showAddFollowUpDialogByHistory = false
-            }
-        )
-    }
-}
-
-@Composable
-fun SaveContactFromHistoryDialog(
-    log: com.example.database.CallLogEntity,
-    existingContact: ContactEntity?,
-    hotBoxLists: Set<String>,
-    onDismiss: () -> Unit,
-    onSave: (name: String, phone: String, company: String, email: String, isHotBox: Boolean, hotBoxListName: String) -> Unit
-) {
-    var name by remember { mutableStateOf(existingContact?.name ?: log.contactName ?: "") }
-    var phone by remember { mutableStateOf(existingContact?.phone ?: log.phone) }
-    var company by remember { mutableStateOf(existingContact?.company ?: "") }
-    var email by remember { mutableStateOf(existingContact?.email ?: "") }
-    var isHotBox by remember { mutableStateOf(existingContact?.isHotBox ?: true) }
-    var selectedListName by remember { mutableStateOf(existingContact?.hotBoxListName ?: if (hotBoxLists.isNotEmpty()) hotBoxLists.first() else "Hotbox") }
-    var showDropdown by remember { mutableStateOf(false) }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Text(
-                    text = if (existingContact == null) "Kontakt speichern & in Hotbox" else "Kontakt bearbeiten",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Name des Kontakts") },
-                    placeholder = { Text("z.B. Max Mustermann") },
-                    singleLine = true,
-                    leadingIcon = {
-                        Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    },
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = phone,
-                    onValueChange = { phone = it },
-                    label = { Text("Telefonnummer") },
-                    singleLine = true,
-                    leadingIcon = {
-                        Icon(imageVector = Icons.Default.Phone, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    },
-                    readOnly = true,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = company,
-                    onValueChange = { company = it },
-                    label = { Text("Firma (Optional)") },
-                    singleLine = true,
-                    leadingIcon = {
-                        Icon(imageVector = Icons.Default.Business, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    },
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = email,
-                    onValueChange = { email = it },
-                    label = { Text("E-Mail (Optional)") },
-                    singleLine = true,
-                    leadingIcon = {
-                        Icon(imageVector = Icons.Default.Email, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    },
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-                        .clickable { isHotBox = !isHotBox }
-                        .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    androidx.compose.material3.Switch(
-                        checked = isHotBox,
-                        onCheckedChange = { isHotBox = it }
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "In Hotbox aufnehmen üî•",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "Aktiviert schnelles Wiederanrufen.",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                if (isHotBox) {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "Hotbox-Liste ausw√§hlen",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            Button(
-                                onClick = { showDropdown = !showDropdown },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(selectedListName, fontSize = 14.sp)
-                                    Icon(
-                                        imageVector = if (showDropdown) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                            
-                            androidx.compose.material3.DropdownMenu(
-                                expanded = showDropdown,
-                                onDismissRequest = { showDropdown = false }
-                            ) {
-                                hotBoxLists.forEach { listName ->
-                                    androidx.compose.material3.DropdownMenuItem(
-                                        text = { Text(listName) },
-                                        onClick = {
-                                            selectedListName = listName
-                                            showDropdown = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Abbrechen")
-                    }
-                    Button(
-                        onClick = {
-                            if (name.isNotBlank()) {
-                                onSave(name, phone, company, email, isHotBox, selectedListName)
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                        enabled = name.isNotBlank(),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Speichern")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun AddFollowUpDialog(
-    contacts: List<ContactEntity> = emptyList(),
-    initialDueAt: Long? = null,
-    initialName: String = "",
-    initialPhone: String = "",
-    onDismiss: () -> Unit,
-    onConfirm: (name: String, phone: String, note: String, dueAt: Long, callReason: String?) -> Unit
-) {
-    val context = LocalContext.current
-    var name by remember { mutableStateOf(initialName) }
-    var phone by remember { mutableStateOf(initialPhone) }
-    var note by remember { mutableStateOf("") }
-    var selectedCallReason by remember { mutableStateOf<String?>(null) }
-    var showContactSuggestions by remember { mutableStateOf(false) }
-
-    // Combined local database + system contacts suggestion
-    var systemSuggestions by remember { mutableStateOf<List<com.example.util.ContactsUtil.SystemContact>>(emptyList()) }
-
-    LaunchedEffect(name) {
-        if (name.length >= 2 && com.example.util.ContactsUtil.hasContactsPermission(context)) {
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    com.example.util.ContactsUtil.searchSystemContacts(context, name)
-                } catch (e: Exception) {
-                    emptyList()
-                }
-            }.let {
-                systemSuggestions = it
-            }
-        } else {
-            systemSuggestions = emptyList()
-        }
-    }
-
-    // Combine local + system contacts into suggestions
-    val filteredContacts = remember(name, contacts) {
-        if (name.isBlank()) {
-            contacts
-        } else {
-            contacts.filter {
-                it.name.contains(name, ignoreCase = true) ||
-                it.phone.contains(name) ||
-                (it.company ?: "").contains(name, ignoreCase = true)
-            }
-        }
-    }
-
-    data class CombinedContactSuggestion(
-        val name: String,
-        val phone: String,
-        val company: String?,
-        val isSystem: Boolean
-    )
-
-    val combinedSuggestions = remember(filteredContacts, systemSuggestions) {
-        val list = mutableListOf<CombinedContactSuggestion>()
-        filteredContacts.forEach {
-            list.add(CombinedContactSuggestion(it.name, it.phone, it.company, isSystem = false))
-        }
-        systemSuggestions.forEach { sys ->
-            if (list.none { it.phone == sys.phone }) {
-                list.add(CombinedContactSuggestion(sys.name, sys.phone, "Systemkontakt", isSystem = true))
-            }
-        }
-        list
-    }
-
-    val defaultCal = Calendar.getInstance().apply {
-        if (initialDueAt != null) {
-            val selectedDateCal = Calendar.getInstance().apply { timeInMillis = initialDueAt }
-            set(Calendar.YEAR, selectedDateCal.get(Calendar.YEAR))
-            set(Calendar.MONTH, selectedDateCal.get(Calendar.MONTH))
-            set(Calendar.DAY_OF_MONTH, selectedDateCal.get(Calendar.DAY_OF_MONTH))
-            // Default to current hour/minute + 1 if on current day, or 10:00 AM on future day
-            val now = Calendar.getInstance()
-            if (selectedDateCal.get(Calendar.YEAR) == now.get(Calendar.YEAR) &&
-                selectedDateCal.get(Calendar.DAY_OF_YEAR) == now.get(Calendar.DAY_OF_YEAR)) {
-                set(Calendar.HOUR_OF_DAY, now.get(Calendar.HOUR_OF_DAY) + 1)
-                set(Calendar.MINUTE, now.get(Calendar.MINUTE))
-            } else {
-                set(Calendar.HOUR_OF_DAY, 10)
-                set(Calendar.MINUTE, 0)
-            }
-        } else {
-            add(Calendar.HOUR_OF_DAY, 1)
-        }
-        set(Calendar.SECOND, 0)
-        set(Calendar.MILLISECOND, 0)
-    }
-    var dueAt by remember { mutableStateOf(defaultCal.timeInMillis) }
-
-    var showWheelTimePicker by remember { mutableStateOf(false) }
-    var tempYear by remember { mutableStateOf(0) }
-    var tempMonth by remember { mutableStateOf(0) }
-    var tempDay by remember { mutableStateOf(0) }
-
-    val formattedDateTime = remember(dueAt) {
-        val sdf = SimpleDateFormat("dd.MM.yyyy 'um' HH:mm 'Uhr'", Locale.GERMANY)
-        sdf.format(Date(dueAt))
-    }
-
-    val showDateTimePicker = {
-        val currentCalendar = Calendar.getInstance().apply { timeInMillis = dueAt }
-        val dateDialog = DatePickerDialog(
-            context,
-            null,
-            currentCalendar.get(Calendar.YEAR),
-            currentCalendar.get(Calendar.MONTH),
-            currentCalendar.get(Calendar.DAY_OF_MONTH)
-        )
-        dateDialog.datePicker.init(
-            currentCalendar.get(Calendar.YEAR),
-            currentCalendar.get(Calendar.MONTH),
-            currentCalendar.get(Calendar.DAY_OF_MONTH)
-        ) { _, year, month, dayOfMonth ->
-            dateDialog.dismiss()
-            tempYear = year
-            tempMonth = month
-            tempDay = dayOfMonth
-            showWheelTimePicker = true
-        }
-        dateDialog.show()
-    }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Text(
-                    text = "Neue Wiedervorlage einrichten",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedTextField(
-                        value = name,
-                        onValueChange = {
-                            name = it
-                            showContactSuggestions = true
-                        },
-                        label = { Text("Name des Kunden") },
-                        placeholder = { Text("z.B. Max Mustermann") },
-                        singleLine = true,
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.Person,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        },
-                        trailingIcon = {
-                            if (name.isNotEmpty()) {
-                                IconButton(onClick = {
-                                    name = ""
-                                    phone = ""
-                                    showContactSuggestions = false
-                                }) {
-                                    Icon(Icons.Default.Close, contentDescription = "Leeren")
-                                }
-                            } else {
-                                IconButton(onClick = {
-                                    showContactSuggestions = !showContactSuggestions
-                                }) {
-                                    Icon(Icons.Default.Search, contentDescription = "Kontakte suchen")
-                                }
-                            }
-                        },
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    AnimatedVisibility(visible = showContactSuggestions && combinedSuggestions.isNotEmpty()) {
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 4.dp)
-                                .heightIn(max = 160.dp),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f)),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-                        ) {
-                            LazyColumn(
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                item {
-                                    Text(
-                                        text = "Kunde ausw√§hlen / suchen:",
-                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                                    )
-                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                                }
-                                items(combinedSuggestions, key = { "${it.name}_${it.phone}" }) { suggestion ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                name = suggestion.name
-                                                phone = suggestion.phone
-                                                showContactSuggestions = false
-                                            }
-                                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(28.dp)
-                                                .background(
-                                                    if (suggestion.isSystem) Color(0xFF10B981) else MaterialTheme.colorScheme.primary,
-                                                    CircleShape
-                                                ),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                text = suggestion.name.firstOrNull()?.toString()?.uppercase() ?: "?",
-                                                color = MaterialTheme.colorScheme.onPrimary,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 11.sp
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Column {
-                                            Text(
-                                                text = suggestion.name,
-                                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                            Text(
-                                                text = suggestion.phone + if (!suggestion.company.isNullOrBlank()) " ‚Ä¢ ${suggestion.company}" else "",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (showWheelTimePicker) {
-                    val currentCalendar = Calendar.getInstance().apply { timeInMillis = dueAt }
-                    CustomWheelTimePickerDialog(
-                        initialHour = currentCalendar.get(Calendar.HOUR_OF_DAY),
-                        initialMinute = currentCalendar.get(Calendar.MINUTE),
-                        onDismiss = { showWheelTimePicker = false },
-                        onConfirm = { hour, minute ->
-                            val cal = Calendar.getInstance().apply {
-                                set(Calendar.YEAR, tempYear)
-                                set(Calendar.MONTH, tempMonth)
-                                set(Calendar.DAY_OF_MONTH, tempDay)
-                                set(Calendar.HOUR_OF_DAY, hour)
-                                set(Calendar.MINUTE, minute)
-                                set(Calendar.SECOND, 0)
-                                set(Calendar.MILLISECOND, 0)
-                            }
-                            dueAt = cal.timeInMillis
-                            showWheelTimePicker = false
-                        }
-                    )
-                }
-
-                OutlinedTextField(
-                    value = phone,
-                    onValueChange = { phone = it },
-                    label = { Text("Telefonnummer") },
-                    placeholder = { Text("z.B. 01701234567") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = note,
-                    onValueChange = { note = it },
-                    label = { Text("Notiz / Anmerkung (Optional)") },
-                    placeholder = { Text("z.B. Angebot besprechen") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                // Beautifully selectable call reason chips
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = "Grund des Anrufs:",
-                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    
-                    val reasons = listOf(
-                        "NK Erstkontakt",
-                        "BK FV",
-                        "Fehlende Dokumente",
-                        "Angebot besprechen",
-                        "zum Stand fragen"
-                    )
-                    
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            reasons.take(2).forEach { r ->
-                                val isSelected = selectedCallReason == r
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) Color(0xFF10B981).copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant)
-                                        .border(
-                                            width = 1.dp,
-                                            color = if (isSelected) Color(0xFF10B981) else Color.Transparent,
-                                            shape = RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable {
-                                            selectedCallReason = if (isSelected) null else r
-                                        }
-                                        .padding(horizontal = 8.dp, vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = r,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                        
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            reasons.drop(2).forEach { r ->
-                                val isSelected = selectedCallReason == r
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) Color(0xFF10B981).copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant)
-                                        .border(
-                                            width = 1.dp,
-                                            color = if (isSelected) Color(0xFF10B981) else Color.Transparent,
-                                            shape = RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable {
-                                            selectedCallReason = if (isSelected) null else r
-                                        }
-                                        .padding(horizontal = 8.dp, vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = r,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "Erinnerungszeitpunkt:",
-                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = formattedDateTime,
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        
-                        IconButton(
-                            onClick = showDateTimePicker,
-                            modifier = Modifier
-                                .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
-                                .size(36.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.DateRange,
-                                contentDescription = "Termin w√§hlen",
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("Abbrechen")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            if (name.isNotBlank() && phone.isNotBlank()) {
-                                onConfirm(name, phone, note, dueAt, selectedCallReason)
-                            }
-                        },
-                        enabled = name.isNotBlank() && phone.isNotBlank(),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
-                    ) {
-                        Text("Einrichten")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun RingtonePickerDialog(
-    onDismiss: () -> Unit,
-    onConfirm: (uri: Uri, title: String) -> Unit
-) {
-    val context = LocalContext.current
-    
-    val ringtones = remember {
-        val list = mutableListOf<Pair<String, Uri>>()
-        val defaultAlarm = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-        if (defaultAlarm != null) {
-            list.add("Standard-Weckton" to defaultAlarm)
-        }
-        
-        try {
-            val manager = RingtoneManager(context).apply {
-                setType(RingtoneManager.TYPE_ALARM or RingtoneManager.TYPE_RINGTONE)
-            }
-            val cursor = manager.cursor
-            if (cursor != null) {
-                while (cursor.moveToNext()) {
-                    val title = cursor.getString(RingtoneManager.TITLE_COLUMN_INDEX)
-                    val uri = manager.getRingtoneUri(cursor.position)
-                    if (uri != null && title != null) {
-                        list.add(title to uri)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        list
-    }
-
-    var selectedUri by remember { mutableStateOf(com.example.receiver.AlarmSoundPlayer.getSelectedRingtoneUri(context)) }
-    var selectedTitle by remember { mutableStateOf(com.example.receiver.AlarmSoundPlayer.getSelectedRingtoneTitle(context)) }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            com.example.receiver.AlarmSoundPlayer.stopTestRingtone()
-        }
-    }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 450.dp)
-                .padding(16.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp)
-            ) {
-                Text(
-                    text = "Weckton ausw√§hlen",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-
-                Text(
-                    text = "Tippen Sie auf einen Ton, um ihn Probe zu h√∂ren:",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    items(ringtones, key = { it.first }) { (title, uri) ->
-                        val isSelected = selectedUri.toString() == uri.toString()
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else Color.Transparent)
-                                .clickable {
-                                    selectedUri = uri
-                                    selectedTitle = title
-                                    com.example.receiver.AlarmSoundPlayer.playTestSound(context, uri)
-                                }
-                                .padding(horizontal = 8.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = isSelected,
-                                onClick = {
-                                    selectedUri = uri
-                                    selectedTitle = title
-                                    com.example.receiver.AlarmSoundPlayer.playTestSound(context, uri)
-                                }
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = title,
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                ),
-                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(
-                        onClick = {
-                            com.example.receiver.AlarmSoundPlayer.stopTestRingtone()
-                            onDismiss()
-                        }
-                    ) {
-                        Text("Abbrechen")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            com.example.receiver.AlarmSoundPlayer.stopTestRingtone()
-                            onConfirm(selectedUri, selectedTitle)
-                        },
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Ausw√§hlen")
-                    }
-                }
-            }
-        }
-    }
-}
-
-data class CalendarDay(
-    val dayNum: Int,
-    val month: Int,
-    val year: Int,
-    val isCurrentMonth: Boolean
-)
-
-@Composable
-fun KalenderTabContent(
-    viewModel: StromrufViewModel,
-    activeFollowUps: List<FollowUpEntity>,
-    onAddFollowUpClick: (Long) -> Unit
-) {
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    
-    val todayCal = Calendar.getInstance().apply {
-        set(Calendar.HOUR_OF_DAY, 0)
-        set(Calendar.MINUTE, 0)
-        set(Calendar.SECOND, 0)
-        set(Calendar.MILLISECOND, 0)
-    }
-    val todayMillis = todayCal.timeInMillis
-
-    // State for selected day (millisecond timestamp representing 00:00:00 of selected date)
-    var selectedDateMillis by remember { mutableStateOf(todayCal.timeInMillis) }
-    var showDayDetailSheet by remember { mutableStateOf(false) }
-
-    // Modern infinite month pagination state (5000 is our pivot representing today's month/year)
-    val pagerState = rememberPagerState(
-        initialPage = 5000,
-        pageCount = { 10000 }
-    )
-
-    val monthNames = remember {
-        listOf(
-            "Januar", "Februar", "M√§rz", "April", "Mai", "Juni",
-            "Juli", "August", "September", "Oktober", "November", "Dezember"
-        )
-    }
-
-    // Determine current month/year based on pager position
-    val pageOffset = pagerState.currentPage - 5000
-    val currentCal = remember(pagerState.currentPage) {
-        Calendar.getInstance().apply {
-            set(Calendar.YEAR, 2026) // Use 2026 as reference base year
-            set(Calendar.MONTH, 5) // June is month 5
-            add(Calendar.MONTH, pageOffset)
-        }
-    }
-    val currentMonth = currentCal.get(Calendar.MONTH)
-    val currentYear = currentCal.get(Calendar.YEAR)
-
-    // Build filtered follow-ups for the selected day
-    val selectedCal = Calendar.getInstance().apply { timeInMillis = selectedDateMillis }
-    val selectedDay = selectedCal.get(Calendar.DAY_OF_MONTH)
-    val selectedMonth = selectedCal.get(Calendar.MONTH)
-    val selectedYear = selectedCal.get(Calendar.YEAR)
-
-    val todaysFollowUps = remember(activeFollowUps, selectedDateMillis) {
-        activeFollowUps.filter {
-            val cal = Calendar.getInstance().apply { timeInMillis = it.dueAt }
-            cal.get(Calendar.DAY_OF_MONTH) == selectedDay &&
-            cal.get(Calendar.MONTH) == selectedMonth &&
-            cal.get(Calendar.YEAR) == selectedYear
-        }.sortedBy { it.dueAt }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp)
-    ) {
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Month Selection Header Card
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
-            shape = RoundedCornerShape(16.dp),
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(
-                    onClick = {
-                        coroutineScope.launch {
-                            pagerState.animateScrollToPage(pagerState.currentPage - 1)
-                        }
-                    }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ChevronLeft,
-                        contentDescription = "Vorheriger Monat",
-                        tint = Color(0xFF00FF87)
-                    )
-                }
-
-                Text(
-                    text = "${monthNames[currentMonth]} $currentYear",
-                    style = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        color = Color.White,
-                        letterSpacing = 0.5.sp
-                    )
-                )
-
-                IconButton(
-                    onClick = {
-                        coroutineScope.launch {
-                            pagerState.animateScrollToPage(pagerState.currentPage + 1)
-                        }
-                    }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ChevronRight,
-                        contentDescription = "N√§chster Monat",
-                        tint = Color(0xFF00FF87)
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Weekdays labels
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceAround
-        ) {
-            listOf("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So").forEach { dayLabel ->
-                Text(
-                    text = dayLabel,
-                    style = MaterialTheme.typography.labelMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White.copy(alpha = 0.6f)
-                    ),
-                    modifier = Modifier.weight(1f),
-                    textAlign = TextAlign.Center
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Smooth interactive swipeable calendar grid pager
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier
-                .fillMaxWidth()
-                .animateContentSize()
-        ) { page ->
-            val offset = page - 5000
-            val pageCal = remember(page) {
-                Calendar.getInstance().apply {
-                    set(Calendar.YEAR, 2026)
-                    set(Calendar.MONTH, 5)
-                    add(Calendar.MONTH, offset)
-                }
-            }
-            val pageYear = pageCal.get(Calendar.YEAR)
-            val pageMonth = pageCal.get(Calendar.MONTH)
-
-            // Dynamic grid calculation with previous & next month dates visible in a lighter tone
-            val daysInPageMonth = remember(pageYear, pageMonth) {
-                val list = mutableListOf<CalendarDay>()
-                
-                val c = Calendar.getInstance().apply {
-                    set(Calendar.YEAR, pageYear)
-                    set(Calendar.MONTH, pageMonth)
-                    set(Calendar.DAY_OF_MONTH, 1)
-                }
-                val totalDays = c.getActualMaximum(Calendar.DAY_OF_MONTH)
-                val firstDayOfWeek = c.get(Calendar.DAY_OF_WEEK)
-                val prevPaddingCount = if (firstDayOfWeek == Calendar.SUNDAY) 6 else firstDayOfWeek - 2
-                
-                // Fill previous month padding
-                if (prevPaddingCount > 0) {
-                    val prevMonthCal = Calendar.getInstance().apply {
-                        set(Calendar.YEAR, pageYear)
-                        set(Calendar.MONTH, pageMonth)
-                        add(Calendar.MONTH, -1)
-                    }
-                    val prevMonthTotal = prevMonthCal.getActualMaximum(Calendar.DAY_OF_MONTH)
-                    val prevMonth = prevMonthCal.get(Calendar.MONTH)
-                    val prevYear = prevMonthCal.get(Calendar.YEAR)
-                    val startDay = prevMonthTotal - prevPaddingCount + 1
-                    for (i in 0 until prevPaddingCount) {
-                        list.add(CalendarDay(startDay + i, prevMonth, prevYear, isCurrentMonth = false))
-                    }
-                }
-                
-                // Fill current month
-                for (day in 1..totalDays) {
-                    list.add(CalendarDay(day, pageMonth, pageYear, isCurrentMonth = true))
-                }
-                
-                // Fill next month padding
-                val remainingSlots = list.size % 7
-                if (remainingSlots > 0) {
-                    val nextPaddingCount = 7 - remainingSlots
-                    val nextMonthCal = Calendar.getInstance().apply {
-                        set(Calendar.YEAR, pageYear)
-                        set(Calendar.MONTH, pageMonth)
-                        add(Calendar.MONTH, 1)
-                    }
-                    val nextMonth = nextMonthCal.get(Calendar.MONTH)
-                    val nextYear = nextMonthCal.get(Calendar.YEAR)
-                    for (day in 1..nextPaddingCount) {
-                        list.add(CalendarDay(day, nextMonth, nextYear, isCurrentMonth = false))
-                    }
-                }
-                list
-            }
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF1E293B).copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(16.dp))
-                    .padding(6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                daysInPageMonth.chunked(7).forEach { weekDays ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        weekDays.forEach { day ->
-                            val cellCal = Calendar.getInstance().apply {
-                                set(Calendar.YEAR, day.year)
-                                set(Calendar.MONTH, day.month)
-                                set(Calendar.DAY_OF_MONTH, day.dayNum)
-                                set(Calendar.HOUR_OF_DAY, 0)
-                                set(Calendar.MINUTE, 0)
-                                set(Calendar.SECOND, 0)
-                                set(Calendar.MILLISECOND, 0)
-                            }
-                            val cellMillis = cellCal.timeInMillis
-                            val isToday = cellMillis == todayMillis
-                            
-                            val isSelected = Calendar.getInstance().apply {
-                                timeInMillis = selectedDateMillis
-                            }.let {
-                                it.get(Calendar.DAY_OF_MONTH) == day.dayNum &&
-                                it.get(Calendar.MONTH) == day.month &&
-                                it.get(Calendar.YEAR) == day.year
-                            }
-
-                            val cellFollowUps = remember(activeFollowUps, day.dayNum, day.month, day.year) {
-                                activeFollowUps.filter {
-                                    val fCal = Calendar.getInstance().apply { timeInMillis = it.dueAt }
-                                    fCal.get(Calendar.DAY_OF_MONTH) == day.dayNum &&
-                                    fCal.get(Calendar.MONTH) == day.month &&
-                                    fCal.get(Calendar.YEAR) == day.year
-                                }
-                            }
-
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .aspectRatio(0.85f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        when {
-                                            isSelected -> Color(0xFF00FF87)
-                                            isToday -> Color(0xFF00FF87).copy(alpha = 0.15f)
-                                            day.isCurrentMonth -> Color(0xFF1E293B).copy(alpha = 0.5f)
-                                            else -> Color(0xFF1E293B).copy(alpha = 0.2f)
-                                        }
-                                    )
-                                    .border(
-                                        width = 1.dp,
-                                        color = when {
-                                            isSelected -> Color.White
-                                            cellFollowUps.isNotEmpty() -> Color(0xFFFFD700)
-                                            isToday -> Color(0xFF00FF87)
-                                            else -> Color.White.copy(alpha = 0.05f)
-                                        },
-                                        shape = RoundedCornerShape(8.dp)
-                                    )
-                                    .clickable {
-                                        selectedDateMillis = cellMillis
-                                        showDayDetailSheet = true
-                                    }
-                                    .padding(4.dp),
-                                contentAlignment = Alignment.TopCenter
-                            ) {
-                                if (cellFollowUps.isNotEmpty()) {
-                                    val transition = rememberInfiniteTransition(label = "supersaiyan_${day.dayNum}")
-                                    val auraGlow by transition.animateFloat(
-                                        initialValue = 0.3f,
-                                        targetValue = 0.95f,
-                                        animationSpec = infiniteRepeatable(
-                                            animation = tween(400, easing = FastOutLinearInEasing),
-                                            repeatMode = RepeatMode.Reverse
-                                        ),
-                                        label = "glow"
-                                    )
-                                    val lightningToggleFloat by transition.animateFloat(
-                                        initialValue = 0f,
-                                        targetValue = 5f,
-                                        animationSpec = infiniteRepeatable(
-                                            animation = tween(1500, easing = LinearEasing),
-                                            repeatMode = RepeatMode.Restart
-                                        ),
-                                        label = "lightning"
-                                    )
-                                    val lightningToggle = lightningToggleFloat.toInt()
-                                    
-                                    Canvas(modifier = Modifier.matchParentSize()) {
-                                        val width = size.width
-                                        val height = size.height
-                                        
-                                        // Base aura glow
-                                        drawRoundRect(
-                                            color = Color(0xFFFFD700),
-                                            size = size,
-                                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx(), 8.dp.toPx()),
-                                            alpha = 0.18f * auraGlow
-                                        )
-                                        
-                                        // Inner electric outline
-                                        drawRoundRect(
-                                             color = if (lightningToggle % 2 == 0) Color(0xFF00E5FF) else Color(0xFFFFD700),
-                                             size = size,
-                                             cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx(), 8.dp.toPx()),
-                                             style = Stroke(width = 1.5.dp.toPx()),
-                                             alpha = 0.4f + (0.5f * auraGlow)
-                                        )
-                                        
-                                        // Lightning bolts path
-                                        val boltPath = Path().apply {
-                                             when (lightningToggle) {
-                                                 0 -> {
-                                                     moveTo(width * 0.2f, height * 0.1f)
-                                                     lineTo(width * 0.5f, height * 0.4f)
-                                                     lineTo(width * 0.35f, height * 0.45f)
-                                                     lineTo(width * 0.7f, height * 0.9f)
-                                                 }
-                                                 1 -> {
-                                                     moveTo(width * 0.8f, height * 0.2f)
-                                                     lineTo(width * 0.6f, height * 0.5f)
-                                                     lineTo(width * 0.75f, height * 0.55f)
-                                                     lineTo(width * 0.4f, height * 0.85f)
-                                                 }
-                                                 2 -> {
-                                                     moveTo(width * 0.5f, height * 0.15f)
-                                                     lineTo(width * 0.3f, height * 0.45f)
-                                                     lineTo(width * 0.6f, height * 0.5f)
-                                                     lineTo(width * 0.2f, height * 0.8f)
-                                                 }
-                                                 3 -> {
-                                                     moveTo(width * 0.3f, height * 0.2f)
-                                                     lineTo(width * 0.5f, height * 0.5f)
-                                                     lineTo(width * 0.4f, height * 0.55f)
-                                                     lineTo(width * 0.8f, height * 0.8f)
-                                                 }
-                                                 else -> {
-                                                     moveTo(width * 0.5f, height * 0.3f)
-                                                     lineTo(width * 0.6f, height * 0.45f)
-                                                     lineTo(width * 0.55f, height * 0.5f)
-                                                     lineTo(width * 0.65f, height * 0.7f)
-                                                 }
-                                             }
-                                        }
-                                        
-                                        drawPath(
-                                             path = boltPath,
-                                             color = if (lightningToggle % 3 == 0) Color(0xFFFFEB3B) else Color(0xFF00E5FF),
-                                             style = Stroke(width = 1.2.dp.toPx()),
-                                             alpha = 0.75f + (0.25f * auraGlow)
-                                        )
-                                    }
-                                }
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                                    modifier = Modifier.fillMaxSize()
-                                ) {
-                                    Text(
-                                        text = day.dayNum.toString(),
-                                        style = TextStyle(
-                                            fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Medium,
-                                            fontSize = 11.sp,
-                                            color = when {
-                                                isSelected -> Color(0xFF0F172A)
-                                                isToday -> Color(0xFF00FF87)
-                                                day.isCurrentMonth -> Color.White
-                                                else -> Color.White.copy(alpha = 0.35f)
-                                            }
-                                        )
-                                    )
-                                    
-                                    if (cellFollowUps.isNotEmpty()) {
-                                        Column(
-                                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .fillMaxWidth()
-                                        ) {
-                                            cellFollowUps.take(2).forEach { followup ->
-                                                val textCol = if (isSelected) {
-                                                    Color(0xFF0F172A)
-                                                } else if (day.isCurrentMonth) {
-                                                    Color(0xFF00FF87)
-                                                } else {
-                                                    Color(0xFF00FF87).copy(alpha = 0.5f)
-                                                }
-                                                val bgCol = if (isSelected) Color.Black.copy(alpha = 0.08f) else Color(0xFF00FF87).copy(alpha = 0.12f)
-                                                
-                                                val displayText = remember(followup.contactName, followup.note) {
-                                                    if (followup.note?.isNotEmpty() == true) {
-                                                        "${followup.contactName}\n${followup.note}"
-                                                    } else {
-                                                        followup.contactName
-                                                    }
-                                                }
-                                                
-                                                Box(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .clip(RoundedCornerShape(3.dp))
-                                                        .background(bgCol)
-                                                        .padding(horizontal = 2.dp, vertical = 1.dp)
-                                                ) {
-                                                    Text(
-                                                        text = displayText,
-                                                        style = TextStyle(
-                                                            fontSize = 8.sp,
-                                                            fontWeight = FontWeight.SemiBold,
-                                                            color = textCol,
-                                                            lineHeight = 9.sp
-                                                        ),
-                                                        maxLines = 2,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                }
-                                            }
-                                            if (cellFollowUps.size > 2) {
-                                                Text(
-                                                    text = "+${cellFollowUps.size - 2}",
-                                                    style = TextStyle(
-                                                        fontSize = 8.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = if (isSelected) Color(0xFF0F172A) else Color.White.copy(alpha = 0.6f)
-                                                    ),
-                                                    modifier = Modifier.align(Alignment.CenterHorizontally)
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        Spacer(modifier = Modifier.weight(1f))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Selected Day Header & Add Button
-        val formattedSelectedDay = remember(selectedDateMillis) {
-            val sdf = SimpleDateFormat("EEEE, dd. MMMM yyyy", Locale.GERMANY)
-            sdf.format(Date(selectedDateMillis))
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Termine am",
-                    style = MaterialTheme.typography.bodySmall.copy(color = Color.White.copy(alpha = 0.6f))
-                )
-                Text(
-                    text = formattedSelectedDay,
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Button(
-                onClick = { onAddFollowUpClick(selectedDateMillis) },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "Termin hinzuf√ºgen", modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Neu", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // List of Follow-Ups for Selected Day (Inline, as simple preview list)
-        if (todaysFollowUps.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .background(
-                        color = Color(0xFF1E293B).copy(alpha = 0.2f),
-                        shape = RoundedCornerShape(16.dp)
-                    )
-                    .border(
-                        width = 1.dp,
-                        color = Color.White.copy(alpha = 0.05f),
-                        shape = RoundedCornerShape(16.dp)
-                    )
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.DateRange,
-                        contentDescription = null,
-                        tint = Color.White.copy(alpha = 0.3f),
-                        modifier = Modifier.size(36.dp)
-                    )
-                    Text(
-                        text = "Keine Wiedervorlagen f√ºr diesen Tag geplant.",
-                        style = MaterialTheme.typography.bodyMedium.copy(color = Color.White.copy(alpha = 0.5f)),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = PaddingValues(bottom = 16.dp)
-            ) {
-                items(todaysFollowUps, key = { it.id }) { followup ->
-                    val now = System.currentTimeMillis()
-                    val isOverdue = followup.dueAt < now
-                    FollowUpCard(
-                        followup = followup,
-                        overdue = isOverdue,
-                        showTimeOnly = true,
-                        onCallClick = { viewModel.initiateCall(followup.contactPhone, followup.contactName, followup.contactId, callType = "rueckruf") },
-                        onCompleteClick = { viewModel.completeFollowUp(followup.id) },
-                        onDeleteClick = { viewModel.deleteFollowUp(followup.id) },
-                        onRescheduleClick = { newDueAt ->
-                            viewModel.rescheduleFollowUp(followup.id, newDueAt)
-                        }
-                    )
-                }
-            }
-        }
-
-        // Beautiful day detail list overlay taking up to 70% of the screen height
-        if (showDayDetailSheet) {
-            Dialog(
-                onDismissRequest = { showDayDetailSheet = false },
-                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.4f))
-                        .clickable { showDayDetailSheet = false },
-                    contentAlignment = Alignment.BottomCenter
-                ) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .fillMaxHeight(0.7f) // EXACTLY 70% of screen height
-                            .border(1.dp, Color(0xFF00FF87).copy(alpha = 0.3f), RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-                            .clickable(enabled = true, onClick = {}, interactionSource = remember { MutableInteractionSource() }, indication = null),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
-                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(20.dp)
-                        ) {
-                            // Header Row
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Termine am",
-                                        style = MaterialTheme.typography.bodySmall.copy(color = Color.White.copy(alpha = 0.6f))
-                                    )
-                                    Text(
-                                        text = formattedSelectedDay,
-                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Button(
-                                        onClick = { 
-                                            showDayDetailSheet = false
-                                            onAddFollowUpClick(selectedDateMillis) 
-                                        },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                                    ) {
-                                        Icon(Icons.Default.Add, contentDescription = "Termin hinzuf√ºgen", modifier = Modifier.size(16.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Neu", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                    
-                                    IconButton(
-                                        onClick = { showDayDetailSheet = false },
-                                        modifier = Modifier
-                                            .background(Color.White.copy(alpha = 0.1f), CircleShape)
-                                            .size(36.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Close,
-                                            contentDescription = "Schlie√üen",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                }
-                            }
-                            
-                            HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 12.dp),
-                                color = Color.White.copy(alpha = 0.1f)
-                            )
-                            
-                            if (todaysFollowUps.isEmpty()) {
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxWidth(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.DateRange,
-                                            contentDescription = null,
-                                            tint = Color.White.copy(alpha = 0.3f),
-                                            modifier = Modifier.size(48.dp)
-                                        )
-                                        Text(
-                                            text = "Keine Wiedervorlagen f√ºr diesen Tag geplant.",
-                                            style = MaterialTheme.typography.bodyMedium.copy(color = Color.White.copy(alpha = 0.5f)),
-                                            textAlign = TextAlign.Center
-                                        )
-                                        OutlinedButton(
-                                            onClick = { 
-                                                showDayDetailSheet = false
-                                                onAddFollowUpClick(selectedDateMillis) 
-                                            },
-                                            shape = RoundedCornerShape(8.dp),
-                                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF00FF87)),
-                                            border = BorderStroke(1.dp, Color(0xFF00FF87).copy(alpha = 0.4f))
-                                        ) {
-                                            Text("Wiedervorlage einrichten")
-                                        }
-                                    }
-                                }
-                            } else {
-                                LazyColumn(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                                    contentPadding = PaddingValues(bottom = 16.dp)
-                                ) {
-                                    items(todaysFollowUps, key = { it.id }) { followup ->
-                                        val now = System.currentTimeMillis()
-                                        val isOverdue = followup.dueAt < now
-                                        FollowUpCard(
-                                            followup = followup,
-                                            overdue = isOverdue,
-                                            showTimeOnly = true,
-                                            onCallClick = { 
-                                                showDayDetailSheet = false
-                                                viewModel.initiateCall(followup.contactPhone, followup.contactName, followup.contactId, callType = "rueckruf") 
-                                            },
-                                            onCompleteClick = { viewModel.completeFollowUp(followup.id) },
-                                            onDeleteClick = { viewModel.deleteFollowUp(followup.id) },
-                                            onRescheduleClick = { newDueAt ->
-                                                viewModel.rescheduleFollowUp(followup.id, newDueAt)
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun SettingsDialog(
-    onDismiss: () -> Unit,
-    appTheme: String,
-    onThemeChange: (String) -> Unit,
-    bgStyle: String,
-    onBgStyleChange: (String) -> Unit,
-    screenBrightness: Float,
-    onBrightnessChange: (Float) -> Unit,
-    alarmEnabled: Boolean,
-    onAlarmToggle: (Boolean) -> Unit,
-    selectedRingtoneTitle: String,
-    onSelectRingtoneClick: () -> Unit,
-    autoCallDelaySeconds: Int,
-    onAutoCallDelaySecondsChange: (Int) -> Unit,
-    preferredAudioDevice: String,
-    onPreferredAudioDeviceChange: (String) -> Unit,
-    clipboardBubblePosition: String,
-    onClipboardBubblePositionChange: (String) -> Unit,
-    clipboardBubbleOnLocalCopy: Boolean = false,
-    onClipboardBubbleOnLocalCopyChange: (Boolean) -> Unit = {},
-    onSignOut: (() -> Unit)? = null,
-    isSimulationModeEnabled: Boolean = false,
-    onSimulationModeToggle: (Boolean) -> Unit = {},
-    isDefaultDialer: Boolean = false,
-    isCallPermissionGranted: Boolean = false,
-    onRequestDefaultDialer: () -> Unit = {},
-    onRequestCallPermission: () -> Unit = {}
-) {
-    val currentTheme = com.example.ui.theme.LocalThemeConfig.current
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = currentTheme.cardBackground),
-            border = BorderStroke(1.dp, currentTheme.primaryColor.copy(alpha = 0.3f)),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Einstellungen",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = Color.White
-                    )
-                    IconButton(onClick = onDismiss) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = "Schlie√üen", tint = Color.White)
-                    }
-                }
-                
-                Divider(color = Color.White.copy(alpha = 0.1f))
-                
-                // Theme Brightness/Appearance
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Star, contentDescription = null, tint = currentTheme.primaryColor, modifier = Modifier.size(18.dp))
-                        Text(
-                            text = "Erscheinungsbild",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        val themeOptions = listOf("system" to "System", "light" to "Hell", "dark" to "Dunkel")
-                        themeOptions.forEach { (key, label) ->
-                            val isSelected = appTheme == key
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) currentTheme.primaryColor else Color.White.copy(alpha = 0.05f))
-                                    .border(
-                                        width = 1.dp,
-                                        color = if (isSelected) currentTheme.primaryColor else Color.White.copy(alpha = 0.1f),
-                                        shape = RoundedCornerShape(8.dp)
-                                    )
-                                    .clickable { onThemeChange(key) }
-                                    .padding(vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) Color.Black else Color.White
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // New Futuristic Background / 3D design styles
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Favorite, contentDescription = null, tint = currentTheme.primaryColor, modifier = Modifier.size(18.dp))
-                        Text(
-                            text = "3D Design & Hintergrund",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-                    
-                    val bgStyleOptions = listOf(
-                        "platinum_metal" to "Platinum Metal ü§ñ",
-                        "gold_luxury" to "Gold Luxury üíé",
-                        "cyber_voltage" to "Cyber Voltage ‚ö°",
-                        "rose_metal" to "Rose Metal üåπ",
-                        "industrial_steel" to "Industrial Steel üè≠"
-                    )
-                    
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        bgStyleOptions.chunked(2).forEach { rowOptions ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                rowOptions.forEach { (key, label) ->
-                                    val isSelected = bgStyle == key
-                                    val config = com.example.ui.theme.getThemeStyleConfig(key)
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(
-                                                if (isSelected) config.primaryColor.copy(alpha = 0.18f) 
-                                                else Color.White.copy(alpha = 0.04f)
-                                            )
-                                            .border(
-                                                width = 1.dp,
-                                                color = if (isSelected) config.primaryColor else Color.White.copy(alpha = 0.1f),
-                                                shape = RoundedCornerShape(8.dp)
-                                            )
-                                            .clickable { onBgStyleChange(key) }
-                                            .padding(vertical = 10.dp, horizontal = 8.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(8.dp)
-                                                    .background(config.primaryColor, CircleShape)
-                                            )
-                                            Text(
-                                                text = label,
-                                                style = MaterialTheme.typography.bodySmall.copy(
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color.White
-                                                )
-                                            )
-                                        }
-                                    }
-                                }
-                                if (rowOptions.size == 1) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = currentTheme.primaryColor, modifier = Modifier.size(18.dp))
-                        Text(
-                            text = "Bildschirmhelligkeit",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = if (screenBrightness < 0f) "Systemgesteuert" else "${(screenBrightness * 100).toInt()}% Helligkeit",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.7f)
-                        )
-                        TextButton(
-                            onClick = { onBrightnessChange(-1f) },
-                            contentPadding = PaddingValues(0.dp)
-                        ) {
-                            Text("Automatisch", color = currentTheme.primaryColor, fontSize = 12.sp)
-                        }
-                    }
-                    
-                    Slider(
-                        value = if (screenBrightness < 0f) 0.5f else screenBrightness,
-                        onValueChange = { onBrightnessChange(it.coerceIn(0.1f, 1.0f)) },
-                        valueRange = 0.1f..1.0f,
-                        colors = SliderDefaults.colors(
-                            thumbColor = currentTheme.primaryColor,
-                            activeTrackColor = currentTheme.primaryColor,
-                            inactiveTrackColor = Color.White.copy(alpha = 0.2f)
-                        )
-                    )
-                }
-                
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Notifications, contentDescription = null, tint = currentTheme.primaryColor, modifier = Modifier.size(18.dp))
-                        Text(
-                            text = "Wecker & R√ºckruf-T√∂ne",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text("Lauten Weckruf aktivieren", style = MaterialTheme.typography.bodySmall, color = Color.White)
-                            Text(
-                                "Spielt lauten Klingelton bei f√§lligen R√ºckrufen",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White.copy(alpha = 0.5f)
-                            )
-                        }
-                        Switch(
-                            checked = alarmEnabled,
-                            onCheckedChange = onAlarmToggle,
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = currentTheme.primaryColor,
-                                checkedTrackColor = currentTheme.primaryColor.copy(alpha = 0.3f)
-                            )
-                        )
-                    }
-                    
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.03f)),
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelectRingtoneClick() }
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text("Gew√§hlter Weckton", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
-                                Text(
-                                    text = selectedRingtoneTitle,
-                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
-                                    color = Color.White
-                                )
-                            }
-                            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "√Ñndern", tint = currentTheme.primaryColor)
-                        }
-                    }
-                }
-                
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = currentTheme.primaryColor, modifier = Modifier.size(18.dp))
-                        Text(
-                            text = "Hotbox-Wahlverz√∂gerung",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Sekunden vor dem n√§chsten Anruf:",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.7f)
-                        )
-                        Text(
-                            text = "${autoCallDelaySeconds} Sek.",
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
-                            color = currentTheme.primaryColor
-                        )
-                    }
-                    
-                    Slider(
-                        value = autoCallDelaySeconds.toFloat(),
-                        onValueChange = { onAutoCallDelaySecondsChange(it.roundToInt().coerceIn(1, 10)) },
-                        valueRange = 1f..10f,
-                        steps = 8,
-                        colors = SliderDefaults.colors(
-                            thumbColor = currentTheme.primaryColor,
-                            activeTrackColor = currentTheme.primaryColor,
-                            inactiveTrackColor = Color.White.copy(alpha = 0.2f)
-                        )
-                    )
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Phone,
-                            contentDescription = null,
-                            tint = currentTheme.primaryColor,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "Bevorzugter Audio-Ausgang",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-
-                    Text(
-                        text = "W√§hle das standardm√§√üige Audioger√§t f√ºr aktive Anrufe. Telefon (H√∂rer) ist standardm√§√üig bevorzugt, um Bluetooth-√úbernahmen zu verhindern.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White.copy(alpha = 0.5f)
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        val devices = listOf(
-                            Pair("current", "Aktuell"),
-                            Pair("earpiece", "Telefon"),
-                            Pair("speaker", "Lautsprecher"),
-                            Pair("bluetooth", "Bluetooth")
-                        )
-                        devices.forEach { (key, label) ->
-                            val isSelected = preferredAudioDevice == key
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) currentTheme.primaryColor else Color.White.copy(alpha = 0.05f))
-                                    .border(1.dp, if (isSelected) Color.White else Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
-                                    .clickable { onPreferredAudioDeviceChange(key) }
-                                    .padding(vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) Color(0xFF0F172A) else Color.White
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Call,
-                            contentDescription = null,
-                            tint = currentTheme.primaryColor,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "Zwischenablage-Bubble Position",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-
-                    Text(
-                        text = "W√§hle die Standardposition der schwebenden Zwischenablage-Anrufbubble.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White.copy(alpha = 0.5f)
-                    )
-
-                    // Row 1: Top positions
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        val topPositions = listOf(
-                            Pair("top_left", "Links oben"),
-                            Pair("top_center", "Mitte oben"),
-                            Pair("top_right", "Rechts oben")
-                        )
-                        topPositions.forEach { (key, label) ->
-                            val isSelected = clipboardBubblePosition == key
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) currentTheme.primaryColor else Color.White.copy(alpha = 0.05f))
-                                    .border(1.dp, if (isSelected) Color.White else Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
-                                    .clickable { onClipboardBubblePositionChange(key) }
-                                    .padding(vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) Color(0xFF0F172A) else Color.White
-                                )
-                            }
-                        }
-                    }
-
-                    // Row 2: Bottom / Center positions
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        val bottomPositions = listOf(
-                            Pair("bottom_left", "Links unten"),
-                            Pair("bottom_center", "Mitte unten"),
-                            Pair("bottom_right", "Rechts unten")
-                        )
-                        bottomPositions.forEach { (key, label) ->
-                            val isSelected = clipboardBubblePosition == key
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) currentTheme.primaryColor else Color.White.copy(alpha = 0.05f))
-                                    .border(1.dp, if (isSelected) Color.White else Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
-                                    .clickable { onClipboardBubblePositionChange(key) }
-                                    .padding(vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) Color(0xFF0F172A) else Color.White
-                                )
-                            }
-                        }
-                    }
-
-                    // Row 3: Center position as option
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        val isSelected = clipboardBubblePosition == "center"
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) currentTheme.primaryColor else Color.White.copy(alpha = 0.05f))
-                                .border(1.dp, if (isSelected) Color.White else Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
-                                .clickable { onClipboardBubblePositionChange("center") }
-                                .padding(vertical = 8.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "Bildschirmmitte",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isSelected) Color(0xFF0F172A) else Color.White
-                            )
-                        }
-                    }
-                }
-
-                Divider(color = Color.White.copy(alpha = 0.1f))
-
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = null,
-                            tint = currentTheme.primaryColor,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "Zwischenablage-Abfrage",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Abfrage bei lokalem Kopieren", style = MaterialTheme.typography.bodySmall, color = Color.White)
-                            Text(
-                                "Zeigt die Anrufbubble, wenn du selbst auf dem Handy kopierst",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White.copy(alpha = 0.5f)
-                            )
-                        }
-                        Switch(
-                            checked = clipboardBubbleOnLocalCopy,
-                            onCheckedChange = onClipboardBubbleOnLocalCopyChange,
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = currentTheme.primaryColor,
-                                checkedTrackColor = currentTheme.primaryColor.copy(alpha = 0.3f)
-                            )
-                        )
-                    }
-                }
-                
-                Divider(color = Color.White.copy(alpha = 0.1f))
-
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = androidx.compose.material.icons.Icons.Default.Call,
-                            contentDescription = null,
-                            tint = currentTheme.primaryColor,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "Standard-Telefon-App & Rechte",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-
-                    Text(
-                        text = "Um direkt aus Stromruf telefonieren zu k√∂nnen und Anrufe automatisch zu erfassen, lege Stromruf als Standard-Telefon-App fest und erteile die Telefon-Rechte.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White.copy(alpha = 0.5f)
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        // Permission Button
-                        if (!isCallPermissionGranted) {
-                            Button(
-                                onClick = onRequestCallPermission,
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(8.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = currentTheme.primaryColor, contentColor = Color.Black)
-                            ) {
-                                Text("Rechte erteilen", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF10B981).copy(alpha = 0.15f))
-                                    .padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("‚úì Recht erteilt", color = Color(0xFF10B981), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        // Default App Button
-                        if (!isDefaultDialer) {
-                            Button(
-                                onClick = onRequestDefaultDialer,
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(8.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00FF87), contentColor = Color.Black)
-                            ) {
-                                Text("Als Standard setzen", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF10B981).copy(alpha = 0.15f))
-                                    .padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("‚úì Standard-App", color = Color(0xFF10B981), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-
-                Divider(color = Color.White.copy(alpha = 0.1f))
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = androidx.compose.material.icons.Icons.Default.PlayArrow,
-                            contentDescription = null,
-                            tint = currentTheme.primaryColor,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "Anruf-Simulation (Demo-Modus)",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                            Text(
-                                text = "Simulationsmodus aktivieren",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White
-                            )
-                            Text(
-                                text = "N√ºtzlich f√ºr Emulatoren, Tablets oder risikofreies Testen ohne reale Telefonanrufe.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White.copy(alpha = 0.5f)
-                            )
-                        }
-                        Switch(
-                            checked = isSimulationModeEnabled,
-                            onCheckedChange = onSimulationModeToggle,
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = currentTheme.primaryColor,
-                                checkedTrackColor = currentTheme.primaryColor.copy(alpha = 0.3f)
-                            )
-                        )
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(8.dp))
-
-                com.example.ui.screens.McpSettings()
-                
-                Divider(color = Color.White.copy(alpha = 0.1f))
-
-                com.example.ui.screens.KiVersandSettings()
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                com.example.ui.screens.TelegramSettings()
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // MCP Integration Card
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f))
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = androidx.compose.material.icons.Icons.Default.Share,
-                                contentDescription = null,
-                                tint = currentTheme.primaryColor,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                text = "MCP-Kopplung (f√ºr andere KIs)",
-                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                                color = Color.White
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Da dein Account per Gmail/OAuth verbunden ist, kannst du hier deinen aktuellen Sitzungs-Token kopieren und als STROMRUF_ACCESS_TOKEN in deine MCP-Konfiguration (z.B. Claude Desktop) einf√ºgen.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White.copy(alpha = 0.6f)
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        
-                        val context = LocalContext.current
-                        Button(
-                            onClick = {
-                                val token = com.example.util.SupabaseAuthClient.getSessionToken(context)
-                                if (!token.isNullOrBlank()) {
-                                    try {
-                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                        val clip = android.content.ClipData.newPlainText("Stromruf MCP Access Token", token)
-                                        clipboard.setPrimaryClip(clip)
-                                        android.widget.Toast.makeText(context, "MCP Access-Token kopiert!", android.widget.Toast.LENGTH_LONG).show()
-                                    } catch (e: Exception) {
-                                        android.widget.Toast.makeText(context, "Kopieren fehlgeschlagen: ${e.localizedMessage}", android.widget.Toast.LENGTH_SHORT).show()
-                                    }
-                                } else {
-                                    android.widget.Toast.makeText(context, "Keine aktive Anmeldung gefunden.", android.widget.Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = currentTheme.primaryColor),
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
-                            Text("Sitzungs-Token kopieren", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = Color(0xFF0F172A))
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                if (onSignOut != null) {
-                    OutlinedButton(
-                        onClick = {
-                            onSignOut()
-                            onDismiss()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        border = BorderStroke(1.dp, Color.Red.copy(alpha = 0.5f)),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Red),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Abmelden (Supabase)", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold))
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                }
-                
-                Button(
-                    onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("Schlie√üen", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun WheelPicker(
-    selectedValue: Int,
-    range: List<Int>,
-    onValueChange: (Int) -> Unit,
-    format: (Int) -> String = { "%02d".format(it) },
-    modifier: Modifier = Modifier
-) {
-    val lazyListState = rememberLazyListState()
-    val coroutineScope = rememberCoroutineScope()
-    
-    val initialIndex = range.indexOf(selectedValue).coerceAtLeast(0)
-    
-    LaunchedEffect(initialIndex) {
-        lazyListState.scrollToItem(initialIndex)
-    }
-    
-    LaunchedEffect(lazyListState.isScrollInProgress) {
-        if (!lazyListState.isScrollInProgress) {
-            val visibleItems = lazyListState.layoutInfo.visibleItemsInfo
-            if (visibleItems.isNotEmpty()) {
-                val center = lazyListState.layoutInfo.viewportEndOffset / 2
-                val closestItem = visibleItems.minByOrNull { Math.abs((it.offset + it.size / 2) - center) }
-                closestItem?.let {
-                    val targetIndex = it.index.coerceIn(0, range.size - 1)
-                    if (targetIndex != initialIndex) {
-                        onValueChange(range[targetIndex])
-                    }
-                    lazyListState.animateScrollToItem(targetIndex)
-                }
-            }
-        }
-    }
-    
-    LazyColumn(
-        state = lazyListState,
-        modifier = modifier
-            .height(120.dp)
-            .width(60.dp),
-        contentPadding = PaddingValues(vertical = 40.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        items(range.size) { index ->
-            val value = range[index]
-            val isSelected = value == selectedValue
-            Box(
-                modifier = Modifier
-                    .height(40.dp)
-                    .fillMaxWidth()
-                    .clickable {
-                        coroutineScope.launch {
-                            lazyListState.animateScrollToItem(index)
-                            onValueChange(value)
-                        }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = format(value),
-                    style = TextStyle(
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = if (isSelected) 22.sp else 16.sp,
-                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.Normal,
-                        color = if (isSelected) Color(0xFF00FF87) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                    )
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun CustomWheelTimePickerDialog(
-    initialHour: Int,
-    initialMinute: Int,
-    onDismiss: () -> Unit,
-    onConfirm: (hour: Int, minute: Int) -> Unit
-) {
-    var selectedHour by remember { mutableStateOf(initialHour) }
-    var selectedMinute by remember { mutableStateOf(initialMinute) }
-    
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
-            border = BorderStroke(1.dp, Color(0xFF00FF87).copy(alpha = 0.3f)),
-            modifier = Modifier
-                .width(280.dp)
-                .padding(16.dp),
-            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "Uhrzeit einstellen",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = Color.White
-                )
-                Text(
-                    text = "Wischen Sie nach oben/unten zum Einstellen",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                    modifier = Modifier.padding(bottom = 16.dp)
-                )
-                
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                        .padding(vertical = 8.dp)
-                ) {
-                    Text(
-                        text = "%02d : %02d".format(selectedHour, selectedMinute),
-                        style = TextStyle(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Black,
-                            color = Color(0xFF00FF87),
-                            letterSpacing = 2.sp
-                        )
-                    )
-                }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Stunden", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.6f))
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Box(
-                            modifier = Modifier
-                                .border(1.dp, Color(0xFF00FF87).copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                                .background(Color.Black.copy(alpha = 0.1f))
-                        ) {
-                            WheelPicker(
-                                selectedValue = selectedHour,
-                                range = (0..23).toList(),
-                                onValueChange = { selectedHour = it }
-                            )
-                        }
-                    }
-                    
-                    Text(
-                        text = ":",
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White.copy(alpha = 0.5f),
-                        modifier = Modifier.padding(top = 16.dp)
-                    )
-                    
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Minuten", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.6f))
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Box(
-                            modifier = Modifier
-                                .border(1.dp, Color(0xFF00FF87).copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                                .background(Color.Black.copy(alpha = 0.1f))
-                        ) {
-                            WheelPicker(
-                                selectedValue = selectedMinute,
-                                range = (0..59).toList(),
-                                onValueChange = { selectedMinute = it }
-                            )
-                        }
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(24.dp))
-                
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.3f)),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Abbrechen", fontSize = 13.sp)
-                    }
-                    
-                    Button(
-                        onClick = { onConfirm(selectedHour, selectedMinute) },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("√úbernehmen", fontSize = 13.sp)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun OngoingCallDialog(
-    contactName: String,
-    contactPhone: String,
-    onHangUp: (durationSeconds: Long) -> Unit,
-    isAutoCallActive: Boolean = false,
-    onHangUpAndPause: ((durationSeconds: Long) -> Unit)? = null,
-    wrapUpData: com.example.viewmodel.WrapUpData,
-    onNoteChange: (String) -> Unit,
-    onCallReasonChange: (String?) -> Unit,
-    onToggleOffset: (String) -> Unit,
-    onOutcomeChange: (String) -> Unit,
-    contact: ContactEntity? = null,
-    recentCallLogs: List<com.example.database.CallLogEntity> = emptyList(),
-    onForceClose: () -> Unit,
-    onMinimize: (() -> Unit)? = null,
-    onAddToHotbox: ((String, String) -> Unit)? = null
-) {
-    var elapsedSeconds by remember { mutableStateOf(0L) }
-    var showDetails by remember { mutableStateOf(false) }
-    var showDialer by remember { mutableStateOf(false) }
-    var typedDigits by remember { mutableStateOf("") }
-
-    if (showDialer) {
-        androidx.activity.compose.BackHandler {
-            showDialer = false
-        }
-    }
-    
-    // If there's a real telecom call active, use its timer, otherwise use our local timer
-    val realCallSeconds = com.example.service.DialerInCallService.callDurationSeconds.value
-    val realCallActive = com.example.service.DialerInCallService.activeCall.value != null
-    
-    val secondsToShow = if (realCallActive) realCallSeconds else elapsedSeconds
-    
-    LaunchedEffect(realCallActive) {
-        if (!realCallActive) {
-            while (true) {
-                kotlinx.coroutines.delay(1000)
-                elapsedSeconds++
-            }
-        }
-    }
-
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    var isDictating by remember { mutableStateOf(false) }
-    var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
-
-    val startSpeech = {
-        isDictating = true
-        
-        // Turn on speakerphone so that both voices (especially the other person's voice) are heard clearly and transcribed by the microphone!
-        try {
-            val audioManager = context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
-            audioManager?.isSpeakerphoneOn = true
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        if ((wrapUpData.callType == "ai_anruf" || wrapUpData.callType == "ai") && com.example.service.DialerInCallService.instance != null) {
-            try {
-                com.example.service.DialerInCallService.startSpeechToText()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        // ALWAYS run local SpeechRecognizer to guarantee transcription works in all environments (including simulated app calls)!
-        try {
-            if (recognizer == null) {
-                recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-            }
-            val listener = object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-                
-                override fun onError(error: Int) {
-                    if (isDictating) {
-                        coroutineScope.launch {
-                            kotlinx.coroutines.delay(400)
-                            if (isDictating) {
-                                try {
-                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().language)
-                                        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                                    }
-                                    recognizer?.startListening(intent)
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
-                        }
-                    }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val resultText = matches?.firstOrNull() ?: ""
-                    if (resultText.isNotBlank()) {
-                        val prefix = if (wrapUpData.callType == "ai_anruf" || wrapUpData.callType == "ai") "üó£Ô∏è " else ""
-                        val updated = if (wrapUpData.note.isBlank()) "$prefix$resultText" else "${wrapUpData.note}\n$prefix$resultText"
-                        onNoteChange(updated)
-                    }
-                    if (isDictating) {
-                        coroutineScope.launch {
-                            kotlinx.coroutines.delay(300)
-                            if (isDictating) {
-                                try {
-                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().language)
-                                        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                                    }
-                                    recognizer?.startListening(intent)
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
-                        }
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            }
-            recognizer?.setRecognitionListener(listener)
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().language)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            }
-            recognizer?.startListening(intent)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            isDictating = false
-        }
-    }
-
-    val stopSpeech = {
-        isDictating = false
-        
-        // Reset speakerphone
-        try {
-            val audioManager = context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
-            audioManager?.isSpeakerphoneOn = false
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        if ((wrapUpData.callType == "ai_anruf" || wrapUpData.callType == "ai") && com.example.service.DialerInCallService.instance != null) {
-            try {
-                com.example.service.DialerInCallService.stopSpeechToText()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        try {
-            recognizer?.stopListening()
-            recognizer?.destroy()
-            recognizer = null
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    val serviceTranscript = com.example.service.DialerInCallService.activeCallTranscript.value
-    LaunchedEffect(serviceTranscript, isDictating) {
-        // Only synchronize from background service transcript if DialerInCallService is active and has background transcript content
-        if (isDictating && (wrapUpData.callType == "ai_anruf" || wrapUpData.callType == "ai") && com.example.service.DialerInCallService.instance != null) {
-            if (serviceTranscript.isNotBlank()) {
-                onNoteChange(serviceTranscript)
-            }
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            try {
-                recognizer?.stopListening()
-                recognizer?.destroy()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    val micPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            startSpeech()
-        } else {
-            Toast.makeText(context, "Mikrofon-Berechtigung erforderlich", Toast.LENGTH_SHORT).show()
-        }
-    }
-    
-    Dialog(
-        onDismissRequest = { onMinimize?.invoke() },
-        properties = androidx.compose.ui.window.DialogProperties(
-            dismissOnBackPress = true,
-            dismissOnClickOutside = false,
-            usePlatformDefaultWidth = false // Make it full screen!
-        )
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF0F172A)) // Match deep slate premium background of the app
-                .padding(24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            // Elegant top right Close Button for manually closing stuck/stale ongoing call UI
-            IconButton(
-                onClick = onForceClose,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 16.dp, end = 16.dp)
-                    .size(44.dp)
-                    .background(Color.White.copy(alpha = 0.1f), CircleShape)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Verbindung trennen & Schlie√üen",
-                    tint = Color.White
-                )
-            }
-
-            if (onMinimize != null) {
-                IconButton(
-                    onClick = onMinimize,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(bottom = 24.dp, start = 8.dp)
-                        .size(48.dp)
-                        .background(Color.White.copy(alpha = 0.1f), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = "Minimieren",
-                        tint = Color(0xFF00FF87)
-                    )
-                }
-            }
-
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                // Top section: App Branding & Status
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(top = 20.dp)
-                ) {
-                    Text(
-                        text = "STROMRUF TELEFONIE",
-                        color = Color(0xFF00FF87),
-                        style = TextStyle(
-                            fontFamily = FontFamily.SansSerif,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            letterSpacing = 2.sp
-                        )
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = if (secondsToShow == 0L) "Verbinde..." else "Gespr√§ch l√§uft",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 14.sp
-                    )
-                }
-                
-                // Middle section: Contact info & Avatar or DTMF dialpad
-                if (showDialer) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFF1E293B))
-                            .border(1.dp, Color(0xFF00FF87).copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-                            .padding(16.dp)
-                    ) {
-                        // Header for the Dialpad view with back button to close
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(
-                                onClick = { showDialer = false },
-                                modifier = Modifier.size(40.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.ArrowBack,
-                                    contentDescription = "Tastatur schlie√üen",
-                                    tint = Color.White
-                                )
-                            }
-                            Text(
-                                text = "TASTATUR (DTMF)",
-                                color = Color(0xFF00FF87),
-                                style = TextStyle(
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    letterSpacing = 1.sp
-                                )
-                            )
-                            Spacer(modifier = Modifier.width(40.dp)) // balance layout
-                        }
-
-                        // Displays current input
-                        Text(
-                            text = typedDigits.ifBlank { "Zahl eingeben..." },
-                            color = if (typedDigits.isEmpty()) Color.White.copy(alpha = 0.3f) else Color.White,
-                            fontSize = 26.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            textAlign = TextAlign.Center,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                        )
-
-                        // 3x4 Grid Dial Pad
-                        val padRows = listOf(
-                            listOf("1", "2", "3"),
-                            listOf("4", "5", "6"),
-                            listOf("7", "8", "9"),
-                            listOf("*", "0", "#")
-                        )
-
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            padRows.forEach { row ->
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    row.forEach { digit ->
-                                        Box(
-                                            modifier = Modifier
-                                                .size(52.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(0xFF334155))
-                                                .clickable {
-                                                    typedDigits += digit
-                                                    com.example.service.DialerInCallService.playDtmf(digit[0])
-                                                }
-                                                .border(
-                                                    BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
-                                                    CircleShape
-                                                ),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                text = digit,
-                                                fontSize = 18.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color.White
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Clear input button
-                        if (typedDigits.isNotEmpty()) {
-                            TextButton(
-                                onClick = { typedDigits = "" },
-                                colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.6f))
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Delete,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text("L√∂schen", fontSize = 12.sp)
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        // Beautiful pulsating circular avatar
-                        Box(
-                            modifier = Modifier
-                                .size(100.dp)
-                                .background(Color(0xFF1E293B), CircleShape)
-                                .border(2.dp, Color(0xFF00FF87), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Person,
-                                contentDescription = null,
-                                tint = Color(0xFF00FF87),
-                                modifier = Modifier.size(50.dp)
-                            )
-                        }
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        
-                        Text(
-                            text = contactName.ifBlank { "Unbekannter Teilnehmer" },
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 22.sp,
-                            modifier = Modifier.pointerInput(contactName) {
-                                detectTapGestures(
-                                    onLongPress = {
-                                        val numberRegex = Regex("\\d+")
-                                        val digitsOnly = numberRegex.find(contactName)?.value 
-                                            ?: numberRegex.find(contact?.company ?: "")?.value 
-                                            ?: ""
-                                        if (digitsOnly.isNotEmpty()) {
-                                            try {
-                                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                                val clip = android.content.ClipData.newPlainText("Kundennummer", digitsOnly)
-                                                clipboard.setPrimaryClip(clip)
-                                                Toast.makeText(context, "Kundennummer $digitsOnly kopiert! üìã", Toast.LENGTH_SHORT).show()
-                                            } catch (e: java.lang.Exception) {
-                                                Toast.makeText(context, "Fehler beim Kopieren: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                                            }
-                                        } else {
-                                            Toast.makeText(context, "Keine Kundennummer im Namen gefunden! ‚ö†Ô∏è", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
-                                )
-                            }
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = contactPhone,
-                            color = Color.White.copy(alpha = 0.5f),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 16.sp
-                        )
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        
-                        // Timer display
-                        val mins = secondsToShow / 60
-                        val secs = secondsToShow % 60
-                        val timerText = String.format(Locale.GERMANY, "%02d:%02d", mins, secs)
-                        
-                        Text(
-                            text = timerText,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 36.sp
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Keyboard trigger button to open the DTMF Dialer
-                            Button(
-                                onClick = { showDialer = true },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
-                                border = BorderStroke(1.dp, Color(0xFF00FF87).copy(alpha = 0.5f)),
-                                shape = RoundedCornerShape(24.dp),
-                                modifier = Modifier.height(44.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Dialpad,
-                                        contentDescription = "Tastatur anzeigen",
-                                        tint = Color(0xFF00FF87),
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        text = "Tastatur",
-                                        color = Color.White,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-
-                            // Hotbox insert / status button
-                            val isHot = contact?.isHotBox == true
-                            Button(
-                                onClick = { onAddToHotbox?.invoke(contactName, contactPhone) },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isHot) Color(0xFFEF4444) else Color(0xFF1E293B)
-                                ),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isHot) Color(0xFFEF4444).copy(alpha = 0.5f) else Color(0xFF00FF87).copy(alpha = 0.5f)
-                                ),
-                                shape = RoundedCornerShape(24.dp),
-                                modifier = Modifier.height(44.dp).then(if (isHot) Modifier.pulsatingAura(Color(0xFFEF4444).copy(alpha=0.3f)) else Modifier.pulsatingAura(Color(0xFF00FF87).copy(alpha=0.3f)))
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Star,
-                                        contentDescription = "In Hotbox",
-                                        tint = if (isHot) Color.White else Color(0xFF00FF87),
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        text = if (isHot) "In Hotbox üî•" else "In Hotbox einf√ºgen",
-                                        color = Color.White,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Hang Up Buttons Section (NOW PLACED PROMINENTLY AT THE TOP BELOW TIMER!)
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    if (isAutoCallActive && onHangUpAndPause != null) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(20.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Button 1: Hang up and Pause
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Button(
-                                    onClick = {
-                                        onHangUpAndPause(secondsToShow)
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF97316)), // Vibrant orange
-                                    shape = CircleShape,
-                                    modifier = Modifier.size(70.dp),
-                                    contentPadding = PaddingValues(0.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Pause,
-                                        contentDescription = "Auflegen & Pausieren",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(30.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = "Auflegen & Pause",
-                                    color = Color(0xFFF97316),
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp
-                                )
-                            }
-
-                            // Button 2: Standard Hang up (Autopilot continues)
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Button(
-                                    onClick = {
-                                        onHangUp(secondsToShow)
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)), // Red
-                                    shape = CircleShape,
-                                    modifier = Modifier.size(80.dp),
-                                    contentPadding = PaddingValues(0.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Call,
-                                        contentDescription = "Auflegen",
-                                        tint = Color.White,
-                                        modifier = Modifier
-                                            .size(36.dp)
-                                            .rotate(135f)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = "Auflegen & Weiter",
-                                    color = Color(0xFFEF4444),
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
-                    } else {
-                        // Standard single red Hang Up button
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Button(
-                                onClick = {
-                                    onHangUp(secondsToShow)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
-                                shape = CircleShape,
-                                modifier = Modifier.size(80.dp),
-                                contentPadding = PaddingValues(0.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Call,
-                                    contentDescription = "Auflegen",
-                                    tint = Color.White,
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .rotate(135f)
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = "Auflegen",
-                                color = Color(0xFFEF4444),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
-                            )
-                        }
-                    }
-
-                    // Anrufbeantworter / Mailbox quick action button (1-tap hang up & outcome document)
-                    Button(
-                        onClick = {
-                            onOutcomeChange("nicht_erreicht")
-                            val originalNote = wrapUpData.note
-                            val abSuffix = "Anrufbeantworter / Mailbox"
-                            val finalNote = if (originalNote.isBlank()) abSuffix else "$originalNote\n$abSuffix"
-                            onNoteChange(finalNote)
-                            
-                            // Bulletproof disconnection of all telecom calls
-                            com.example.service.DialerInCallService.hangUp()
-                            
-                            // Execute regular clean-up/autodialer progression action
-                            onHangUp(secondsToShow)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6)), // Cool Blue
-                        shape = RoundedCornerShape(24.dp),
-                        modifier = Modifier
-                            .height(48.dp)
-                            .padding(horizontal = 16.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "üìü Mailbox / Anrufbeantworter",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
-                            )
-                        }
-                    }
-                }
-
-                // --- AUDIO ROUTING & MICROPHONE CONTROLS (NATIVE PHONE STYLE) ---
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0xFF1E293B))
-                        .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(16.dp))
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Text(
-                        text = "AUDIO-EINSTELLUNGEN üéß",
-                        color = Color(0xFF00FF87),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
-                        letterSpacing = 1.sp
-                    )
-                    
-                    val currentAudioState = com.example.service.DialerInCallService.currentAudioState.value
-                    val activeRoute = currentAudioState?.route ?: android.telecom.CallAudioState.ROUTE_EARPIECE
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        val routes = listOf(
-                            Triple(android.telecom.CallAudioState.ROUTE_EARPIECE, Icons.Default.Phone, "H√∂rer"),
-                            Triple(android.telecom.CallAudioState.ROUTE_SPEAKER, Icons.Default.VolumeUp, "Lautsprecher"),
-                            Triple(android.telecom.CallAudioState.ROUTE_BLUETOOTH, Icons.Default.Bluetooth, "Bluetooth"),
-                            Triple(android.telecom.CallAudioState.ROUTE_WIRED_HEADSET, Icons.Default.Headset, "Headset")
-                        )
-                        
-                        routes.forEach { (route, icon, label) ->
-                            val isSelected = activeRoute == route
-                            val supported = true
-                            
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier
-                                    .alpha(if (isSelected) 1.0f else 0.8f)
-                                    .clickable {
-                                        com.example.service.DialerInCallService.instance?.setAudioRouteCompat(route)
-                                    }
-                                    .padding(4.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(CircleShape)
-                                        .background(if (isSelected) Color(0xFF00FF87) else Color(0xFF334155))
-                                        .border(1.dp, if (isSelected) Color.White else Color.Transparent, CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = icon,
-                                        contentDescription = label,
-                                        tint = if (isSelected) Color(0xFF0F172A) else Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = label,
-                                    color = if (isSelected) Color(0xFF00FF87) else Color.White.copy(alpha = 0.7f),
-                                    fontSize = 10.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
-                    
-                    Divider(color = Color.White.copy(alpha = 0.1f))
-                    
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        horizontalAlignment = Alignment.Start
-                    ) {
-                        Text(
-                            text = "Aktives Mikrofon:",
-                            color = Color.White.copy(alpha = 0.6f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        
-                        val localContext = LocalContext.current
-                        val audioManager = remember { localContext.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager }
-                        
-                        val availableMics = remember(currentAudioState) {
-                            val devices = audioManager.getDevices(android.media.AudioManager.GET_DEVICES_INPUTS)
-                            devices.filter { device ->
-                                device.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC ||
-                                device.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                                device.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                                device.type == android.media.AudioDeviceInfo.TYPE_USB_HEADSET
-                            }
-                        }
-                        
-                        if (availableMics.isEmpty()) {
-                            Text(
-                                text = "Standard System-Mikrofon (automatisch)",
-                                color = Color.White.copy(alpha = 0.8f),
-                                fontSize = 12.sp,
-                                fontStyle = FontStyle.Italic
-                            )
-                        } else {
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                items(availableMics, key = { it.id }) { device ->
-                                    val isDeviceActive = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                                        audioManager.communicationDevice?.id == device.id
-                                    } else {
-                                        when (device.type) {
-                                            android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> activeRoute == android.telecom.CallAudioState.ROUTE_BLUETOOTH
-                                            android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET -> activeRoute == android.telecom.CallAudioState.ROUTE_WIRED_HEADSET
-                                            else -> activeRoute == android.telecom.CallAudioState.ROUTE_SPEAKER || activeRoute == android.telecom.CallAudioState.ROUTE_EARPIECE
-                                        }
-                                    }
-                                    
-                                    val deviceName = when (device.type) {
-                                        android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC -> "Telefon-Mikrofon"
-                                        android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth-Mikrofon"
-                                        android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Headset-Mikrofon"
-                                        android.media.AudioDeviceInfo.TYPE_USB_HEADSET -> "USB-Mikrofon"
-                                        else -> device.productName.toString().ifBlank { "Mikrofon (${device.id})" }
-                                    }
-                                    
-                                    Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (isDeviceActive) Color(0xFF00FF87).copy(alpha = 0.2f) else Color(0xFF334155))
-                                            .border(
-                                                1.dp,
-                                                if (isDeviceActive) Color(0xFF00FF87) else Color.White.copy(alpha = 0.1f),
-                                                RoundedCornerShape(8.dp)
-                                            )
-                                            .clickable {
-                                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                                                    val result = audioManager.setCommunicationDevice(device)
-                                                    android.util.Log.d("OngoingCallDialog", "Set comm device (${device.id}) result: $result")
-                                                } else {
-                                                    if (device.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC) {
-                                                        audioManager.isSpeakerphoneOn = false
-                                                    }
-                                                }
-                                            }
-                                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Mic,
-                                            contentDescription = null,
-                                            tint = if (isDeviceActive) Color(0xFF00FF87) else Color.White,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Text(
-                                            text = deviceName,
-                                            color = if (isDeviceActive) Color(0xFF00FF87) else Color.White,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Beautiful and modern Material 3 Expandable Button
-                Button(
-                    onClick = { showDetails = !showDetails },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.08f)),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = if (showDetails) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                            contentDescription = null,
-                            tint = Color(0xFF00FF87),
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (showDetails) "Doku & Infos ausblenden üìù" else "Doku, Notizen & Infos einblenden üìù",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                if (showDetails) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        // AI Call Status indicator/badge
-                        if (wrapUpData.callType == "ai_anruf" || wrapUpData.callType == "ai") {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF10B981).copy(alpha = 0.15f))
-                                .border(1.dp, Color(0xFF10B981).copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF10B981))
-                            )
-                            Text(
-                                text = "KI-DIKTAT AKTIV ü§ñ",
-                                color = Color(0xFF10B981),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.5.sp
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(10.dp))
-                    }
-
-                    // Prominent Dictation Toggle Button
-                    Button(
-                        onClick = {
-                            if (isDictating) {
-                                stopSpeech()
-                            } else {
-                                val status = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO)
-                                if (status == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                                    startSpeech()
-                                } else {
-                                    micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                                }
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isDictating) Color(0xFFEF4444) else Color(0xFF1E293B)
-                        ),
-                        border = BorderStroke(
-                            width = 1.5.dp,
-                            color = if (isDictating) Color(0xFFEF4444) else Color(0xFF00FF87)
-                        ),
-                        shape = RoundedCornerShape(24.dp),
-                        modifier = Modifier
-                            .fillMaxWidth(0.85f)
-                            .height(48.dp)
-                            .testTag("ongoing_prominent_dictate_btn"),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isDictating) Icons.Default.Close else Icons.Default.Mic,
-                                contentDescription = null,
-                                tint = if (isDictating) Color.White else Color(0xFF00FF87),
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Text(
-                                text = if (isDictating) "Diktat Stoppen" else "Diktieren starten üé§",
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    if (isDictating) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "üé§ Spracherkennung aktiv... Sprechen Sie nun.",
-                            color = Color(0xFFEF4444),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                }
-
-                // Hotbox-Kundendaten / Stored contact details visible during the call
-                if (contact != null) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFF1E293B))
-                            .border(1.dp, Color(0xFF00FF87).copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Info,
-                                contentDescription = null,
-                                tint = Color(0xFF00FF87),
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = "KUNDENINFO & HOTBOX DATEN ‚ÑπÔ∏è",
-                                color = Color(0xFF00FF87),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                letterSpacing = 1.sp
-                            )
-                        }
-
-                        // Hotbox badge if applicable
-                        if (contact.isHotBox) {
-                            val timeLimit = contact.hotBoxStartHour != null && contact.hotBoxEndHour != null
-                            val dayLimit = !contact.hotBoxWeekdays.isNullOrBlank()
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = Color(0xFFEF4444).copy(alpha = 0.15f)),
-                                border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.3f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Star,
-                                        contentDescription = null,
-                                        tint = Color(0xFFEF4444),
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Column {
-                                        Text(
-                                            text = "Aktiver Hotbox-Kontakt üî•",
-                                            style = TextStyle(fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFFEF4444))
-                                        )
-                                        if (timeLimit || dayLimit) {
-                                            val timeText = if (timeLimit) {
-                                                val startStr = com.example.util.ContactsUtil.formatMinutesToTimeString(contact.hotBoxStartHour)
-                                                val endStr = com.example.util.ContactsUtil.formatMinutesToTimeString(contact.hotBoxEndHour)
-                                                "$startStr - $endStr Uhr"
-                                            } else "Ganzteilig"
-                                            val daysText = formatWeekdays(contact.hotBoxWeekdays)
-                                            Text(
-                                                text = "Erreichbarkeitsfenster: $daysText ($timeText)",
-                                                style = TextStyle(fontSize = 10.sp, color = Color.White.copy(alpha = 0.8f))
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Detailed fields (Firma, E-Mail, Grund)
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            if (!contact.company.isNullOrBlank()) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(Icons.Default.Business, contentDescription = null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(14.dp))
-                                    Text(
-                                        text = "Firma: ",
-                                        style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = Color.White.copy(alpha = 0.5f))
-                                    )
-                                    Text(
-                                        text = contact.company,
-                                        style = TextStyle(fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.White)
-                                    )
-                                }
-                            }
-
-                            if (!contact.email.isNullOrBlank()) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(Icons.Default.Email, contentDescription = null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(14.dp))
-                                    Text(
-                                        text = "E-Mail: ",
-                                        style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = Color.White.copy(alpha = 0.5f))
-                                    )
-                                    Text(
-                                        text = contact.email,
-                                        style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color.White)
-                                    )
-                                }
-                            }
-
-                            if (!contact.callReason.isNullOrBlank()) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(Icons.Default.Tag, contentDescription = null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(14.dp))
-                                    Text(
-                                        text = "Hinterlegter Grund: ",
-                                        style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = Color.White.copy(alpha = 0.5f))
-                                    )
-                                    Text(
-                                        text = contact.callReason,
-                                        style = TextStyle(fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF00FF87))
-                                    )
-                                }
-                            }
-                        }
-
-                        // Last call history list (Historical call notes!)
-                        val historyLogs = remember(recentCallLogs, contactPhone) {
-                            recentCallLogs.filter {
-                                arePhoneNumbersMatching(it.phone, contactPhone)
-                            }.sortedByDescending { it.timestamp }.take(2)
-                        }
-
-                        if (historyLogs.isNotEmpty()) {
-                            Divider(color = Color.White.copy(alpha = 0.1f))
-                            Text(
-                                text = "Letzte Gespr√§chsnotizen:",
-                                style = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 11.sp, color = Color.White.copy(alpha = 0.7f))
-                            )
-                            historyLogs.forEach { log ->
-                                val outcomeMeta = getOutcomeMeta(log.outcome)
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(Color.White.copy(alpha = 0.03f), RoundedCornerShape(8.dp))
-                                        .padding(8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Row(
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Text(
-                                            text = fmtDate(log.timestamp),
-                                            style = TextStyle(fontSize = 10.sp, color = Color.White.copy(alpha = 0.5f))
-                                        )
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(4.dp))
-                                                .background(outcomeMeta.color.copy(alpha = 0.2f))
-                                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                                        ) {
-                                            Text(
-                                                text = outcomeMeta.label,
-                                                color = outcomeMeta.color,
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    }
-                                    if (!log.callReason.isNullOrBlank()) {
-                                        Text(
-                                            text = "Grund: ${log.callReason}",
-                                            style = TextStyle(fontSize = 10.sp, color = Color.White.copy(alpha = 0.8f), fontWeight = FontWeight.Medium)
-                                        )
-                                    }
-                                    if (!log.note.isNullOrBlank()) {
-                                        Text(
-                                            text = "\"${log.note}\"",
-                                            style = TextStyle(fontSize = 11.sp, color = Color.White, fontStyle = FontStyle.Italic)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // --- LIVE-DOKUMENTATION & WIEDERVORLAGE (DURING CALL) ---
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0xFF1E293B))
-                        .border(1.dp, Color(0xFF00FF87).copy(alpha = 0.2f), RoundedCornerShape(16.dp))
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Text(
-                        text = "LIVE-DOKUMENTATION üìù",
-                        color = Color(0xFF00FF87),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        letterSpacing = 1.sp
-                    )
-
-                    // 0. Ergebnis des Anrufs (Outcomes)
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "Ergebnis des Anrufs:",
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        
-                        val outcomes = listOf(
-                            "erreicht_interesse" to "Interesse",
-                            "erreicht_abschluss" to "Abschluss",
-                            "erreicht_kein_interesse" to "Kein Int.",
-                            "nicht_erreicht" to "Nicht err.",
-                            "falsche_nummer" to "Falsche Nr."
-                        )
-                        
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            outcomes.forEach { (key, label) ->
-                                val isSelected = wrapUpData.outcome == key
-                                val meta = getOutcomeMeta(key)
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) meta.color.copy(alpha = 0.25f) else Color(0xFF334155))
-                                        .border(
-                                            1.dp,
-                                            if (isSelected) meta.color else Color.White.copy(alpha = 0.1f),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { onOutcomeChange(key) }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = label,
-                                        color = if (isSelected) meta.color else Color.White,
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Divider(color = Color.White.copy(alpha = 0.1f))
-
-                    // 1. Grund des Anrufs (Reasons chips)
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "Grund des Anrufs:",
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        
-                        val reasons = listOf(
-                            "NK Erstkontakt",
-                            "BK FV",
-                            "Fehlende Dokumente",
-                            "Angebot besprechen",
-                            "zum Stand fragen"
-                        )
-                        
-                        // Row 1
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            reasons.take(2).forEach { r ->
-                                val isSelected = wrapUpData.callReason == r
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) Color(0xFF00FF87).copy(alpha = 0.2f) else Color(0xFF334155))
-                                        .border(
-                                            1.dp,
-                                            if (isSelected) Color(0xFF00FF87) else Color.White.copy(alpha = 0.1f),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { onCallReasonChange(if (isSelected) null else r) }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = r,
-                                        color = if (isSelected) Color(0xFF00FF87) else Color.White,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-                        
-                        // Row 2
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            reasons.drop(2).forEach { r ->
-                                val isSelected = wrapUpData.callReason == r
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) Color(0xFF00FF87).copy(alpha = 0.2f) else Color(0xFF334155))
-                                        .border(
-                                            1.dp,
-                                            if (isSelected) Color(0xFF00FF87) else Color.White.copy(alpha = 0.1f),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { onCallReasonChange(if (isSelected) null else r) }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = r,
-                                        color = if (isSelected) Color(0xFF00FF87) else Color.White,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Divider(color = Color.White.copy(alpha = 0.1f))
-
-                    // 2. Notizen
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Gespr√§chsnotiz:",
-                                color = Color.White.copy(alpha = 0.7f),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (isDictating) Color(0xFFEF4444).copy(alpha = 0.2f) else Color.White.copy(alpha = 0.05f))
-                                    .clickable {
-                                        if (isDictating) {
-                                            stopSpeech()
-                                        } else {
-                                            val status = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO)
-                                            if (status == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                                                startSpeech()
-                                            } else {
-                                                micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                                            }
-                                        }
-                                    }
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isDictating) Icons.Default.Close else Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    tint = if (isDictating) Color(0xFFEF4444) else Color(0xFF00FF87),
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Text(
-                                    text = if (isDictating) "Stop Diktat" else "Diktieren üé§",
-                                    color = if (isDictating) Color(0xFFEF4444) else Color(0xFF00FF87),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                        OutlinedTextField(
-                            value = wrapUpData.note,
-                            onValueChange = onNoteChange,
-                            placeholder = { Text("Notizen w√§hrend des Telefonats...", color = Color.White.copy(alpha = 0.4f), fontSize = 12.sp) },
-                            modifier = Modifier.fillMaxWidth(),
-                            textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
-                            maxLines = 3,
-                            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = Color(0xFF00FF87),
-                                unfocusedBorderColor = Color.White.copy(alpha = 0.15f),
-                                cursorColor = Color(0xFF00FF87)
-                            ),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                    }
-
-                    Divider(color = Color.White.copy(alpha = 0.1f))
-
-                    // 3. Wiedervorlage (Follow-Up Presets)
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "Wiedervorlage planen:",
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        
-                        val presets = listOf(
-                            "3h" to "In 3 Std.",
-                            "1d" to "Morgen",
-                            "1m" to "1 Monat",
-                            "1y" to "1 Jahr"
-                        )
-                        
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            presets.forEach { (key, label) ->
-                                val isSelected = wrapUpData.selectedOffsets.contains(key)
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) Color(0xFF00FF87).copy(alpha = 0.2f) else Color(0xFF334155))
-                                        .border(
-                                            1.dp,
-                                            if (isSelected) Color(0xFF00FF87) else Color.White.copy(alpha = 0.1f),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { onToggleOffset(key) }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = label,
-                                        color = if (isSelected) Color(0xFF00FF87) else Color.White,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
-            }
-        }
-    }
-}
-
-
-
-@Composable
-fun IncomingCallScreen(
-    contactName: String,
-    contactPhone: String,
-    contactCompany: String = "",
-    contactReason: String = "",
-    contactNotes: String = "",
-    onAnswer: () -> Unit,
-    onDecline: () -> Unit,
-    onMinimize: () -> Unit
-) {
-    androidx.compose.ui.window.Dialog(
-        onDismissRequest = { /* Immersive - cannot dismiss except via button or minimize */ },
-        properties = androidx.compose.ui.window.DialogProperties(
-            dismissOnBackPress = false,
-            dismissOnClickOutside = false,
-            usePlatformDefaultWidth = false // Complete Full Screen!
-        )
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    androidx.compose.ui.graphics.Brush.radialGradient(
-                        colors = listOf(
-                            Color(0xFF0F3B25), // Elegant glowing deep emerald slate core
-                            Color(0xFF0B120E)  // Deep slate outer frame
-                        ),
-                        radius = 1200f
-                    )
-                )
-                .padding(24.dp)
-        ) {
-            // Minimize button in the top left
-            IconButton(
-                onClick = onMinimize,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(top = 28.dp, start = 8.dp)
-                    .background(Color.White.copy(alpha = 0.08f), CircleShape)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.ArrowDownward,
-                    contentDescription = "Minimieren",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp)
-                )
-            }
-
-            // Top section: Branding & Title
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 90.dp)
-            ) {
-                Text(
-                    text = "STROMRUF TELEFONIE",
-                    color = Color(0xFF00FF87),
-                    style = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        letterSpacing = 2.sp
-                    )
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                
-                // Pulsing incoming text
-                val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-                val pulseAlpha by infiniteTransition.animateFloat(
-                    initialValue = 0.4f,
-                    targetValue = 1.0f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(1000, easing = LinearEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "pulseAlpha"
-                )
-                Text(
-                    text = "EINGEHENDER ANRUF...",
-                    color = Color.White.copy(alpha = pulseAlpha),
-                    style = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 11.sp,
-                        letterSpacing = 1.sp
-                    )
-                )
-            }
-
-            // Middle section: Contact info & glowing avatar
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .padding(bottom = 60.dp)
-            ) {
-                // Large gorgeous pulsing green halo avatar
-                val scale by rememberInfiniteTransition(label = "avatarPulse").animateFloat(
-                    initialValue = 0.95f,
-                    targetValue = 1.05f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(1200, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "scale"
-                )
-                
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(150.dp)
-                        .graphicsLayer(scaleX = scale, scaleY = scale)
-                        .background(Color(0xFF00FF87).copy(alpha = 0.04f), CircleShape)
-                        .border(1.5.dp, Color(0xFF00FF87).copy(alpha = 0.15f), CircleShape)
-                        .padding(20.dp)
-                ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color(0xFF00FF87).copy(alpha = 0.08f), CircleShape)
-                            .border(2.dp, Color(0xFF00FF87).copy(alpha = 0.3f), CircleShape)
-                            .padding(16.dp)
-                    ) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color(0xFF00FF87), CircleShape)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Call,
-                                contentDescription = null,
-                                tint = Color(0xFF0F172A),
-                                modifier = Modifier.size(42.dp)
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(28.dp))
-
-                Text(
-                    text = contactName.ifEmpty { "Unbekannter Anrufer" },
-                    color = Color.White,
-                    style = TextStyle(
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 28.sp,
-                        letterSpacing = 0.5.sp,
-                        textAlign = TextAlign.Center
-                    ),
-                    modifier = Modifier.padding(horizontal = 24.dp)
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = contactPhone.ifEmpty { "Unbekannte Nummer" },
-                    color = Color.White.copy(alpha = 0.6f),
-                    style = TextStyle(
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 16.sp,
-                        fontFamily = FontFamily.Monospace,
-                        letterSpacing = 0.5.sp
-                    )
-                )
-
-                if (contactCompany.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = contactCompany,
-                        color = Color(0xFF00FF87),
-                        style = TextStyle(
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 18.sp,
-                            letterSpacing = 0.5.sp,
-                            textAlign = TextAlign.Center
-                        )
-                    )
-                }
-
-                if (contactReason.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF00FF87).copy(alpha = 0.15f))
-                            .border(1.5.dp, Color(0xFF00FF87), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 14.dp, vertical = 6.dp)
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = "ANRUFGRUND:",
-                                color = Color(0xFF00FF87),
-                                style = TextStyle(
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 11.sp,
-                                    letterSpacing = 1.sp
-                                )
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = contactReason,
-                                color = Color.White,
-                                style = TextStyle(
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp,
-                                    textAlign = TextAlign.Center
-                                )
-                            )
-                        }
-                    }
-                }
-
-                if (contactNotes.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.06f)),
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .fillMaxWidth(0.85f)
-                            .padding(horizontal = 12.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "NOTIZEN / SYSTEM-TAGS",
-                                color = Color.White.copy(alpha = 0.5f),
-                                style = TextStyle(
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 10.sp,
-                                    letterSpacing = 1.sp
-                                )
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = contactNotes,
-                                color = Color.White,
-                                style = TextStyle(
-                                    fontWeight = FontWeight.Normal,
-                                    fontSize = 13.sp,
-                                    textAlign = TextAlign.Center
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Bottom section: Reject Button and Swipe Up to Accept Slider
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(bottom = 60.dp, start = 20.dp, end = 20.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Red Decline Button (Left)
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = onDecline,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
-                        shape = CircleShape,
-                        modifier = Modifier.size(72.dp),
-                        contentPadding = PaddingValues(0.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Call,
-                            contentDescription = "Ablehnen",
-                            tint = Color.White,
-                            modifier = Modifier
-                                .size(32.dp)
-                                .rotate(135f)
-                        )
-                    }
-                    Text(
-                        text = "Ablehnen",
-                        color = Color(0xFFEF4444),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        letterSpacing = 0.5.sp
-                    )
-                }
-
-                // Interactive Swipe-up-to-answer Track (Right)
-                Box(
-                    modifier = Modifier
-                        .width(100.dp)
-                        .height(200.dp)
-                        .background(Color.White.copy(alpha = 0.03f), RoundedCornerShape(50.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(50.dp))
-                        .padding(8.dp),
-                    contentAlignment = Alignment.BottomCenter
-                ) {
-                    // Vertical Swipe Track chevrons
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(top = 20.dp)
-                    ) {
-                        val pulseChevron = rememberInfiniteTransition(label = "chevron")
-                        val activeChevronIndex by pulseChevron.animateFloat(
-                            initialValue = 0f,
-                            targetValue = 3f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(1200, easing = LinearEasing),
-                                repeatMode = RepeatMode.Restart
-                            ),
-                            label = "index"
-                        )
-                        
-                        repeat(3) { idx ->
-                            val alphaVal = if (idx == activeChevronIndex.toInt()) 1.0f else 0.25f
-                            Icon(
-                                imageVector = Icons.Default.ArrowUpward,
-                                contentDescription = null,
-                                tint = Color(0xFF00FF87).copy(alpha = alphaVal),
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                    }
-
-                    // Swipe handle
-                    var swipeOffset by remember { mutableStateOf(0f) }
-                    val maxSwipeDistance = 120.dp
-                    val density = LocalDensity.current
-                    val maxSwipePx = with(density) { maxSwipeDistance.toPx() }
-
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .offset { IntOffset(0, -swipeOffset.roundToInt()) }
-                            .size(84.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF00FF87))
-                            .pointerInput(Unit) {
-                                detectVerticalDragGestures(
-                                    onDragEnd = {
-                                        if (swipeOffset >= maxSwipePx * 0.7f) {
-                                            onAnswer()
-                                        }
-                                        swipeOffset = 0f
-                                    },
-                                    onVerticalDrag = { change, dragAmount ->
-                                        change.consume()
-                                        // Dragging upwards means negative dragAmount.y
-                                        swipeOffset = (swipeOffset - dragAmount).coerceIn(0f, maxSwipePx)
-                                    }
-                                )
-                            }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Call,
-                            contentDescription = "Annehmen",
-                            tint = Color(0xFF0F172A),
-                            modifier = Modifier.size(34.dp)
-                        )
-                    }
-                    
-                    Text(
-                        text = "ANNEHMEN",
-                        color = Color(0xFF00FF87),
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 9.sp,
-                        letterSpacing = 1.sp,
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 96.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun IncomingCallBottomOverlay(
-    contactName: String,
-    contactPhone: String,
-    contactCompany: String = "",
-    contactReason: String = "",
-    onAnswer: () -> Unit,
-    onDecline: () -> Unit,
-    onClick: () -> Unit
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clickable { onClick() }
-            .border(1.5.dp, Color(0xFF00FF87).copy(alpha = 0.8f), RoundedCornerShape(20.dp)),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)), // Modern deep slate
-        shape = RoundedCornerShape(20.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            // Caller info (Left)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                // Little glowing pulsing call icon
-                val infiniteTransition = rememberInfiniteTransition(label = "iconPulse")
-                val pulseScale by infiniteTransition.animateFloat(
-                    initialValue = 0.9f,
-                    targetValue = 1.1f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(800, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "pulseScale"
-                )
-                
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .graphicsLayer(scaleX = pulseScale, scaleY = pulseScale)
-                        .background(Color(0xFF00FF87).copy(alpha = 0.15f), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Call,
-                        contentDescription = null,
-                        tint = Color(0xFF00FF87),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                
-                Column {
-                    Text(
-                        text = contactName.ifEmpty { "Unbekannt" },
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (contactCompany.isNotBlank()) {
-                        Text(
-                            text = contactCompany,
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    val detailText = if (contactReason.isNotBlank()) "Grund: $contactReason" else "Eingehender Anruf..."
-                    Text(
-                        text = detailText,
-                        color = Color(0xFF00FF87),
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            // Quick Accept/Decline Buttons (Right)
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Decline Button (Red circle)
-                IconButton(
-                    onClick = onDecline,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .background(Color(0xFFEF4444), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Call,
-                        contentDescription = "Ablehnen",
-                        tint = Color.White,
-                        modifier = Modifier
-                            .size(20.dp)
-                            .rotate(135f)
-                    )
-                }
-
-                // Accept Button (Green circle)
-                IconButton(
-                    onClick = onAnswer,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .background(Color(0xFF00FF87), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Call,
-                        contentDescription = "Annehmen",
-                        tint = Color(0xFF0F172A),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-fun sendAnnahmeNotification(context: Context, type: String, customerType: String, consumption: Long, customerNumber: String) {
-    val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
-    val channelId = "annahmen_notifications_channel"
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-        val channelName = "Neue Abschl√ºsse & Annahmen"
-        val channelDescription = "Benachrichtigungen √ºber neu eingetragene Annahmen"
-        val importance = android.app.NotificationManager.IMPORTANCE_DEFAULT
-        val channel = android.app.NotificationChannel(channelId, channelName, importance).apply {
-            description = channelDescription
-            enableVibration(true)
-        }
-        notificationManager?.createNotificationChannel(channel)
-    }
-
-    val intent = Intent(context, MainActivity::class.java).apply {
-        flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-    }
-    val pendingIntent = android.app.PendingIntent.getActivity(
-        context,
-        System.currentTimeMillis().toInt(),
-        intent,
-        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-    )
-
-    val decimalFormat = java.text.NumberFormat.getIntegerInstance(java.util.Locale.GERMANY)
-    val consumptionFormatted = decimalFormat.format(consumption)
-
-    val title = "Neue Annahme hinzugef√ºgt! üéâ"
-    val contentText = "$type ($customerType) - Vertrag: $customerNumber, Verbrauch: $consumptionFormatted kWh"
-
-    val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)
-        .setSmallIcon(android.R.drawable.ic_dialog_info)
-        .setContentTitle(title)
-        .setContentText(contentText)
-        .setPriority(androidx.core.app.NotificationCompat.PRIORITY_DEFAULT)
-        .setContentIntent(pendingIntent)
-        .setAutoCancel(true)
-
-    notificationManager?.notify(System.currentTimeMillis().toInt(), builder.build())
-}
-
-@Composable
-fun AddNeukundeDialog(
-    onDismiss: () -> Unit,
-    onConfirm: (
-        customerNumber: String,
-        phone: String,
-        customerName: String?,
-        company: String?,
-        email: String?,
-        deliveryAddress: String?,
-        meterNumber: String?,
-        consumption: Long?,
-        energyType: String?,
-        routine: String
-    ) -> Unit
-) {
-    var customerNumber by remember { 
-        mutableStateOf("KD-${(10000..99999).random()}") 
-    }
-    var phone by remember { mutableStateOf("") }
-    var customerName by remember { mutableStateOf("") }
-    var company by remember { mutableStateOf("") }
-    var email by remember { mutableStateOf("") }
-    var deliveryAddress by remember { mutableStateOf("") }
-    var meterNumber by remember { mutableStateOf("") }
-    var consumptionStr by remember { mutableStateOf("") }
-    var energyType by remember { mutableStateOf("Strom") } // "Strom" oder "Gas"
-    var selectedRoutine by remember { mutableStateOf("Keine") }
-
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 8.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .heightIn(max = 560.dp)
-            ) {
-                // Header
-                Text(
-                    text = "Neuer Lead / Neukunde ‚ûï",
-                    style = MaterialTheme.typography.titleLarge.copy(
-                        fontWeight = FontWeight.Bold
-                    ),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-
-                // Scrollable fields container
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    // --- ABSCHNITT 1: KUNDENINFOS ---
-                    Text(
-                        text = "KUNDENINFORMATIONEN üë§",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.SemiBold
-                        ),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    OutlinedTextField(
-                        value = customerNumber,
-                        onValueChange = { newValue ->
-                            customerNumber = newValue
-                            val clean = newValue.trim().removePrefix("KD-").removePrefix("kd-").replace("[^\\d]".toRegex(), "")
-                            if (clean.startsWith("7")) {
-                                energyType = "Gas"
-                            } else if (clean.startsWith("9")) {
-                                energyType = "Strom"
-                            } else if (clean.startsWith("8")) {
-                                energyType = "Bhkw"
-                            }
-                        },
-                        label = { Text("Kundennummer") },
-                        placeholder = { Text("z.B. KD-12345") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    OutlinedTextField(
-                        value = customerName,
-                        onValueChange = { customerName = it },
-                        label = { Text("Name des Kunden") },
-                        placeholder = { Text("z.B. Max Mustermann") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    OutlinedTextField(
-                        value = company,
-                        onValueChange = { company = it },
-                        label = { Text("Firma (optional)") },
-                        placeholder = { Text("z.B. Beispiel GmbH") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    OutlinedTextField(
-                        value = phone,
-                        onValueChange = { phone = it },
-                        label = { Text("Telefonnummer") },
-                        placeholder = { Text("z.B. +49 176 123456") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Phone
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    OutlinedTextField(
-                        value = email,
-                        onValueChange = { email = it },
-                        label = { Text("E-Mail-Adresse (optional)") },
-                        placeholder = { Text("z.B. kunde@mail.de") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Email
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    // --- ABSCHNITT 2: LIEFERSTELLE ---
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant
-                    )
-
-                    Text(
-                        text = "LIEFERSTELLE & ABNAHMESTELLE üìç",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.SemiBold
-                        ),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    OutlinedTextField(
-                        value = deliveryAddress,
-                        onValueChange = { deliveryAddress = it },
-                        label = { Text("Lieferanschrift (Strasse, PLZ, Ort)") },
-                        placeholder = { Text("z.B. Bahnhofstr. 28, 75172 Pforzheim") },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    OutlinedTextField(
-                        value = meterNumber,
-                        onValueChange = { meterNumber = it },
-                        label = { Text("Z√§hlernummer (optional)") },
-                        placeholder = { Text("z.B. 1Y-77382910") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    // --- ABSCHNITT 3: ECKDATEN & VERBRAUCH ---
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant
-                    )
-
-                    Text(
-                        text = "ECKDATEN & JAHRESVERBRAUCH üìä",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.SemiBold
-                        ),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    // Energy Type Selector
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        val energyOptions = listOf(
-                            "Strom" to "‚ö° Strom",
-                            "Gas" to "üî• Gas",
-                            "Bhkw" to "‚öôÔ∏è BHKW"
-                        )
-                        energyOptions.forEach { (optionVal, label) ->
-                            val isSelected = energyType == optionVal
-                            Card(
-                                onClick = { energyType = optionVal },
-                                modifier = Modifier.weight(1f),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = if (isSelected) {
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    } else {
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                                    }
-                                ),
-                                shape = RoundedCornerShape(8.dp),
-                                border = if (isSelected) {
-                                    BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
-                                } else null
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 10.dp),
-                                    horizontalArrangement = Arrangement.Center,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = label,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp,
-                                        color = if (isSelected) {
-                                            MaterialTheme.colorScheme.onPrimaryContainer
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    OutlinedTextField(
-                        value = consumptionStr,
-                        onValueChange = { consumptionStr = it },
-                        label = { Text("Jahresverbrauch in kWh") },
-                        placeholder = { Text("z.B. 4500") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    // --- ABSCHNITT 4: ROUTINE-WIEDERVORLAGE ---
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant
-                    )
-
-                    Text(
-                        text = "ROUTINE-WIEDERVORLAGE üìÖ",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.SemiBold
-                        ),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "Routine-Aktion nach dem Anlegen ausf√ºhren:",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            val routines = listOf(
-                                "Keine" to "Keine",
-                                "Nicht erreicht üìû" to "Nicht erreicht",
-                                "Datenmail üìß" to "Datenmail"
-                            )
-                            routines.forEach { (label, value) ->
-                                val isSelected = selectedRoutine == value
-                                Card(
-                                    onClick = { selectedRoutine = value },
-                                    modifier = Modifier.weight(1f),
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = if (isSelected) {
-                                            MaterialTheme.colorScheme.primaryContainer
-                                        } else {
-                                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                                        }
-                                    ),
-                                    shape = RoundedCornerShape(8.dp),
-                                    border = if (isSelected) {
-                                        BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
-                                    } else null
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 8.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = label,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.sp,
-                                            color = if (isSelected) {
-                                                MaterialTheme.colorScheme.onPrimaryContainer
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                // Action Buttons
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("Abbrechen")
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            val finalCustomerNumber = customerNumber.ifBlank { "KD-${(10000..99999).random()}" }
-                            val finalPhone = phone.ifBlank { "Unbekannt" }
-                            val finalConsumption = consumptionStr.toLongOrNull()
-                            onConfirm(
-                                finalCustomerNumber,
-                                finalPhone,
-                                customerName.takeIf { it.isNotBlank() },
-                                company.takeIf { it.isNotBlank() },
-                                email.takeIf { it.isNotBlank() },
-                                deliveryAddress.takeIf { it.isNotBlank() },
-                                meterNumber.takeIf { it.isNotBlank() },
-                                finalConsumption,
-                                energyType,
-                                selectedRoutine
-                            )
-                        },
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary
-                        )
-                    ) {
-                        Text("Lead anlegen üöÄ")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ProximityScreenShield(
-    isCallActive: Boolean
-) {
-    if (!isCallActive) return
-
-    val context = LocalContext.current
-    val activity = context as? android.app.Activity
-    var isNear by remember { mutableStateOf(false) }
-
-    // Proximity Sensor listener
-    DisposableEffect(Unit) {
-        val sensorManager = context.getSystemService(android.content.Context.SENSOR_SERVICE) as android.hardware.SensorManager
-        val proximitySensor = sensorManager.getDefaultSensor(android.hardware.Sensor.TYPE_PROXIMITY)
-
-        val listener = object : android.hardware.SensorEventListener {
-            override fun onSensorChanged(event: android.hardware.SensorEvent?) {
-                if (event != null && event.values.isNotEmpty()) {
-                    val distance = event.values[0]
-                    val maxRange = proximitySensor?.maximumRange ?: 5f
-                    // If distance is less than maximum range and less than 5cm, object is close
-                    isNear = distance < maxRange && distance < 5f
-                }
-            }
-
-            override fun onAccuracyChanged(sensor: android.hardware.Sensor?, accuracy: Int) {}
-        }
-
-        if (proximitySensor != null) {
-            sensorManager.registerListener(listener, proximitySensor, android.hardware.SensorManager.SENSOR_DELAY_NORMAL)
-        }
-
-        onDispose {
-            sensorManager.unregisterListener(listener)
-        }
-    }
-
-    // Manage wake lock for the entire active call duration (this lets OS automatically manage screen state natively)
-    DisposableEffect(Unit) {
-        val powerManager = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
-        var wakeLock: android.os.PowerManager.WakeLock? = null
-        
-        try {
-            if (powerManager.isWakeLockLevelSupported(android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
-                wakeLock = powerManager.newWakeLock(
-                    android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
-                    "com.example:ProximityScreenOff"
-                ).apply {
-                    setReferenceCounted(false)
-                    acquire(10 * 60 * 1000L) // 10 minutes timeout limit
-                }
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("ProximityScreenShield", "Failed to acquire proximity wake lock: ${e.localizedMessage}")
-        }
-
-        onDispose {
-            try {
-                if (wakeLock?.isHeld == true) {
-                    wakeLock.release()
-                }
-            } catch (e: Exception) {
-                // ignore
-            }
-        }
-    }
-
-    if (isNear) {
-        // Completely black full-screen overlay that consumes all touch inputs and gestures
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-                .pointerInput(Unit) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            event.changes.forEach { it.consume() }
-                        }
-                    }
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "Bildschirm gesperrt (N√§herungssensor)",
-                color = Color.White.copy(alpha = 0.15f),
-                fontSize = 12.sp
-            )
-        }
-    }
-}
+               xúÏ}€éIñÿ˚|E4°ÈaÌPTUÈ⁄¬Hr]XRm◊E.ñ∫›≥^YdêLW2ìõï(çÄ}0¸b¿ÿ˚`ã]ÿø⁄À¬Û¶?È~Ç„DddFfFDF$ì•“tÃ¥äd∆…∏ú8qŒâsAHÄwéó`Ù≈8úˇÑù0Í˝
+i Ä{3«üB≥èyCÚ…ç—'}{œπ¿mwéﬂ«›ŒëìL>`“Æ˚óŒ,ƒù^íGˆ‡ﬂ˛è37∆˝Q∞Xvo1s»õ˝Gìçç∫7]‚ÂE‡Ñ„”EÏ>ÙÓ˚‚7]˛ƒ˘rÅÖü·cˇ$ô_‡pCˇ
+⁄S¿|öƒûÎ„1åÈ¿≈ﬁxOúƒã£>{§´E0	FIƒÏU«ØÔ@‚Øä!møÑc0t7ﬂln<y\3!ÖûH0…Ws{≤°≈ZÛ“y0v'.Üóßˆ'ÆÁ;Ôt«Ò¨´∆æÒ+ÂOg¡ï~’Í_´Ôˆ,›Å;ﬁN¬nöc?&»ÑO˝h·å»D.ª[€˝ÒB3ÙQ˚.NüªI~=5˛ûÁé.È>˛;∆Æ?}Ö›(⁄!}ª†£~‚yuõ ö9tùâ?∆„Ω Ùq8Ñ/ªO`TıdS}Ö›È,ÓnM⁄g˚îç?€úAaZˆÿV%„ç…‹KË∂ÜJk÷ ÄÒºùããèfÿÔË1~RS'@É≈¨}Äú∞ËaÙ§¸ïÃ)«Ï«¡Q‡OO√≤Ú›Ù‚)⁄<2F	ÁCôù·°ã¯∂å–ôΩ”≈WÑZ∞◊èúwx«˜ùŸ◊œáò
+ˆ(∆ÙP®'4Ñˇ≈¡áÁE${¬◊»ÚH◊ÉL£ysÒ|N◊¿~ Ï8Ñ◊æ0¬£'rF›ªávº(@!ûÔ0ägò∞—ìâa_r¢ ˇ«1YZólÒyﬂ∑ÿﬂÛ¿â‚˛‹πƒtÁ€,yLòØ·)—hÊ%QÑp8	ºià›—˛v¢(&gÚÕ∞˚˘üpÑ8übÔÛ?ìFÒ7Ë_˛È?˝Ôé˘Àÿ®é'/œ_Ω=:=yiF˝hFŒ‘gW{2’b¯™OÆãÚâÂêsL"µmmÓ~˜dk£≠ìk∏ ≤¬°è~˛áøˇˇ˜Ô‰“z›©f˜Kı€‚7˘'·º<r>,IèíyÈ|¥YèTxÌå«ÑƒHãÙ/™ E]Jz#z†m=™RˇŸD∏{TÓƒÂ o∏å_B{ë∂éÇ)ZN®NÉ«'´é‹	ÚaC‘‰ê…⁄¬°;s"hH⁄ΩŒõ¡!2Ô„˜Œ|··~ª^HhGo‡É¨Q7eIy7…[ªﬂ»-ì∞U	ÖÌUKŒ3¢áGrMä|P¸±CN6◊ÒŒgdjôŒ5—øq·æ¢y<$ä§|J(EI∏¶ÍFˇÇ™D›-≤ﬁΩ∫Nó˚˙Ä–ßå1’†˙R’Æ÷*6≤˝±`dﬂ›z†Áy≈{Ó‘ÁÙŒˇÓÔëˇ‡áÙo©∆”ñb§cká£:…Ÿù;S¸€(Å¡ÛQ?•≈˛èNËì©3Pˆ±è£QËrÈ≠MZs⁄í3-Æ'kçZ´˙%Ââz6Xwò…2¿-`ƒå≈D‹ö˛›·“Õ¬¿w#ÚŒ˙â  Õ‚iÁ∫ÉÏC7∆f≠áÓ8∆	G√3W;˚Å?(∞˝È⁄‚\æƒWüˇ8±èÜ.Fª‘»ÿùíyƒ~%sÙGãÛG≥åj‰9Áç	˚›‹Íìˇmon?Bÿı?$é∞ﬂ7ú|>}€≠Mﬂ0!ÇÈˇ‡ê¸∏·Ù©	ÕÿF+Êár¢»Ò«a‡é˚Œb—ﬂ≈Ó;7^nºËá¯oàTÁ«†Å—¿!\my:Èr¥«éÔN¢~~Œ˜œ;˚o˜vééà¥˝íú[õ˜kq◊aÜÜM+±≥Ü]’àª´	€5¬Z~¶0BÜÛW‡≠d]c≤Ò å±Îaü»ƒÂMcK√çD^"*‚sÉ1RsÉp>H$0vH¶fHú	Ì\R¢ˇ¸«}ãÜ±ªQÏ^*xI/=\°çxπà∏∫ò-˚±{¯è›dŒ$ªóH9SëS.zH¯)"¸4õ'ºÑÀ–ów¸0ôÃrxÖËÛü¿˙AÜËÀ.cü4qÜàÿDÇn:Ùã`ºŒ	
+6p{∆i.∫fBQê„`Œ7Ål>+_¬:p=ò∞úD®K÷‹i›#ﬂ¯NL˛˝=ôµ–IÊUÑJqs=∂3∫úÜ¿A∫Íiå
+ìXñ≥Ô[ ŸŸª˘kƒd+—ˆÅ|ÅÃ¥Ω	]&∂JœêGˆ%9XîÓDÈ:vP†Œ+úƒX#tÊ∞÷ÏY∫Ï∫gôôê=Ãi£#ó“•ﬂ
+#ÈOÇp‡åfË#ÇªªB‹@wü´52n4L≠Æd*:fç}7Éj—!xo}ÌS{≤u˝≥#œ]tUá†A{aÄäûœ√ÜÜ≥,B¢ÔÑKÑΩß¶úsBíÑâ∞õıztÈ\Ü˜±0€0ŸI-kœ7èhUŸ4>ˆu*Áj«∫©hNâ“¿¢Xw&P<‚qh$DÆ¶"√«údˇµH4-â˚ 5÷ Ñ© WC`∫°T/û•{wìÌøJ”´$∫9Õ´»J`∑wükHØ…≈s˝˛2<@≥Á[8H*RSFfpûrh·\ÂP«‡lYP9[8c;±3-ú¢®sê9bﬂ=FÁŒî~)°˜7≥oß8rÊÈ◊/Ÿﬂ˙ÈIﬂﬂ‡dGQ8!˘e™B‘úíjOKMhñÉÕÈôµQù¢èÃà/√”Ë4ç09ó∆´úß‚8≤sµºFÜgkÜKr∆^c¨r‘r0πi∞ª-µ;Ç9¨È(Ê∞˙ëÃ°…—<,R`ãá33ÆJOø´_pæ´=waz…sÒ,:"LΩÔF'A<ò/‚e∑÷ ^{d4eÅ∂G7mìà√Qx7/æ'ã?_&g·iuÎ		!Ä7{,:∏´∫¡Í‘}¢=uLòÉ∞@È·wH8¸{rÑ}D.¸’C]∆–[£É@y√€Ë‡@§¯çV¨£çèè‰/„ﬁ∆Ç◊ËÕ·3FÀ  ´»! Jπb{”N∞†»·¢H.ñxdBÇHªåt-DäïãE€˘É≤Ì‹BÑ hCå 0% Ïƒ	Äf"Ä˝ÖYπuªRC∂≥[>ŸÎâ©Ò…ŒxIõw–ﬂc≤µò±ÌN>ˇiz·Ñé˜ü
+	àdµ"ú—xB:?t¡7hü· ÁN‹Ìå«˝„„˛í QYè≤˜qˇÂ‡ÏxÁ‰'uoñΩß≤ÛailDX´Î6Y8í©ˇ˚≥?≈Ò°ˆß6î ΩY0åÅ
+^Ù=C0 «ªs|Ëì•ry‡è^Òˆø&√√·>Ÿ'¡tç˛±—€Zb'Ï1≤á∆pÎNIS1ëLrà¡ÔM9≈0<oiqBqàp‹Ut≥á6ŸˇÏÑé5ÎËÒ·——·p∞wz≤oçÃNÇ(—ô-6m‚1∆h‡ØõΩXXî|‡?vŒl)í„”ìÛW+cŸﬂ˘ÈÌÈ¡[ÜÃL‹1ıû6ò&#Ôcõê°à^Wyb‚Õﬂ(DÁ¥yÎ∞™7∑©wgu$âÇ”òÀØ√Y›¬·yìé±†¥£‡ôR ÏM˛f÷í`3f Íê™Û9z#Î…=K!Ê°'•–ààØ©èπØQ˙©Ä9@˝pzRÙ}zÚ≤^•i -ÀbÅ◊Ø	*‰!"-É!
+$d¯∫Î∆òëlùù$gMÍvC4»ß˛Y…|+"·VD6Ñ›
+»∑Ú≠Ä|+ k·V@˛j‰›√·üªÄ\íÖn≈„û®èÅ˙◊%"W-wF!ıy”\¢i+ø±˚ƒä˛‘áë7dM®±È.dÏËÅﬁK¿Ñs÷«πr–≤Vö+√J˛(ÖΩ˛>	?ˇitI§Ï∆~≈ X7 DÒ'sÍ+!Ìíy&3ì=†–ÍZ§`-!
+õ£€∑6"¥U‘´N†Í±ΩÄYµu—>jJm3IA⁄˚0vM8w1jﬂ,ÑqÁ‰ÏÕ¡ Ωwéœâ®¬]$·◊!¸MÉÛúπK4wv|≤˝°„GC2∫Iù8#úﬁﬂQÈßê?ÑÊ,yÙ‡ÒÉ'ª5Ï≤ﬁcˇA=Ég√æÛëyÔ„ÒQ0ç(ˇ˝d5˙„¿(Ω∆∑ΩŸäxóÜÊhFb„pªΩJpç€kpv68‹{u˜_ø9=¸Ç∂Wàù—Ãπp=7^ûëU˙ıuo.!ãÂ`Á·‡;›‡õ˚ ∑«Ï-0‚‰|}}ˆ˘ﬂÔΩ˛~p¯À9gô! r)Ñ§˜ìêzü1V¿S£›û´_˚~˙¸_—˛Œõ¡Ÿ/o'Ìºõ~Ò}4ÿŸΩø˘§˝#U•IÔcBüìÒ:qÑ.àtq9Æ|t±ÑÀ$bpµäµtßööóL¢qÆc?Ø}À∂û…æ}§€∑⁄Àã/í?Nù˘g}È„˝I– wΩ¿–6K-fñI€kÆDîm’ø‘_"dπÑíËä,i‚OëëÃ4ÈNº\‘òÕ≤
+	πuÏí
+ÈG(gg˙1ÛÒ¶yÜbåæ
+Ω$@Æ!◊á£òL<˘\L·Ü&üˇ¢1ˆ≥;®{G(ö&$°òúÄa(Üõﬁ”±PxÇ$Ö7kîFÀC≥4Zﬁ¨]ÿô‘5§&–*ç∑_Ò™¶‘M()˙ˆ[YàñÎã°çÆ?vG8⁄æ˚´j£ø&gQ≈l,ij¿4Mt§æ√F1!"‘∆áXÑÜT6s≤Û'Ñßõ≠9º7∏©$Oöí„ù›EwûÆ'ßåBÅE:3OèSsç±°KÛ¯≈rî¨íß@QΩ√:¡≠i¿QKÒŒ:N
+¸∞eπ´MÜbö[úûèp Ω
+‚ã‡=˙ó˙˚ˇYsÊR+Hß	t˙ëµØyË˚º˝`“jú*6ÁÏËdõìk;C≤qó?¬–’˘BQÿfpÄ@£1◊æZ◊Où&–œˇÌø7Z0@·`@aªh¶--.GŸpÒR#ŒW±xgpNƒ[≤Ÿ˛À?6Zª≥S∂+g÷Œb›8¬Ü´v˜…ˆ¡£’ÂnCÉÅê¢X}ó(íûC÷b◊	—ﬁåTën≈nP:On≠∫îï#ò˚s™≠%ìâ…
+lÙó’ı+}≈VO±÷Oåıµ¿gîÏ†5-≈&mãZè—À∑&9ËËî[üä◊XYj[IZØr¥>•®^Rœv∂‰çûëE~BÕK˛¢:!¬~ôe	£Óù2«Ÿêø#C6L.b	æqpôÄƒOç6>:gı¶¸î¡hyíË~ßÅÆÚã1àÊÆ€∑VQÿãÖ˛yZA€Ík∂Mht|˘v'“(¿é˚cê±yÍy»¢~Bˇ≈Èˆ√ŒaDR¥JÑ∂∏œ VûUrÂ∂5ÄkL2kî”¨±G<ccõµÊYÍBøÁÜ#¬M@±˜öØ∫]hQ¥Y3áÔ/ÀdO[F°%´ÂÎ∫•rnw–W∑Éæ{∞s˜…5Ó†‚±tªè™ﬂ™{^âÖ¡=Ïô©	ÍZ†.K˚A¢‘Öπ∏}Ö‹¿÷ áv¥6˘e%∑^¶çZ»%Ø*~hƒïıy[/ÔX1ßf‚J¶Söñhê•á◊oâ£®4!ΩÒO''@÷‘Í∂°√Iñµ-ªhK˘<5Ls_…Íõa4…nøﬁÛ√2£}ŸÏøL]ﬁ˚,=≠∞ÈÎe©Îk‘´Êõ5.él4˚º≤e˜S„F7øLmG⁄›T˙ÊŒ{z2”DúUÏ;±”ü;H-˜Ö[µO‰€˜ß·I‚y›çdl8·ù¯;Ÿ”G` ›:RøÕÅ™ëòﬂƒ∞Kãl_ho;¯Qp˜y’ú•n≈èÉB´∫kÔ¬iPhYwÁ*úÖvu∑~‹Ëk62≈jj˘ˆZE#^'Ë°Z-–≠-l¥úÏ‹»∞Ù@”säXK]í]Ä…F”ºŒ`>ˆSGI
+€fæíÜëÊÕRJ¨ûô„±¡˘ﬂòö‹ò7∫pBÓ,ê”(∏zs>!◊¨ÂÔû°'≠ÊÆiÅ`LDzï±ã„+\Á◊¬AoŸ•öQ˝≤öf‚»ñ$óÇ…º€$d3qp)É0söˇ*{™ŒÚSÜ˙¥lÌ∞Í›tåQŸî ∞œô¿yÿùèê,0/>YÊ√h$$ñ¥Sw @ãÉCœ—ÊFA ≤¨"+2g›?£+	ãîX‹Œ˚#r(Åvøe’X„™&É&ª`’
+(ä≤Õ2’óõL } `=¨¿û	⁄-xÉ‰ó™eè	ÄV˛°˛∏tBgîﬁ™ó^B˛<'Ón†{Ee)ˇe#UÑ}Bõ'=d√sEhJ⁄⁄"qM*p’·b3ﬁïÃ˛ä¯U¶¢8XPﬂ°î≥ı»¬/˛ò3∫fomJx úî˝ >Ω]W†gV%°T–6qhìö2ú©î#ôOaÉ∂Û*Ìù\zºù%ΩÏÎ›L°yﬂÌÚÒä¿	4º•Œq
+‘^;iráFö, v~çTiﬂ ÿoV+Íç>Ñ≈|Î9n∑õ™Ó˜¶èq{∫≤jQì…¥∆â2ÆOK÷’† Äh\‹ºA πÅŒ}≠⁄ØÈìf§∑rÚ]S∆πäM”xÃE„ßy≥J‡¶•~§#ª5®r¯32®“¯A}6{nM™∑&’[ìj‹öToM™∑&’∆∏nM™∑&’[ì™1‹öTKµRÁ≠Iï¬≠I’nM™∑&’[ìÍ≠Iı∫L™ _€MΩG‘FYEO•xÜ≥T6Í™"7M ëµë${íS6∑/ΩÉ8∏<èelÕRãHÍ»lHLOÌÊm®‚◊Ÿbàä"M\∞!õL◊
+CR∫•K¶@y‹Ÿe¶«î»‹µÑÿ4Ò~ùaLSaTì‡ @3™,|Qc=k‚ùØíπÕ3œ˚îÚ]ü9ﬁœÛ$≈bzú6êjÁﬂﬁ#ø&s,ùGƒ≤Í”øÎ¢T	A ﬂ(ôôLæ≤^§õPáå¿¸p:Ÿwñ¥6¸,çãTlOÄ:À–µÑ3ÆDcâ{®h.ñœ¶.Ö™iöù)é…ƒΩÑô=9DòÕ∫}^G¥TÆ9r¬)6†ZÄu«øßqúı®< .≤
+«õ˝áD¿“6kêHâØ{T0üeﬂ4√Rn7ﬁwﬂπêtqEv°?’¶˛úπ£K"∫QŸçå…rH2H∫µ£n∫˘{4¶ˆ∞/òˆ–[‡à¸Ÿw«Ë”Fˆ˝‹âG3≤ ¥ZÈ(V∆R”ÿH;l∑ú&Ò(ò„cÚ†Å:›YﬁyÎÇ8Ìqïnn~EÂtlwa-/∞µ‰i?.ˇmõ™˜Nç)Ühg¡⁄zäN"˝ã“åÅOò›Ñ¨˚9(‰h
+!p]-:#èU≤åsh3ÒÄm0úûÁ∑È”ˆHMG[ÃyhÜWb÷C∞»‰ßâCD8ÉÿNC+¢ùù%oJ<˛EﬂÚÒî#ˆÂI˙UÁçÅ/f}l–¬c¬HÑ?∆c7ô7RgU FÃ[Ñ⁄&aL§?M?ˆDõ_DndÑ»Ã¥BÏñW¡çˇ!z1$!â√ƒ®:{{W◊“øî¡\33Fk6m´⁄ô åÌÏ+yÂµêÿË°"±ëÂrvÙÊ|/ï£{H»ô¢7BpX+[Í‹˘ç'pÊRSÎ—Êd‡ü–õYÿ625#î°m≥B⁄3FóØôÔÃfl∑%fYg76ëÔ∂ü¢◊≥¿«»O¿¡U€ƒ*˝PÊ0◊O—Z®∞æà£öñs‰‘e 4Y∂˚O—Æ3ûrÍÓ•≈{(U4{àWü–ø…H–¸‚tQÉ©«YØ6¨,îß˜#0œË&æ~‚»…—%4å©ë¨á‡O™Ãn ûºàJî)V„:qBV¢Bí:Hgû¶®Ä≤î≤®ú¿Æàπ.çQs!•Q)π]m]ñ#≤4˜«éü`œ+°JÀ ~ç‚PF$eygÎó&Ô‰;ß=aÜöóõJ3+9∂∑'™Û(£îñµìmc¬-”≥»êY^˚FÎ,;≈Ò;çNÖ•G…/j´Â¥rC˜˜¿r‚¯PèÔ•ÓçµÌ¡⁄ÇØQ6ƒ£¿G6Ó• Ídµ’≥Œ»K°I^e6YÕ¥ÊüˇÓˇ†;ïæ›Ÿ>·∑kPM8¥Gø˙_ÎTùì ∆4	8°R˛∆Ô›(÷Å†ø2ÉPû+Òº”p◊s¸À˙ºê ˆii”óô-ﬂ⁄(jMÙ–‹¬o~X6Ù®ΩâñD≥ œ∫Ùî⁄ü-ÔÎtﬁeq§«â˙9Ø∑#ôz ‘[MvX@ŸE«Å!'¶ó©Ôƒ∫ø¥6êÙ{Ã¿7π	≤≥È¥a;:Ô0∫ác7FÈZ∫FvwDÂ	…≈\A)≥çRi¥ùÒòô	ä_CåﬁÅªã∫óvvº}ﬂ^∆(Z@˝NZ[ûˇpÅùª1ˆÎ+ú”óª~Ã˝¥Ø7L@ØŸ¶T#÷ˆ´ˆòË]∫§f'V‡ÔA~{Íuìíƒy@ÈÑ®Ë”5;¥Õ˝˙RÖF¢πÜ/TEâ§ßäU·Saªæd†≈ÚÅ∞èÃeLi›¿tcòcIÀfSeqc“∞î†m©X{éáa£&[gúnx^pu7Yò≤≤∂àÒ§Õà|ÑÀ⁄∑7ãCﬂç…ŒßñæÃüa≈≥ª%·6»\ÒöWÑãs|˚Y0›]æbØAÃ¿Ïb¸+‡$µú¸+·0ç
+îä e:ù]Lƒ‹wAËëó°—Â∞çüÚ†¸|9‹0ﬁ‰)]BÔ\|Â6ºæK7xå·Ì›¸≤◊ò«Ùø˙ÇŒ.ä6æäÌZπ˚*∑',›™;Û˜IòﬁÍ5Ÿëïyºy;∞ŸØ´áÊâˇ•ˇ–J'A˘Æ‰ÑCK•%!Tô:
+ °–‚õo
+VÙ
+ƒÛúÒE=€·e2D>X=2˘i√è¸ÏK˙≈	u/9ÄR?å|¸Õ¨∫=+$Ÿ≈◊¶#®}µÀ^	†¬ıL6∏?¸9°à<:Nß2{Éd‚¥K Kîæ˝ Ê©®√$ü‚é˜ÿ⁄fo(nj$-¨ki•ãèœ®cÂV…£¬ß‚cÅøÔFsó⁄c™*bôu~˙„G‰Séœg&ò/ŸCxÓ∏^QﬂŒç=•“ß$™"?wúÒÆ˝!ÌÅú˙L‡•Øï>∞HIE„¢îvìn"÷aÈct‰!6È#πÛj:VÈS˘Ãß‚:üê ”UÚï-áÇﬁ6 L≈«W;æÔÃÊx«√a,c+Ù!fDqÜˇ&¡Q,’UÚ≈≥áO≤7Ó#ÔH_P≤¸ñ®âF˜JÒSÉ}Á'YI—BQ–)ûÇËÈwÙXô	_ÅT∫Nù}óOr—œ˚èw>ñÊÔò¸0¨€ßüˇˆP˝VéÂ*	«˘8Å8–a≤p.ú#Ë≤áß1"bÇ`Ïá„±KB}œπVÙÛ¯œËÁˇ¯øËø|*¿S˚Ûü¶ê7†™ÕiÁÜa¬s&+*'I'Jöh∞©C™+Ú&,Ä3j≠”ÛóGKT∆q\)ﬁZ=…µq¡æüˇy2Ò+4Y≈XZâtfnˆJÿŒ…pÒ˘èÑxÎÁBÕ∫ÙFÇ+?’-ì:ï:râ©t˙πCä⁄ "m≈ÂççDw÷÷öBh‹LıÙ›c˚∑z ”ÀJ4NNÃ‘∞3ÏDÑ∞Ã^ﬁèÆ	ŒÍ‚öç¶Ü¸´=r*H˝’$Ò§'Ú«S8À˚¯Ω3_x∏?vb u©&Dƒ®ÅOôÙò/	QOQ˙{Ê{Hñû¢!é7åC“Ê9˚5[≈ß®K#JﬂêÁ?Aw…˜0á§)mñŒe˛1ï;Ú/®åë‰r≈S¥v¸^Ià‡èfoˇﬂÔúê	IÀLÍ'd2ObòPö·¯t“-MÇﬁ`∫{Üõ…Wv»Yõ{™l‰π8fáì∑™têâmv»Xõ
+™Lº≥√ñ5#YHSéíß^…§A;‘%Qíº ∏•@≠‡ƒYVÒ™wzewXÃ≈∏0\ÿ¿˚a∞Wææ_,ûè3Ït+JD∆Ï+ëcW#°ML>uÆy∞≠$zQóàDÚ¯:¢òKöúáﬂqo™ K¸«Óò}=û.∫!îbUË≥©QÕƒa#œ¿¢ÆÏ⁄ÁW—ñy÷-¢†%Ê ôX¢˜S6PE±ŒÓÅ+w¿Ë[Î”›£æñkÇfôéVåµpí®ïØNìÿ#§>Üâ<p±ß»b.-≠÷Ãü¶Û›õ¡Zf≤¨@¨≤SoS˙h™
+BÉ1ŒÆÊ#µYy·ëÒÕ»,Q¢Á>Ùw˚dbﬁ£„$"≥3w|_ç""·aÓJµE'±€·p§ê‡9P˚ÆŒl˚áD∞Í…≤@è=„Ö Øßö;juÁ¨N]´Nïº∏)»úæŒ	_&;ŒOÊs–_napÛ⁄ı“EH˙Í{KÌ ø"‚—Z˚™‰ìõ	Õ	ËÄ®eÍû“’qºçõCCªIQ™—-{ë ßç©∑J‹>lNÉª«–‰&í«ÄYÏI¥°Ù¸\K2FUﬂ'zw‰6<°ÔOt/Å˘î;B¶¬}∆7ŸﬂÍÀP£Gm€ïZí´%*õ•„è√¿øßÖ ¬˝y:Õ˜˚√+7Õ‘wÚdÚGóxÃo»d©Øπè=-pÒ˙(VÃ≥"õ”ÛÙﬁ[…
+ÿ9‰⁄ríâègd≤ëA˙îÊ·ZbÃÉ⁄‡ôU¥Í›a>M;ó±˚≤{¢h4Û±Á-Öy794)®ØÀ˙Yv}ÃPã1!´$€#∫3'bµ•§j°ŸS≈æ‚eî{`ò–oîÜø_Ìn˘EP˛ ±πı'iù˜í©√ôËlV04í£¶Ÿ¿M,≥œ±óg∆3Ê'ó⁄Ëj±0L∂Ü<´å6©8Uè‹>◊àAˆïF≤ï◊êcïrë÷!8 ∂iˇÃ∞∂y`^æRËUNP3ßπï“;[æã+a;awÇWN(ﬂ°?Ôìv¿äûãT[1Fq≥Ω¥?jÑWæ«ÿOÍóø_8¿%»<àÎX?ë2G°2ÉOØ±WfÖ€¨,Î∑ŒΩLÜsv„πu\z™ÈÛ.;=4â
+®\)jÃ¥x$ãfå¿¨d∆MÀ]…`t‰4(l¨≠rÉVùÿïS∂A’î®W#’ÌÍ$πB['ÿwv..BL‰"ô7Ä|≠ÕgDøΩ®Á$Ÿ;Ï&›"Ω s˝Ë÷{ƒÇù†≤kÎ«ïø¥ø¨ÿs–8ΩÃ+Ã√µ”¬0ãΩ5WSÂü∏œΩƒ√H·C∆∆û"X§ﬂ¸ÑûSkÒ"^¬O|^RØ∞}ï"ç˙¢ êæf‹Åî‘N·◊◊¢´ê≥÷È(ı´Û;_Æ¸”8ÔßËŸ≈x!s.Úò–Eª£`ƒºµ…«~Í≥û>f‚É$ÃÜ•Éë8SbSöID€≤Ëﬂ√˜‡^Ó)ßkù:ÅΩxﬁeŒEœôî<Ü…tJƒ rX¯–@∏W0ø ÷é<òWƒ}ÿ–oQ¥å†`IÊÀeÔ»{@1}˘Ô(AãsIÏz˝t—¯0§”Øû?Ô
+‘ûı˙»I|àöL&d")Ìâ[:c•ˆßÒ=Ü∂—∑ﬂ"˝ãgNƒ?ø∆!P<∏¬§dW·ƒóà ÃÖ¡Â„®Â∆≥î,ªíü…6Z@ÿ£˛·©å≈·R¡òÙ=è∞éfÖâãx«{tGH\b…Œ#ùA]≤1ÔGò™1*æ(¨Aﬂ#sK∞TÈlœ*ñ)+Ω#√ ÎW!∆)'Ôî∫´DÌ˙q Pvî1^qãœ(¬ôÿaÀqHiœçg8o•Æ∂›êL©SÔ…~jKä“NÂ?ÒÏ`ûŸ¸ê5¶ØÿZ˙(Ñ ΩÎ_Ys“Ä—†ëÁDQ∆Ç*º,´h|ñx∆~)û7ÖüJ>Ø/äø∫€6ô«+˝5ΩµKõ”Æ	/#Ñ2ëÙ™tZß£%ÒûqŒ‘K£rû§]~YÆåÊ^ ﬁ’]ı¥¶¥”CyxYæ ΩlV∏:∂Qﬁ^ ïÅ
+∫1˘≠¨”ºp–3ŒŸèŸõ¡Èç<û~¯$cAlDÆÍ∞Q\2ß≠Na\îLÎCË‡’"—¬¶ﬁë{4√O‰–ü‚¯–èb«·ÓFﬂY,ºeâ-àbö,(ä„Á‚¡>ãÜÆ}	-ßxË—•|U|Oë=G8Óf»~Ïúı oÉW)ÕR≈ÒÈ…˘´Ùí˝ùüﬁûº5¡%>ZB	yŸ¬@ˆﬁT,$:qﬁõª~É@≥Î@§-˛Î
+∂!⁄⁄|∫πâvé·∑I'!Üü*„”rÚ≈®–z˝º≤`–+Ÿ/ﬂ~[=AÊEçV|@∂≈
+ÚÍÙÕ<Mı™®Ñ_7`N%ÖÂ?<ys>ê‡a?î˜†™™≥∫É[õÜ=ÿTnwŸK)øëøP ≈7{ß'˚Ö7ñztttXz(óÍ©~§‚s‘7ˇFŒ¶òr„cä<ºvGóëôf¿1Nπ¯â»ñ˙fõÂ&«ÑﬂŒ,€Ï;5Åõ"Œ3pí_i·(·L¶ÛW>u£ÒÑ<3tAÑÜF¨ËEg<Ó˜ó–oí˘o–´WOÁsÙõ7≥7‰¿†™&ÓøúÔú¸$¨ÊxR(õ¡^πQ>)®i3Ìa∫œJ˝JYQñ»ñŸèK\˛S·ÚpEx?{∑*N¥Ñ¬ó’´åR/%,À‚y∆Ω-∏~÷,ˇ+/D`•£•	E∫7dIﬂˆ–íl≥ö√Œ°%DO'lïÑ(q§Ã*S:y≤-˚å¢¨¸∆∞>co™¸
+ªô˙‚ô-·'•hÿO≤%Åv›¬÷∏‹˘%Ó‹àË›_LÖ]?tG≥?Ø0ç«ûô√ç°+3@},@≈£Y˘$@´£}Ja≠	÷◊‹a®#ÄÄ!hÇw Zà¢É2Û≈¶›5Ù«0Û∑0™≈±ÇüÑ©◊∑ë˙nK3ÎqË∏ûÈ\/Ì≤◊˙K;!göÌ˝{∫#:f©y0í·„ çdv-/5ﬂ»Äa){òD™h£Œ∆°Úb∂–ÌJıR÷øÜÎ£ú¬o‰ø¨uRáÙj@5´i8#FQ¢π˜.ÙE?ΩM6\s¡Ü~Çä‹ﬁ;æ9„‹»Ω ,ÄlÂw'=Úã .ï bcn†/Œ≠bÌ5Æê†˙ÅëZF%ôC"Z8H∞ıH!‹â∞ökË§lE‰ w'∫j„ ¨∏9¯”?Üq\‚⁄ZÁ¶“◊6/¶}‰|Xöî∏oZlÍÎ,VJ•.¡ë›KY÷”6KØîãµT π^¢o%]¨¥@uÛ*Tàj”ø†Z<¬@É)lI5á6äÌQO®∞Á∫ƒK*òwÓ|Lo¬>Ω•RiÈSáπ¬•∞©ãß±W9¿*	gö9°mÖË;´Ü © öOùAk4\2ÿeÙÊ∞¢Ã*Çô;)”-gˆ¿°eß~ õÍÊ∆µÛ8¨J» Ã˘}€¨ÿM•±¨j›Äﬁ◊Âd»Øâ7™˘ÑÎ
+`XsrÑÙŒ÷Ì-Ë ’t$fåœÜ∏ ÏD ©(P‚:bVﬂÓ∆ã~07¯;Y,p8r"‹›†é+/,d&÷∏◊M◊ºΩ“Ç[£¢„ ÊõŒúE“p¶P,Lœ¨öÙ20Å˜õ˝ö’f31Ò‹µ;9¨±¨Äªnk9ò[VúO¯>ua™ñÈÎ†üˇˆ†;´œ~‚È¥∞Û⁄{◊±neA˙Òƒnq⁄fıO}Å∞2X∫ TbÎ∏£a/â‚`^ÍåÏ¶æ0Ê·ı*H†3⁄[g—[GMÉ)¬cÊ(UÉ2u‹—›î≥ÕVÔç•)fãHƒt≥‡«’C©#Wç6FóÃ∆9Oo9~ø^øUd~rŸºeÛ¢á\zSoâ£‡¬”i;Ñ‘ãä≠ÅecâCî·K´éR*–Û∂üa\¶jØ§k…öd~ÛïØæ §töÀŒÕ≠«õ[€˜<|ÙxÂåSóxy8·òÂ∞ŒÚ}Òõ."-ÙΩëe≤Sp¨Ø(Oò∫(∞$…e[&πb˜∫ávà^&˛‘(aòf˘wHW.HO-x`ÂäT%◊Íﬁ=¥ãù$v'D≤\¶˛∏‘Ñv»ZÅ\£ôª®2ïñì—Ë•hn4BÕpZÿÅT@ëŒVn[Dz=•%}D~(e8∂<¿7<q°ûæŒ…˜hFq6†~r˜{tÉÓÅ∑cå≤∫ß%FÛÙádéÜD§£IËLUµ`-¶iìj‚´¶W±äy◊_}‘ô±R
+Í¢¿›Ì!⁄%4πH£çR/~–f´Q†œû°z≥õ±}v•ävy¿∂yõÜπ+xs.ÀÙ≈gMbê-Îº€ìZmÒÓ◊¶_Ù™◊Œ|A-]àU∑5—ÊõµS¿∆ÀÍü≤'Ù õ›€≈—À¿é^]B…vNeöh1:3ÊTon€î_˝<Y·ÊßãºU˛&„±¶ÚÑE•eªúÇÂñ´õƒ-∑éπ$bqCÔºié-ã\<P\À£af∞FßÈ«˛Ä®™ã®F[Âp›Ÿn ~Q¿8∑Ä¨Õ≠PÖ[	@	∑Ä∑ oy+|]Ä—≈õŒ_u-©ÔMΩÇÍRzo·á∫§f ç9´fpV)Î#y?V≥?B◊'M¸iÙªÒ"Ò/„_¨R+Ø"∑óX∏ø√V≤ßWÇ˚kvW[>6˛5-πrÎ3$6` Ñ8&mèÚ ßjŒÎ±‘û>f’E¯Tf¸Sè4P°•˜W”¯VèïÑ©<Éçÿ0\≤sπË|dVA †6t“¬cQù¶∫^%–D_6"æH“‹ÅØê<W‰ò∫„µ|(Mç kŸ4ëÌ*ÓökMÇQv,Yù}j‹‘áHSZ∫™JÆ!%Æ&µ≠|tÎó4*_Qâ°´hLMSÍÚÙ
+kÃ©{FÑb2â#ùa"€$tü¢7°ï«bO[Ò⁄()mˆlòˆLÃhíµ„Üø„πsI«ûã)Ö|t;ûCùÂ¯;>9ñ®Ô[∫‘§q∑¸Î˘OØowévŒés§∞H…Í≤º|zÌÑ„ª?‚—%AﬂÅl"
+Y ¨ÏèjﬁS÷úı∞:¢,'´“ë/¬1∏˝hYﬂ§øûûº<?=®rÖe+üÑ›i7˚Ïã¬s0èÈsä∏öπD~MÏœÉw¯<8Å£dq~JúÃSöëEN*£:<?º›;=zs|Úˆdo‰ªê⁄FDprd@9Èõ»fsiÆX)2`I«ÃçıT32rb-L+≥
+ì<∑T÷Ù…±Ù<t
+˘¸tπ ÛTŒdÇÙ˘Àƒæ‰p∆.ë˙tkÅëøˆú%õrn´*L}ñÑ∏öD˙úN÷zﬁMqﬁN_ôåÀM0_Áî≤Z®qQIjk“ë(Á8 àOï‹˜f§ë*≈¡?x(/xõnäÆ¡Æﬂ,WTz®’rªi	¢Ã›!˘ú]D)BU§™í’œﬂπªX`]·ü@û-ÚÈJé's‰Œ|Ù:.0˙ê†ŸÁ’A˝´F€ÿ[˝ÆeÎí9X«ÃHFz±ÖÌXû0Du“≥∞¸LŒÉÒ›òs≤‡{&Ù®†ª\W^™ìsSàÖãı§çcèÖzkîmNño“u7Ëµ∑=~|îo:LTWÕf#≤∫ÎE+∫xV≠ŒS˘òíëQK3·dA˛·Ñ~óYPJ™"‘_.∑w©‹RÅ:+Àô3v”ZúQæKsz4)ıfôÄÎF8˙ˆmDaõy§«=c‹ıƒ`{mc¥y™Ã¯JÚce¬ó'pÒ‰’æ«¿ùCÂ~PÀzç›l˜V˛+˘¨≈‘Ø!‹Y*‰∞¯É€[ÇïÌÓ++ÊÚóÔKsTã†àñ¸3æ‚X”TÛã·Îœ¥FŸP◊Uj1◊§[º+
+•ƒ˚Nzp∞º¯Àìd˛r≈éöô!ªÙ§N/}ÂF{Ã®ÃûÁÂÇ6™Wﬂ”w„‹πÿcW∫i\|EË{ÙN!òá…‰˛{ë3ä	9öÄº  ˇúV ‰WBı@JyOQJÍ≠P=KÀï…ë+Uÿ+¸êRc÷,»‘Z’√Qá¶´kfT™x¥Vs#Añ∞Åèß)NæwQ≥*x©‰-yuÁÙ1L¶zL3@ê¡œd!é»$CY≈M(4µfÇâÿò«”ãv]pH;§5ÓJ˚Z.H∂¡>&:ù7úa\S[§R 4ÙëK!+ÃvZ8S◊gVøàNH˜·&È.d•X∏ÔÇ∏8v⁄—ﬂD¨˘ΩeñDÅ÷ÔÇ6Ø9ÕΩŒæÃπ./¡Ë–(gxcŒª …·S¨ Ú÷&táMÉPœãæ≤y+Æ·d—°ùøt¸ƒ	;=Ëº”?è?ˇ1¸ ÏŸÕ£ﬂ8.¸ÛóâÔñ,X‰;è˛∂ìLìJQuÜx”ó√á”À8Hˇ<!íˇz`ÁU— NK≈‘?g5çÚÈEP∆q5çËÙ"~sSòı”…Ñl2˘pÆ@'˘.ù‰úAdâAÑÈÎ €çÔ∆ô8$Y7∂7∑m¿pﬂ·> '"oü@NË¶„¨ñªê%‡xH±ê¬@®åêZ ˛§≠Úy™ﬁDî&Ü◊◊»ÁIV5§‹*≠ÿ°jDKìdKæõ∏Dw·µ‡Ç3‡n≤à(Käg∏¿ñ≤W	~µl∫ú¿F¬ì>U≥‚!¬kÍ üàç˘º)õ+⁄•3ßl&L]∆Ê£ÏÄi∏tˆˆ$É	∫Ù∏ºL£i&öJ∑∏/À4“Œ)-§'¨E©ÜX•qµ[Ñ∫vYë1qÚ}—èÇ0ª03Èä„HŸVŸ÷]gOÂƒî‰`EŒ‹ÈO\≤
+%=˝`Rò
+á›+Ï@Æ∏∏õ¡’¢V—¥ø“¸r€ﬂ›ﬂ-'¨∂ºS‘Â≥f÷ﬁg.˜¢Ex≥ê¨∑,¯Kıµ‹ı),¢´;GØ†ºÀ‘†:\-≤(§˜=ZπFÎNháÂπéB¬ºŒ8©89¸%’˝8òövT⁄†ﬁ∑VÁSª7√Ô¬¿?¬M8é‹õˆá ú·–qàllGó›#ı£Õ˜ŸÊÊ¡¡ì«™öÂo$≠˙õ“;s˘ÙØDë‚Ø?°;Ç∞PsA
+/¬ﬂÍ˘CÈÅCTñezÒÃ>Ùáé…M‘”,BKå{¢çâé±]ÂõòÏ@ÿ√¨l˝fˇ°*˜©—eÏ◊µA•Â79|ÒzdaªCO>ˇq4ÉIÎﬂ†ÚO¬∆5ê∂´√è_Çò…2lÂñÛ ih+$üf;Ù‚Wy,ß:nÁ8†J&ULèÈ˜È7T˘:ÙøAGt'„:¢y√$WÚµÏç7nË›Aß”ËF®áíù≤∏ÛH·Vaëx,w–ê∑Åπ¢F «Èﬂ™_ïó™?©ípDÍu·•L”A—ïª¿<›ÀÉ:›1c\Y€ºµﬁó(J<93Î’Ìá àk˝ÒRÓôZ^K:xñ,®dS$_P‘—"⁄=ƒá®ç©j¸ê±–…GU¶è˙á3˚ÜÙQôQ#(48®ÿ¢8©÷ùNÜL„ñµ‚:æ¥Y™ﬂÇ}kÈπdƒHçﬁ(ÒòÕÒ dàﬂπA°oë,Üt¿û!^ª…ıëC8!tBXqπæDz-˙ØÖ÷ˆ'Zö5Äl©ïæ˚¬5ƒs	±JçÃ≠Ë"Hhá˜ﬁú~ÚQ÷7)&•ï»!UIÉô`†Tèœ–∆∑3ä∂¥;OÊuÂrEL‘[lä’¬âÀ—U0¸8|/G ‰Ûö)ê‹nˆeº¬rﬂú–≤Áèÿ=}È…ªhª~â	Qñ”.7ß”~TáU˙˘mÍb‡y∫äVW2e∞&®J#3¢ê1®ª
+—V.÷∆}0Cê8çI≠Ç]ÇXjßT!·‹Sâ£ BEd√ò[Kæ[•h¢ HÅ©∏Îs‹D‰9∑∫å"5ƒk÷¨_øEn/ÔZ/sØtâä“T ä˜∫+` ÂÓ*‹ÜTû¢£á;;2˛≠~?cI™1K«K⁄¥ùo…0!°≠dî„é7ß`YNÁéÎì_á^Ûdß4b˝=ñ2óRì÷˝(±Ã«ÑÓäH¥≠ø~∆dÕó≤aì1ãS`≈9†a 9‘8‘ú£DÚÂu¥ﬁÌî˙≥éÙ≤Ó≠aìgqW˘#Öè◊T"¯SW,Ô7Èû⁄ÓÆzK-fdq∑«ŒÌ‰À?¿Jﬁ˛2⁄)…‘˝—,Ò/Ò∏˚X4&\°âJÇ
+ˇ˛/ö3•&ºA5p|lE€âQÈ
+Ïy+ÒG>I∫–_6._≠Á+óØ ,ÃÀç M»lU˜!£v_ærßâÏv8%Û2ÃÌÓæ”Ê◊3—ÒIã√‡BŒäî[Î~†üŒæác£™µ5∑È9•ñ/≈M–ÒÃewÎ&h≤ÎvæwkH…àñÃ< ÚÒ{_`"sl‰&°ÎÌ§âøä¬BΩ≥ä=)»ë6$92;≤ ®K˘ß˝Ÿ(Âl”t≥∂©f˚N¥ ·,Å›Õ˛ìá¶ÌZHO€®÷Ë’€÷-ÿÈ›ÁÜw\j\å˜Àï≈À-”…‰ ÙW˘ÔQ»»∂Ø°ˆ6ƒ€àÕÿÉ)aXÊnñò_RµCRL≈∞¬R8>XŒ¢¡|/YNù|yˆoHM≈™	µ9µ®ı(sB±®2ﬂFes~fù>Y‚À) Ñ„¨∏ï3Có≥ùó©≠Ã≤(k3(üÉ$ &BÕÎ£‹¶)òÈeDPª©ÎƒSG˚ÛÏ«.Ø’’âí#«]:˛€;s©‰ì"éFˆR'	ùóÍw±:¿/Nº¿±Hù:‰ˇêV(€Ïﬂ◊xï!vB"‘‰mø{h—òıóÙ|HÑ˙“i;√Ï–K8ª<Ì>†cpÏ>ÿ‹Ï!ÏDÃ≥Ë¿â‚”$ÜòJá¨—Ä~oYè7§}ÉÄ
+‡Ÿá˛~Gñ’ú[º6#ù)Yryç®
+vcR¢˜™`˜=¶Sè—ŒZ»™1Q›,ä⁄zX )FK-SΩáY+%e´æfr¢˜UÎ«¡°$— 0zhœÒﬂ9ë‘GfŸ√^”Ãóƒ¶⁄=åâãyp	√¢L≠öœ∏mœ>#0~¬J àéå¬∏Â8tÆ®®sâ¿Ï$…ä'{*3Z÷≠`N•èmyÕ ÉE2ê„è√¿øßu¡É˜ó®‹¡«·≤ø'<KÂ8BÑØﬂw7zH¯`ŸqAÈz2AëùÀÊ{w-ÑpI€ïCwÑV¢Ù:¢ê6°Ã~ç∂¡‹±πQPƒú4Õ…®9}qB \'”®ç\≥|ÿßxùÖ~ã∫†≤DjN{Î°“#NË"‚-K∆
+Õ^;tû‡Ît®^&Võ3"ÉMPX¥`YC”ÖˇjÈÒ£>⁄q* l˝‚áEƒZC|øåŸ÷B§F˝∏à˘ª&àÕe∞’ÊÇ>)é¡∆ UÄ ‰<*"nq÷K˙∞=‘äòç¿h∞¢€mÆhiz¨ØT∑“⁄v“⁄à•ƒØû\”ÇﬁosAÔØkãñ7“∫ˆQã;Ù…óYOn˜]”ΩøÆç‘‚}∏6jyT¬¸¯’¸qÛ'≠T*⁄ıy¡§J.`Z+:Ë~E:8Ïﬁﬂ≠Ë@©j‘ñ"±›Ü"A$¶IlØUï®ßÑ˙'t˘xÀ xìiÇƒÛ»(œ†Ä≠SûVçﬂú$¡Ç÷Zc2ø“rıZ‹æôG@À@ì>˝·¸~≤>ì$ãR¥€(ÕKf¨p/†t78ÿzºΩcœÁ[ª…–∏4∏¿0∏æo{pö@mﬁ=‘ŒÖ%Ä_‰`¡«4≈,U∞JçkMj]gm-3{s∞µ◊/v»Ò\(AŒÚ@%ìJ‰e†W—Ñcí’≠ΩF∂,ÑZ‡!üÿ6•’à*†Ön5‰Fi∑Zz˝™~Q¥Gç¸b*_n∆w=gtYÒôy2ëör?≤&Ío£qå›àÂ÷f5™π7+ﬂ}ö9iü–
+pŸ∑PÆ)— Q—ã¢‘≥4‚´©J†sÁ£l ü˛≠/¸ Ø˛dv[Üïà@÷ªf=πr∑n`‰Ó*É6N#MOñ
+ï€Î}s∑W)^¡ñ2ìPIÛ∏móÎl;–â–t⁄È/e‡˙LŒù,ıfV‘j  h˙LL¶»tU∏W√Œ’öT:YX¥^ÒÆ~ßJe∂6Ñ¥¸€Õ±¨îÆ_Îñ<ÏûÆ*-ÙÜ˛9⁄n≤°õofûõÌ∑w>J∫sm2( ,Éwuk;∫YÊ§:Pï√®Ëbu!´Lu–p√ åeˆ∫:Û^É#jM˚»ÏIkaPWG!”§Ø«X´)«,˝≈¶∞@ˆg≥Ã±ôEíb§icøE;„qZK"{ñ∆πAÌôò<=,§SŒ‘}6bé%O¿zÔBu	xÚÄbÌvzh<Ó£chI†”c• pˇÂ‡ÏxÁ‰ß‚zL}÷ß. íΩC6U◊ó‰Nö≤µa∫VEù oTLÚ<Õ◊ÓÃWÆr»ò£Y⁄:YÚKÎŒÀàÙT¬¨MZ_
+…Zû*gﬁ+|T%íáJ
+xH˜∏$Ú®≠:ÓUÃˆµÂ”àõ4ïı•£Q˜˚®îñª¢œ=2 %AÛêåí©Î)Úá≤˝ÖfÆˇ!ô|˛”äµJôào §µïÇ»€±Ú6'8ÈÙ
+:˜A*”JW≠§rî•#ÖTtPoÑ—⁄›7i°Ä¬È‘=ÙA9ÍA]Öàû,?æ¢ŸWÚæÅWJ¢ﬂw#≈EÇ‘äbúï•∆&oõµE)'T›–’ë•ç
+%mU…úÉ>åÚef°£M&s=c ™2+Ó™µ±{í¿=i MÕÌT[∑Ù∑YÚxœˆ”-√yqØ∑ÃµÏ'™J… bze≈©éxî,˜æ-ÈËUw.W}e•—è.&;Á]zd∫|DÄç]®AÑŒù)ö‚ÖÁê%“hÏ÷u)∂I–L¥M∆_˘4)uôfß´7mõ±ÿb7l).wkDàº†∂ô¥¿ÍKóŒ®BïiwÃJL◊›ò“¨kT$.#Çïg^?wÁ©x¶8vX:ê!«41ª+aII~X•3q∞RODÑ¨ﬂ9f5qY/≤È~p£;ıiY ∏ƒ“`ˆ˜óÃ⁄¨º]üo∆ê‰◊´‹√Ωûæx'øûKø=1è`9_“É®C:4∫ìIG*=@Ü!=êÙnî˛∆';Ô°;ÆAªèUH«∏! 3¬ëgxúxZ_ÌSJ©ÀñΩ>Ã∞»∫–À0⁄hî5Ç	±ìƒÓ$°…ï—òÊ`íÅ=Ú]Ï\¬n'TËÒÊØAB•µ´F!QÍQ)–ƒŒj¬ÅÚˆﬂ'Ï:ò ‘Æ¥È˛¬RX}8i˛ö™P∂`ã0X ´√™ Ø+◊}ëu·uˆt7âkœâAsNèÎS·mÚˇ  ˇˇÏ}_s€HíÁ{äjû∑è⁄ëhIv˜∏€„•$⁄fX"’ﬁôùDI¨HÄÄñÂøÌ€]ÃF‹^ÏElÏEﬂ≈ı≈=›Îƒnƒæ˘õÃÿ˘óYÄ†P®@˘O3lëD˝EUfVVÊ/,b!?ÀΩä4πj‘ÙÀ† › ´å{"(Ö·$#)’¿C&Ú∞sÙ*535Ω∞5πîçûÂwNMÊ1çª£ÛWÌ£¡…Ø£e/_Ú“
+≥ ë*åG9HëÅªËcê8^A=fU¡7g}.0›Æﬁpì:¯ﬂ(í¢Å„›ˆ*}ÄÎÙ›•7ì;¬‚8ÂPÈ›ÙSMdôPxäÖ†©*4®*Ÿ≥¬õár«†¬ôîsUÖ©]«¡ÆåìÅ°èÔÍ∏∂´ºs/∫äÉ’Zæ/
+õï`üU˝å®zN∞4UL-íŒ’fi„¥åJ9i±et_ÜmÈ=Uj2Ùç‚2∫Cπåå≤l•©ÿ†.£ZúäﬂdÒïb·ZÃ…I8«Ü.£Y
+í.7(Jrü&ÒBCªRæbhTçÊ%ävù8oÎªÖ…#Û€ô¸æ◊{kìG&é:‚ñ'è ﬁ˛‰Q]∑By§ÁÊ°ıPQ˛Câ\¿¸ƒ'£™n¥ŸÉ¨T}@ì&9≤Ω·å≤}dÊÜShŒNìÒv0Íé2!„Ãıç—ëd˚Æ?úŒl˙˛G‹oF’eo*á˘Ñ{[UÈC{%!)\›@€Øm-DYŸ‹DÁ7—{Z3∫JCÔ.
+îRˇ™¸—ËÜYF⁄æ˚UòLôà1„ì*íÈµ®åt˘éipﬂ∫üëå/ñ>r¨qG+£˜∂2™xó+£\Ü¸x…‹ÖªÓªa›ˇ}qﬁHçÓêe§ˇ*zpd™)"ï>3"’tn‰˝®˜Ïàd†‚"’w¢C ;ë∫âó%úLauHÏ·¸.¡∞m~1Åm≥?B¸Õ{
+Â}RöLÉ?¯Ÿ+±˜	∞œNa4a≥ë4}È´jé∫æ¯*/ï…Eù¶º=dT¡DF∫+§>Oïˆ…´¨îGâåÙºLdd‰y"##oy®H{êÚZ˘êËû=f÷)…÷‰r#o™v7y3U\sdTßªéåÍ†˘òC≥¯øÔæ¯‚/èò:|1^:§O8ÏL|—(ˆˇ9 <KÕ%l7æ¨≈Ç)ÏÑcMmáÿóGSîkPàˇñ*z=aAõÈíá¸kuYÓÚqË1|7äc»ˆqÒq5Ï˜tÁgñ7Ôpå–º‹µú®é6˛»q„†x¯c∫°æ{=’êÆ1= ~≠=¬∂ÇdóÅãÃ∂¶u◊ß¿åF0®Æ©-y \◊Im·—1y9j/G∂{L_€√L«Œ%œ®ßÅÆ]{áÀkò¥sóÁ®HW|$Ã®Óû√¢Îé@”ç_M$(r⁄äƒM•ﬂ˜¨âﬁúÒ‡$è≠^«÷”ÑÅ¿ˆ˚ˆ|9c~4»{“´%›•‰”πÀGËÜÌá‹q‘À©ŸˆÒÂü„≠çÔCÌœAe˝=ıRU7ÂÛ>úl!ÛÙë^»í Ü ns¯Tãæ±PJ°3_¿ŒÏmpF‡:c{ip‹”1d0ﬂ¬¯+QÕ*[Ö—IyeÓ„$éë=x_ä§ÍVùﬁµ,<{nyw‹tëµ •™’1∞˘”≈ÜÏîÚü±ô)_kËË¸”z Æõë/ˇÿ0N∂(3˜ß™ÊHØÁüÎ√P÷â™«©äûyá;Ω ëéÌ¿Yl6[:ÂñûWŒ	f™‰î#±Jüï/*·ÆveTìrY…fÒÖ°∆%†ƒ¥,Ô¨N¶˜Ã—òﬁïT∂·ÃŒÛW*÷√ˆbA-3 fπäiÃWﬁ‘+›äÃ6F˛ö2wIí/π*ÀùbsV”M¢Uì+\TŒŸZãØ	bn‡·1ÃvÄ¯◊ˆlT`˘7∂ÙW‘”eH∫˚…|YVqπΩá•»†+ÒEÙÿC	„Lz„f√gv∑ò4∏ÿO^∆ø|í øYﬁˇÊxÈ‹–ô¬(,6%Äo6oË›6Oê∂UµìNñùA7ÍQ˛∏Ú0◊úO9îÀ
+aÇ0Æ˘£L€[ﬂµçˆH()m“êÇõdÀ4Û´‡ø¢y%V’cBÁ˙@ˇ*:î5å5ËΩ/S7yÌEP∂óÀã«ãe÷nMÀK˝DÊFôæxFo…≥e∞Ù@¨ÿC≤:Dìá‰—1QØ›Ÿ[Àz∞oH)*êœ¨◊–ã ÔÚ)ë∞é˘¯äº`o«œUó‰»“Ãû—»r[m,–ÊË,ÁWs
+ÀéÎbÁ·w‰ø#˙ÒßTLjcq5[æYzwº¸sLÃp¬æÄ¬ˇı˜™¬√ªkÍ]Ωvg,I^¸ø"ﬂÛØ»ˇÈ© {pZ˚~ü„~ˇóUµù—“p\ÅäJ√
+∫Ò∑§èﬂB5ˇˇ‰PœÚW&˝“ú}£‚FH…w›NQÉ%°È=˜6Z∫ÒG®¡„"“—V≥PÚ‡QÊ æùÛÉX«êYµÛ¨ﬂ 9*øÕbè2N´z#¸Ï Œ˛%≥7‘q|âÎ“Aö £Ã°Ä_7®åÌ{àƒo‹P·±…4ùßÈ$ûµ"*wÊä(˜ÏïùÊzO]’r˙ä»|çß±ƒÂ¥…y,ÆOW∞À.äQcÂ“*yπ#ô8j«xFTó~-##y§qÑdÍ0Y*˜A]y∏vnæ+‚ÚñÏÔ
+—^fOóÉ77à¥6√ÅHıÑõOÚh]ØÚ~|~ëP8	"OFºUw˜÷…}ø]H5òLîáîüç…‰ïÂa™–èﬂbrhœF˛pj{Û)ù¡dﬂP;¯πöK>Ë’õ MP™u≠Ωn\ oí¸ŸÖÉPxΩ7°Ô∫“‡z|„¡Ÿ˙ÍÓV+pªN–‹z˜g‰E≠ãê…W„ñ>f®R+´∑†NDVÜ<Ìl⁄‹IQ‰-]≤Q4äáÏ†«Ë‹
+l`çÌx“¨KDVÿvk
+vh∞m˚3udˆkúıö≈(?æL”®‡"Ÿ¸Ú˜î˜˙Ï VıÜ¥Î4Ò¿∫«Ê]ÑRºR÷ﬂã∞V,‘ja!ƒ5>+DÓã®ﬁœ”Â¸ZÍ§òxü :/Ó5x†ÌW¨…v$u)∂¶*Ø°.™ÒZ¥ vﬂ®Agn íí#˙ø2ÙäoX^òã˜ˇ∆uvÔˇ‡–ç>$°üÖ>ƒ7æñÑ<±ñ∞∂…+·E¨‡c0'Ã-”@YëΩaıIQœ∫—Ë/l:»åwÛÂÙ¯;ö⁄d¸˛'‘ª‡áhÂka éãO4¥0$ΩP|ıÕè°íÅ‘øµÉ·T=Å√)2Ê&D˘®áÑ!*¨T¨ $¬Ä4∂9ìË¨wF]Ë†·.Vß%·%°%_Ze¶™-	Tõs[ìç∏©0$?ﬂè:ø“µ¬%'Ô*$qgÕºÎ
+C-¥ÛWÅ”’ÕÕª
+c—àãØ°∂&(…¢Cõñ‹B‚≤Î9Ω}ˇ”tm3˘ØXGh	Ã]ìyøc_>i‘‰z|˚j¿z-c^/ÎháT®†üœ¨;X…Óm^x…˚øsÄ_	±%π|ø˙	s[ﬂIÏÇé=ÍO?˛3ÿ7∏vﬂÏº≤¶3òˇ∑Ôˇ0°ﬁ“ôlŒ`˙Yú¡ÙóNüﬁ†OáC^√˚—9qﬁˇ4ú˙xﬁi;p¶9¯l zSÒ‡¿;STÑ©vèb±–éºæ}•k4ñMc+pÑj{…¨√˘∞h'f~~≤2ÔmìΩ]{1≥´å≈∞xËy≤±'ØÀûº—Zƒ	*“Z‘/P•ª2(¶S
+±≥P2=¬j°#◊rùOAˆΩ]N(«êXv⁄Kb}v˙ìÙk=ÿÅWx‘•dÑŸuÀYﬁh˛˛ß˜?⁄¿?ŸîÅ¬˘˛ßÄCí23.ÂÍmA3
+#'ÕÔˇ‡Qoã`µT-‰:z€d9'á¿ú◊¶;Ôˇ˘NR÷vyªƒ}:µŸ·™RLk”Íñ|™?é(ÂrYù–›~ƒ ät¬aêŒ-€k6BvÄA Ìõ`âÒ +ùó£ñ∑∞Èêb¡pÈÙ‘∫°ñ√€·—·>kæé÷è°"ö:ˇóp≤Í
+±ñ¡Im¬≠?`∏57CÀcHYZû¯πı•BïÛÒƒ6ëÀZ%Dú=Lm¢]™öG±2$YLÚgò¸Bé7öªú™iÓG&îüô‚˛õ[Ù≠c)<aﬁv8!â–7⁄{Z{∑)Èáz˜"ú$Ç7¨0â∑Ùö23`jNôÕ&ˆ‘∏>DÊAˆ»¿]êhÃÚ4}ü∫v∏ãhÂõ©ËP
+l¶£üÿŒçO‹k™©mcŸ!„±X˙‘@Ô1+Õú?±ËÈA‘v	∂!éø.≠;nu£xoÔÑ‚≠ƒ€›Ëﬁ∆∫˜ÓF˜ñ}´íq˚àDÃ“L<$¸mÊÚé'’('ÚxŸî‘[:ÅÆ‡
+Àß%üyiÈ÷PB¸•¶c#Sœo$‡Fn$†î>	¯Ë -¯àÁ	f˘,%†.£nÑr*∑≤BN] ¡ÿÄCWÂŒí34\Ÿà#GkBá-ód…Uÿ±VÄma«≥Ò˙s‘”4ÇtÃYq56º&\á{qÊ+SH˚Õ˝Ä@ÎªË:cws?¿{,øh_è=D«¸‹l<†C&S '§á„¿◊˙úπ7÷åŒ…KwÒ1™˛Ü∞·¬fõ‹R«!£%¸\˚±ñcÊ‚˝¬rFw‰Ü¡/A˙˘≈¨Ê'C3è`- í∂	kç®zXÎRÚlÙÅÍ‘_ÄyÆ=z√≤´∫>mÕCˆ“≤ôf≥Ò»Îqª^ÊÔÑí;Ì≈Å8–ñ¸≥PsÙ‹.Á =zÉ–«LôÓ—&>iLå£oÒÕ˚?8¸ââ∏Ô2d	ú	Íç-ﬂ•ÜÃËÑÆj≤f>ëæã1ÊSƒ˙`ÉR;t¡à‡ØÈÙ™¯8ÏfÂx‘√ádïaìp¨±‹áÒ4˛eN‚œ"’Q∆IÃ{'MZ,í’:ÆÜvWÄÓ¨©“°é¬GÎ(◊Ïc2Ñ"f6dÂ…Ë#ñö•:å=WÍ˘Óã6&ÍÒÁO•Mß¥eõ[p
+œÁ|u∂≤iÌÌ~˚do+£uÈﬂàÂÅyL∑Eç?˛Û?pôÆ∂†ë:äìqoÎPŒ€ëÄGÜ;ò†”cíâD«kdéâv>_ﬁ(~wü={ÚÀ≠˚‡âmAè!>ﬁn¯¢Í˘_îë_å’f‡4[‘˚v˜"
+Ùi∏4˜˘“⁄ò$˙p&â–∆.¡z∏ŸÈyßoœó3ÜbJö«tÓÓ@?ñ˛÷œ¡.±π~—∫~â≈uFëOAΩ7ˇ´5Ëœqı% F´_{hb€ ô¢ò’q-Õ¬Ÿ˚ﬁÇ"=ÂÒ˘6'ÆáÜ¨˙ã`ÿ∆y∂oﬂ∏cè⁄‘á&ê;u(Ò(h€ë· ‚q˝õk£U◊‚k#€_≠8X¥4Íi≤ö¸iíÓÂû®X{í£ç•“rx|øu:\Ùi b}‚K 7Î◊'s∫Ò“æÓÉ¶#tf˝ÉGÊª~^≠—\¯·CrztN∫ ∂†¶t BmVQŒE∑-+ñÀY‚›ZéÓ◊πê∑0t3ıÂâfÖ¨OÇ∆Vπ≠3y]ç…SãÙï‚RïS¨5OΩµ‰)©⁄I©Ïi©NMxƒŒKw±ò-ù	ir¥"Ñ¢‰e∑hÇtü«§˙‘FÖäS»vø©®Ùÿ"#j;§=ª»ö{>∑ÏŸ√^{Lqì_s8J€∂…çÂ8~ÄLSÏÖü,$ıÌ‡-ºIg \Õ	=ö¬+\v);∏Ëù^\>ªju˙˝´AÔeÁåÿØâ’Ä9ó°Ãhæm∂»—ÃZé(fEø	‹≈Åáa©L®t
+©6ÖWCÊS
+SCƒÓ™_v˛âígd_uË„ƒ>∂BŒë[‘0ÁS·Æ·Ò∏$Rπ°{÷Í/÷µÂS\pP%Ú˙	˙î›∂≤Ö‘áQlleó¨•ñÌü3Ìyá3Àπiûc#
+º;ÉÙ¶lé#w268>¡8 ñA¨O=D˝iF3t“=?Ïµ/éØ˙ùãÔªGù-ä	L+î	≠ÿCÌ‘r@Èg>ç˙≥Zâ:è≠¿j9Ùˆ|™7˙∆N®Æ¿|Rl“-ˇ◊œmODÀß¡y(è–&è?ËWu¸÷¡4∂ÆÂ qo(Îp8√€LvÑN∞õ‡KËπ¥éìŒŸÛ¡ã´ìﬁŸÛ≠ñ?GØSÔ»–Çi““y3§LXõ$¡’Q‰ƒJ∆t:õÄb0E?iÁÄ<¯Å∂f∏ÅADèNaƒıªÇaˆ_Ù.f„,|JÎR»x‘å˜« Ös:°60°c&yZµé≥ ©πW◊RàT≥[FAkäÉê:ﬂ≥ûvé¨7r¿÷Q…$wPaÏÕZ¢i*úyQ¯†•h‚Ùñ˘íkÛyì	èÃ‡-èäD≠Æòç.ÿ∞Ïl]ôœ)∂Aï-P|ˆΩ†#Y∆îÁ‘ér≥+Ï¨ÃÖ=4©®ø»ò`láè"êÀ¡ÆiF œñÓæ—>Àò†ã/˙«r%T√lßZ‡¢?I∏,ÂÔ¢Ï≤´ÍÏﬁvó45i[lBé
+Úﬁ¶Ô‘g¢CÚÕ≠>Òøﬁ}¨Ò/èòπ-Ê_Ä,&Ø¶îŒŒmL/»_gî∑Ü°ƒ†±èœ3⁄ê83˛|˘+˛mM˛Ä4·ƒø óéñªﬁ‹
+ÑüÄEd∞?ê∆üÌÓè-˛H”b4˘hiƒ+Ct4âf„ôıˆ˚‘`N·!ft~MΩÒ˚ê-Ú√ì|F&X,pî¯!,≥a<¬∫∞$ﬁ`!nAíﬂÙ∆ÕƒîE˘Ì‡ÑÇF”‹j:±ñŒpJGùÒ
+4≈J≈Uîw›Ÿl‡v·‰ë,Ú≈Í› ™OVc˚}VQ◊9˜`πÅæ)6…ŒX&¢âym˚6¨%ÏÉáIT1≥Ó`N1h≤%>á_$*¬÷≈úÁù˘"∏ìÚÿõ‰8 6ÈÌ¬ıÇé3Íç«p~!…æºÆôÎS?¿∆°¬DWÊ∂sx◊Û‹	+vÓ¥e]˚MLå‡ÚJA‡o4¥aı∞ƒ√û…¢æÖvû∂fPVŒ:ÿ—⁄Ú@-é¥¿Võê¥w;\Ö¨Â≤'ó8µbU†¡‰-ª4%ˆvì5ˆ◊BUc"åíÔ»rl¥∂ˆ≈ï-‘lŒÿﬂpºΩMÂÒC~»}X1AE&Z[©àŸ|’xxAıM Ì´ Ôµ‡0ˆ8UR0ö+L/‚ßBØÅƒV∆e€\≠¯ç∞µì∆%b€7Ã&¬ﬂ.{Ïo2%00¬ﬂ%E¢å‘ÉP◊c0VNÚ≥ÉÎ§’Åö¶»ÛÅu ˇ,–…ãW≤-_√"%∑õR„ÉOV}1ı*îm˛|3shsÖ5Ôsé
+™9XWˇŒ?	°ÇÛÃö€≥ªP¡·ZßÆ„≤À°|5^UL#:Ïcbwn÷ÿ˚Fâ,ëP∞“’à
+∫ ÛÖoœp.4¬Çà‹Òò◊úTYaPÒo8.Ω1LG˙$ı87™H˝çñnx¥ÙwŒ4ƒÅ=ß\KDßpw¬ﬂh(I^∏KO–√oOmgàd| e0•$¢⁄Óåmo?M„⁄»|UE\@–˛ºòa»ı]¨ÃÀõ/€¶†£	]ç≥XÔ¨V¸—-QÍÑs0t£è@‚^Àﬁè+{ﬂd/∏K^l'Ï,…èÒ‚jïxí§™”aˆ°Ï‹"gÙ´km…¿[{mÖ◊´ô9ËD?6G¸Îé47Ùƒï•Y`Zw0ÎµéhäF∂ü„-^R	»R![o\NΩ∑‘ŒÿÕ_Œ=\·!6¿LßØguÆd≥≥[< W¨ÑÙmJÑnD(‰áíº]ŒIßÚË‹£Åi˙Ô-x ^wj∑=…©Q˘Üp‰J\ˇr3±Ü´TÆÛHN#:Œ"º&Ì±ÁJe›¨Ãô∏ÆHR≥ïAÀ¸230Â÷≠x4±êí∞¥àbs;%UÜS}Ω©ÇnıªG˚Ö`π<_ôÅ@"L}†,G¥≤Ú3ˆ1∑ÄÆñVãÀ‰^é+â˛ñ.kö’vùÔº¶N/®Ë5_‡Ag.\ãMˇ˝Ä›jÆ!7˘7™h¥“˛à÷ÉIô¿j,TK≤œUkZLZÍkQ—›h∆FÆ¢ÑYÑ|ó8¢ª¢y°szs∑’⁄¥’
+\¥5›A#eÛ∫&GhB,∏(Ø~ıäTAT©“ “`ˇ±˛ë^$R/Ú¡Ï5íÅª»◊ºê‰ﬂﬁ7„Ú√≈m∏òîãÒ5b∆«æ˛∂>⁄hÓÖì’¢áÌÁ,‹èC+ΩØœ«•¿ oú:’]E8<dˇ)«ÀöƒDZõ 5KƒöîxÔ⁄‰≤N˙•ÅO” ú´>iö˙$UYı8á ≠ÈÂÒ$Ãì0Wx}%<@zŒƒ-±D€>õ£apfÕÈAË≥±-˛¿íú'qù¿].§9
+ù˝˚˘‰ƒu&)£øÌ∑óÅãÌ∂áË'ä…u‹µ–L;∂f>M÷⁄vFÁ÷“G/ìÇÍ∑û1ÍÊtñKÊ&}êpTG˜ Xft÷z?5yÊ+ß>∆ÏïÙ¸ÇZ~Ñ˜?˘4Û(è-ÂN˘kÖ˛¥Nˇ9‚tú¿Óí#.Äå˙w‚N¸–iG˙Üäj≠^…Ø†äN¢¨vùgÆ7§GËπ ª∏ÅΩlœa•‚k…{Æ”çÓ7∏vﬂ‡É·™!©∆≈ó<tf-|:
+ﬂµ˙éf˜$qª3uoè)lıYA1∂‹2%¸ëaAPíÈËÿûÿAAìñÄoÑ1iÆYE§f·ÅWG´Çzà√ÿ√$k∫Ó£¿Ÿ?íÓòSÍ—ˇËã≈†3ÃFhÜ†yÖ∞ÜÈ6ÅçGpLÅ=ß¿…],sk√ó¯0ô+;ˇ9úå´WXÙÍíÅ">£hÒŒv˛$ˇ€>NnÚ÷Îÿ—@¨õÛÉ™˘à^c‰‘ªö¨ﬁÁç‹>LgxÖõlr+3<vâõ\≠´JSŒYÈ∫RÆX˘?3é6EúÀf‡-3?!›∏®˝†ØPËﬁ‡∑ÄÀYàG≥ªõï$…ˇ‚"$û"ç8$sè;‹C∂laõ†]’l˜„s'p#ı∂˝ã˛ÇÇ¢t?˝ÙWMÓ◊-œ,/‡—Q[Ï›wﬂA¸S¸Ï´¡“sÄÒA-8r-P\ﬂÖÕfòHlJ^ªòºû4)<2¥Òåé;ëo-⁄¡õí=µE,èí)≈Ä§!àHûÖÕ≠[Üö^”ãœÌ°Á≤÷æåªìç¬Zò¿<F"ä0ßL–Q¯`˚Ú∏€Cûû∆1s:≤≠V[h —∫ÿÚSt4Ê®Á§gU+TáEQ8Ëï3ºA<*\Ï∏πö+ÖÄÒô¡›Ç945,˚ä·n4»Ô~GÚ∆˝’W⁄Ï/-gHÛb‰±i∫µãt‡2E2ÂÁ°Ê§ö?>áíŸÑeﬁ>y’˛uüx†Hr	êﬁZ$p…di1@W/X}Îz7>Üä¢§°Œk€sô˘
+6ÖÌgKÊ=ÁsîX·÷b¡Ñíø•Z⁄úS«Õó≤!>ïÈwk<8†ÈØÂaãÔ2õÛ$Rá’Ï^ˇ-p|r@¬ZpË'—œŸ^πØ©ÁŸ#JP9GHFkt*ÔHs39ïÓpâ≤4Õ≤áÄTátb;LeoV¢SÍbÓsEt‘ÙÊ˛ËÄ<õπV†’‡dú£• ªFÕkˆ∫|P4@‹iıö9Ì™˙[XÅÁ¡ôé‚ø°ë¸∆ù≥bûÆ:©ïÒÃ∆èe≤∏d«"“tÂNÌ7uŸÕ’*Á_¥⁄GÉnÔÏÍ¢s‘{~÷˝MÁ™ﬁÈΩÿj¡NúôÑ‘.ñAÁÏ˝lùø\¥ØN⁄gœ/€œ;WßΩ„Œ…6…<ñ|‡ÍŸEßsı¨wq™Å™€ÖmÆÕPîÉ°ı†πØ⁄&6)H$b“ﬁy˚b–mü¿‰ˆ/O˝m&ÛÍäÈDZq∑ß\LpûÉ¸≈kVV	í-í(Ê#[¢dÜ›˙h/	¬˛≠¥‹Gsú$Í3’ñïz î(v∂eèùß3&|Û—ˆ¬≠&ü!~‹¡ö\ﬂ|⁄€û‡`íOHCûÄêÀƒ®^°Cè/<:∂ﬂÑ'†ÍöS„O?˛˜ˇ˝ÔˇÚ˜§¡èK9éZ_.F˜;O5Ô∏,D%D„ÔËÉ’0£¸ê*˜Ó∑é‰iÖesejÜ21ß~(Ûh#`6f#`FvÊ&
+rëúY$>ÈıËC4)˛ã<6Ùô/: $?%ﬁ!$'îftíINÓz∂˜=n„um◊∂•‚©∑YeK	R“æ%7 F2wQh#K÷!Z`Ÿ” a"˚tmV©ô⁄≠F´h—| õU∂Î…Ê.V˚k+˜πıœΩÀ}Çw
+5-a¸ÇÇMÊ 6®ï∫YÆWRWôñ∂Ié÷;∫Á c˜Ô†ºÁ‚Lê±ÁŒ… Ω)Í∑`	ƒı-È%4ﬁ>1S˜‘Ú≈jÑ‚·Olë¡∫ˇ∏vªÔKOj·°,q…/
+Ôcˇ€~xÛæZvÈ*¥≈\u~QkøÎnúÙ≥ÚÕ≥ñm/ûù‘Ì·*ÈW∏Ã`†ô{÷û¯ôÎµ√g∏Œ∂Úà…V¬OóLA?A˙$JÖ_˚≠0^p’µpD,t€ì°â·€|âÁdIÓD"É˘ «a≥o<ËRt)
+Ï	¬wQoÃº†Êº±M4 ª27Œ¢ã	í$fÚ¡´ $≠Û=ÆŒBN«†73õK»ui∑nmg‰ﬁ∂xcÁÒ”IÔ•o∏Á‡]˙9\Ñ7O€Ú«òSo¯®Ç'\T"Z˙Ù|fe™äÃK/zò(√\£„Ò$8nÛÍ2#~ÎÒ7ﬂV≠» –Eà$[Qû'äÂùƒç8¢tA|ºzA#–‹^&¯∏À¸N&€@‡¯Xª™§û^Ÿ–µŒåN`’Ù©ˆòì7ÛL	›Ω0:ùÃ-g…nSmÉ› À·ÕCÿ3
+Kãy;qÁÜÀn¢zÑ¸Õss›W1Y/1Ì@Q›\}‡.:Né]IÊIæMxBÖ[9Gˇ}¸8ˇÅå€qPı69≤Ω·å2?∑de2ù»úaNeüïO)íXπÒ=ıÆaß#k
+< ã~EDƒ%i]!“≤~hiÍPœ!·"•¬ÑS-($qQEı’ﬂò^Zá,¯≥èbA#1eªwõãì‹‡ƒ∏8_k’±ﬁêÚLDj p’⁄{IÔÃ)K5tÏﬁ*≤∫»◊"IOƒ•'ÜH√‡$>ÊÖÆõáäd˚oíÛJÆèdAˇÇ;˚Ê0Æ®Cx•ii¸cà˘UÃ¶–M8™Kﬁ‚œƒcb~_aﬁ¥`ÈgJÂMt]ìù3[)! A# &í^VÑÂMùìŒ≥ﬁY∑£XÃ%‚fkä Ó√©[ˆ∏dL∞2,*π_´£Õê÷	å§ù DVXÎçÛ£h¬’8…V,[i´’ä.“ûS·Ωˇ	T√Ÿ˚üñ„@wm»π¸/Un¸ÈPäA"…ˆ¸©=¡2å∑}ËIMlgÏ¬∂oø∂@‰ËˇÒ‡ÙËˇ–g+õÂ$ﬂkW$≥@™ãa ôpÈ}u¢J”ê9]Lˆl^Nœº∏ıDay2œŒ˛∑èãÖÙ= 	È”ÍeºFæz’‘_Pè@ÉÁ¨cæ
+	-ê[ï8Ñáµ†èÉÃ≠∞0ÛKUÏ˙íÊ!’ê8I'oåyö‰$.ˆE(„Hπ˘YPw∫#âFS<$ï"Ã‡√B–åà‰ ¿B–≈•G¸¢√Xö4giRœú˙∆◊,≥Õ†›¥ó§âíA'ïMIl$C])¢ÚJèXC${ãÅW"J+A{*%(¢ÇEØ¸U°qd±«aˆ]`¶◊÷å‰98lnµ˘⁄m¯x?ËEe⁄	{Ñê°ñ=f7 àç¸k:C4Æ	Ω¶”¬
+xåà6ò®”èët’´\Õû—Ví˜’(ã—”ÂïÒ
+8B8ÀLvÑ{â˝≠ìähnΩ9A*\ÕŸ%A`çg,PõËÖ[ù®:æ≠à|fÌ ^XTæYIí  "X èﬁ<&œ={ƒ‘
+DßÕ◊)—–Å˛¿‡ùm?Ëç’´:|¶±◊ÿ&ç}¸ÁQ£J),Úü˛ˇ˘F∑»/ÒÈ'¯œ∑∫E˛üﬁ≈˛C£‘ÈÙH∫∏"ÉaD„*–$¬óçPa»˚ÅÄ>êÜñQ°ä)Lysíåj“#“ıCÉ˘fkÑLWgæ"*Ñ/IS8ì4q≈ÛÎ˝B≈SZò‡î⁄¬*§«∏GèÔ}˝µ^ä¨GÖhœ*√vÒâ•*“ı@M‚8òèõ¨©øﬁÕASWëûó¶H—	∏‘»ÃìõÍÌ⁄4	Î ∏ºaì¶ÄŸ ¶Wûﬁ…#M° »ç˘Ùäö˝mÕ>]Cµ”ÖH¶â7”§øgÙˆäF≤¥ígMı…‚Cz˘q"¥Ë‰>ùUÓ’ô2D¬%W∆‹!2G8DêÚpXÇ∏Ö®<F(bH:[P[K©3rDFöèZø73íæqIe :¶p‘◊Ä ã®BN‰àÚ3´ìﬁâ§˜«‚9yˇ_Ç£¥üƒ#“⁄CT˘Îøn(cª>§÷2∞«K8:.g>˜¬ÇX_ŒÄÕYÏz%∑¯z–¸¯jŸ-6¥≤ßUwû	Ÿ∫∏ µ/øtH÷Vdﬂ)Ø≠¨#Ézí-ú3¿
+¡P5Ez	[j.˘Z√Ùn∏cër(ﬁ\Xµ∂ΩQ@ˆÌçóŒ5≈\‡òTk@Ì√"Û¥≠éFf√ ∑Ú˚≈Üi©Öã!3pM´)ÃÉéÅ‘kÒú˙¡“K{ìÊëÎ 6Y‰^jñÖ⁄Y¢SÀù∞`Ïˇf„∑ø˝Ba∑í’√é>sÕˇN¨¥5∂Å≈âÛ4ƒD2R√ü‰V˙îyÂZŒN.]ø"L8M®!Øl§ ß…,oxD⁄˘√ÛÇî÷úO<›O¢ùW¸%É9áwçåa[XVÊ∆ãöÚäGîüàZË2y lÑ(±8˘”èˇüıúŸuHåb¯[PuX§`´TÜÒ¬±=£SPGÌ9â“åÁÁØkÄ˙gnìƒ‚ÖÉÂ≈ØÜçLÀâ”äI˛¯OˇÛﬂˇÂÔÎm]6É≤˜”kÑÃ6’ÿß±`†éT_∆ñˆ≠ƒÃ~≈ΩP6#M–,¨ºãõ€ÍIüΩá‰õ]e)x<[ÍœäJ10«rÑ£ôD	d¬êËÁùã”ˆŸØ∑yñôñcÜemÛ∑YìÎ‘b„Œ}TÍiM˘n
+VoïUöóË>¢BôŸı]Åü!“=9{¡6ãú¸A±≥'Aærüs Gò£˙|Úeuï˝∆0“¨ä%U—:Ùç,n©R¿Øµ.|‡Ÿ≤`1©§^±ÕÙÛ≤´√mL∆åT£çò{´V4Ø‹-Á-ºam'B§Ú∆¢àÚ≠Œz”éd`u÷Y‰çŒé¡§KCë“òÙf%ÛdjM”Xdu/õúÄÍ˚*6µ~—mœêÂWÍ2‚É¿áP·w)0[ï%	Hı8JZ0Âl'tweÆÖà¥$ç÷˚ à#∞Ωìwû=›EÅUÃ÷ J4≠!0±ßı§jl)ônæ<≠cÓC‡∂@orö¬4¨Ï≠—ıO{ÈYM’Ï|«s¶Ñâ∞ã gÁ,,ø˛e∆åTü«@„™íøÎÑŸ\‚ß∑#s9ªÓ≥—ÑQØ&è¸È«ˇˆ¢ËΩ’∑‘v∆ÔˇÕLù˙˘jføhA¢æ˚ô\.BQÎì>F$Õ≥ﬁ+r~“>ÍìÛãﬁi˜¨s68˘5i»‡EázÁ‰∞sœ∫ßùã/≥√˚–—…Èt∆9^u=Ä3µ®·ºìôÖº)ùFHÖ€QΩ∂êºtÔ“yYª-$LŸ;‡Kqπ`([ljîE◊íÄ2"]MI–ÜµŸIz$cü5¡Qu„™ômû}˚ÀG{ﬂlmm„À˙ﬁæF¨'‚≤e•’~§¯	˛%zœtø‘Xø´—3©~ŒôT˛≈r;˙M=?ú˚W]ÿ¢®™ª¥ó„ù0,¨Ø$MŸ»îîGz3éTUb"U.I_ä¨"©Ÿßö3ü‘7†~ÃdΩQóïØ5¿>Ê÷èfÒH4Q|.ÏôÀ¡mˆ¨∫πœB*|ƒ“ <0sipAıtﬂ˙E¿ìœ_†÷Xó¯p\_ª,R("Ù}©„ÇûÀ†ñˆÈX´ê>·>†∫∂˜¨t	7Ù'+]Ã~)tÆK!ƒlúQ‚—Q|J.0√ØM˙î∞ÃkJ©rÁÆãcI£mZ6/ïEKe±rP*˙¢§1RVÑT•Dáôÿ®Ô¢Ô£™≈$∆‡≠U’DÇ∂ßíi DŒ—ìE"‘˙5µú‡÷ı0Œ °ÜÌ⁄§ˇ”˘ß≈ç†°[Nso'∞dûJæ".OêMFÓp9œM0cê©^9ÓTBÓf√±á”‡äz≈?
+|ÒZ$Õƒv¨∑Cs©4TÖ≈≠Î˛rÃìo5ÚßNÌèıåÖ>0Z°[b≠∏Ω0oñ¯‹où—œÍ0ıqÀÍπ*>™Œf4XxÆ;F'I‡ñNh.á/»YLYùÏI7> Âsµ~wﬁ–·2@Uf¬Bﬂ0uØ≥≥\<¥‡|=‚é`0™	á‡h¯Ú/ò^3ÕA°1T’>ŸY(è\wFg
+Oá
+7—∆hÑ—ıtÒ’\|o±RâTª“}Aùw∆5ﬁÎéÎ¿?˝¯?∆|=ÀÙMÂ¢Æ*SüDÃç»\"fø…|õhggá∞E‰¢w9Ëû=ôw⁄=∫ËùøËùu»QÔlp—;ÈìÊY{–˝æC¯◊˝¡ØO:[X8SßÍ2–R\ﬁ≥4¥gIXO	§ßRºLøí@ûÚuT◊µÍ˙.Eı–üŸ“€Ètœ˙ÉŒ……ÂŸÛŒ˘”èøˇøıb@ó€ß‚˛‹S∫h ﬂ∫¸Õ`®G˝c	¬¬8—O∏î)+d[íµ≈Û¡zÂ≠§K?myÏßßq‰^®±3ß–ÚëŒUß}qﬁÌuÙ¨îdU∞bµqb1ªa	Ùñ+'GÆn ÓŸ*Sk∑”◊Ü,<ä4^ºˇÉÆ‡¯f“bˇº”~ŸπH7¯=Úuz	<Øq∫§ø¿$=ı∂|xrŸÙzÉÈ∂Q…\7òB„Òﬂu∂¸™{—9æz—i˜;ÉtÎãÏSˇRB¯Â˝í˚_:ú[ì}≥MlË≈6ôY◊t∂UÑÓ∆=Ç˚8Fûª8±ùø„ç÷‡/TòFD√ÖX˘£^!RùX‰ï5.µòÏùJ£©‹fæ;Ê«”›÷Õ;áR‡p¶πﬁX˙T∂îŸk>¬®˜Ä/ÕãDΩ±D˙H=ë.⁄ÿÉ’mÑg±D°ÚÉ¢.ô^?=%ÌjAòTA•Ìe<P[,oﬂ¬B©nÇ Q∏u˜q≥ ò¶¡ñì¡«-È,}Ì<Õô!‘±Hπ79Ydt?◊†A‡_ÉºìZwñH"íxRÿ’v6NúJ“ΩMùRx_Ö/OÈ»^Œ◊vì°kT@í~ylø∂ëGiƒËÔÂÅÏIø,“,™úÍCP.“kXf4„ìÜv§z£}ÉÍüO¢§ö&0ç◊ÙçîÇﬁy9zZv&Ô”π≠tµ/°b£nÀIB∏hÒD¯ùïïÂSi¿£Ù_†Øã5gwr”Ä+≤ÄóÅ˘b}|mŸ3‘:Omæu≤ô9Œâb·Dq ,ﬂ©–7ûîû˝“ÃAÎygpu‹¡±ˆØ∫gÁóÉæöÖç·Vÿ¨Ú/tP≠˘ì≠ Ãù,ÈÔo◊ª≠¡Øœ·†yŸ=tœÆNªG‰wø[G—Iˆ™‘[Oâ#Îzö∏ÏF‘*Fêr@AòX«b2â:ÔbÁæ_w"V	Õ/wn∂?ú'\ëÛŒ':öÑyV"ÃŸÚ,˙ª’©cÀﬁ&Ë (ùXoÔ¥ÇÕ/å πÛ§”9Ñ¿ú˚…U∏Mn(Ç¨¸ ?∂Ïy∑eƒ£ê∏çÜo≤0HàÎ}—Vt˝÷·“ûçZﬂw.˙›ﬁY´¸òÁÄ¸jµ]”œ\ıé;˝VﬂÂ+¡ŒáÓ|æt@Î¡”Ô‹S ∞àêcÿzÆø∆ÿ[∑S
+õM`K¶He∆åxÁWiªòô]≤Óﬁ%yx…ﬁ%*1Í!{_%[≠ƒ xJW^»®.d4$Ì› ◊&B†+MïÂj®î¿Ki`˛Ä¡«rIé≤ÃæXŸ’◊”`f©G∆Ùı4'®.¨1¯\¢°hÉÑ/}·π£eàb∏û¨π%⁄Ætà?ƒ‹Û›V„˛óØ6¶ Reo˛º;xMØ¯D]S™(1%fú¥Æµü≈ª(ï‰•tÊ}ë¥∆Zh≤⁄”5Yâî˜‚å*2ú‹*Ÿs>ÑŒ$ª•˛r§œ∆¿œé≤˙T(4Ã!fë¢A,{÷:q'≠Q≥—s&.î¨xA‰N0≥XübË‹|i•Iv¯Ä<‡¿9GT
+\5"ë\Â†^ˆe!%ﬁëÌ˜‘∫°ﬁØ–{hÒg˘TK’nû…¨ÑŸ”9ûÖªÏûH@I0HpÜ¥ÿ§5‰&A2Y)fWMH™Ë8(ñ U%Q	R‚
+ TÑò5ïèI£ˇÇêÙü4œZe¨äµw”ó"^ ≠w:ÕlÊ≤“•lËi™À_‡ €háffJ&≤∆ 	‘A=áú¬1’√$•èHÁÕçÑ®¶ „UëVXˆÍ_äs¸Â+¯ Àu√›'πx©
+Gyún!zkéíö‹∫aµk~û∏Pû†Íâ:"P·]°u≈¢-Â9ÏNXñ[)Ÿ≥dÌóŒ˜èª∑é%Ö_9î’≤.•Òy2Ç√ØˆenÊ≈4é›õ%˘ä†ûÏÉrÎ¬\òW‚Dÿk¯Ã69s§?Lm'ÒêÃıØ0J!≠…'TKTd&ÚcNh÷Ó<ﬂaå:¢¬⁄ŒœîÆ˜⁄)òpåB–≤üAxﬁjXˆïÖë1¥⁄Ê?‘¯4„ç45•Ú∏Â∆óhÑÒ≤
+‰q&ªáﬂ>ŸÀØòh‘®2É¢™Ùq^$äÓLéï˘∑¯@«1¥¥o/¯◊>¢îÙUæÎ≤9ﬂêÃÆ∂_vwéª/ÌiøtøVˇ”?ñä{nvw≠wé©;óé∏Ÿm}]wíF0ˇn˛ èJ?˜‹9hÌ¿ÃéÌa¿LÖd‡N&˘Á§∫¢Ã√É-oŸôËÿK¸¿]ÙîãÆ◊µçÑ,ﬁÄÀ∂ÿ¯8óG”……∏c{k8•√õ>ùçœ©7∑YÙÚ*WSdK<µ{L˝†µàj]téz«WÃ´x3%!ÏW6KŸbﬁ:á-zsdN<Ô\úv˚Ã¨¸¸¢}6ËÎ⁄ü|Ù‘öT£âEö€√’,ùXKCuZ3ˆG≥æπ*}‹Ø!^x¨ê ¡ÀΩ2ºÇ!ñÄgß5¯u·Õ—∞Ùò¬SRô1›g}‚Lø€zR◊bw¿bXìf√Â˜'Wãà_çÿL“´Î¿Q≈ï e˙˙Q~?MçªZÑô¸øôeüB?öπ>ïY&¥Û’”ÀweE4¯*¡5*ïô±5éÌ¯®ÓbAùÿÓ ﬂ2¸Y.ﬂò°·˜?≠ÅAƒP®¶w÷™?Êh W±ˆY %†/ÄÔ⁄Û,Tn0›%∞7ÉZ≠˛Ä¡æÈ€vÑ”2±ÈÉL’@PS¡~ÁÏŸ·9AG.oÑt90L~ÉYõô]ˇµÌ€xs0Z¢£ÀÙÜXjñä  ƒó~1∑‚≥,–+\lÉï;r‹ïÑ›`MÈ@o ô¿f‰sÈOXÍõ€5W⁄:¥Ü§.ÄÜ˚PÍı
+p®àjµ]ûwŒ∫gœz‰+Ú¢78Ï˝9n:g‰è˜Ø,Ÿq	[íˆ,‘á™§E°çﬁëJPôÙ√\8ÃÄè\ﬂZ,f∞=AF(Õ˘°làºÈƒna™⁄{n‚ZSVöEæpó^$k0SIÚëé3(lld›Em}ô¨È•7+∆úAM=/˛SVydy£‚µ
+ÒÿL0Ñ⁄Ä≥˜“"ÈÂ,Õi„ëV˜„¢Ì ¨ º≥g Œ˛¡ìóÈ!∆~í…ÀÃ\∆2 ©/0Ωß∏∆k‡—W⁄],åôˆb◊’M¿öô˘e˘aLˆÖ≈‰5ï2-{…?A≠√√ÖÃJ`¸Ów1C7ıπç$œ`e2àÎ-„øﬁx0âIBü1wË#.l¸K¸¿Ûƒü⁄¬)\ÃoÜh‰@shÏ˚ÍÏM(kÕ˚“xœÃyˆÍrÍÈG∑ Ö∑
+çÁñÛ6†6∞c≥Ú°¯˜√7ŒGI˝¶\0´˘~Fäˆtá#'_[ﬁµLƒÃyw∫˘ Z±:±æiíÔÙàf|∫¢-Íä<*Ô⁄©Râπ+!≥ëOöœlXA€§≥ÉhÆ€‰π˘¸¡Í¿åú’Àπê‘u¥EvÎœCºÙtÓ“äÛ&ùl>1ç,∏Ù·‡˚€
+µIíƒ@íyªHÁYc¢’€ƒÄ?Èk ëØ¯vˆ‰¨√π¥¸ïê÷8?©=≥éY2ò°˚Å„*H∂ñ‡%tºt√I*qíŒú…£Oöçp°∫·#JÒ∂_™Œ—3knœÓ¬9‚ZßÆ„≤%˚…≤‹ø‘Ú]g√O*ÒìÅ5˘ƒπ…ﬂ¬åNØãÈÈŒí°¥Üoü¶§àw1˜≈_ÚQùO,?`7Êdj˚ÅÎ›1pu“|¡>1ü*ˆ+&6Ú%iÈ#BEX√â;I‡‚yt˚„,óÌË=1pı¢Õù,◊NñÂQVˇŸª‡üZ¡päv!;h-8®{¢Í©m˘Ø˚yuòWÉ®B£ÜXÛ<X7¥π_Í÷
+ôø0w»Ù›@é≠–àÃÓ/Oh6†‰9ıﬁ˚üÜSﬂ·aPE(òHU˘íƒ~õã.[ÂFW|++Ï¯ô;—Å#cô¬x¶±S`&4Ë≠æhB=≠Å‚ÌØˆéT	’€‡
+,Q.Ì|íõÁ:bàbﬂéi⁄!©ÙnXtU#ú ÌLá4∏•‘@»≠b¢‚EjD&ó•/†∆Û‡sT‚ﬁãŸ∑!úOMˆhmù	IˇImÏˇà™S!Â˙≠h»â˙n"–õV	Uâ§ÒvwÚ}3¿√˚∑J˜.‚º¬ÈG≠“ÃõW%lÅoç16¢
+J˘ßÈ˛Ømêÿ	πJµ”{DÂoÿ√S‚ÉíùyWÀızôK∑Ì/‚∫ô†·˚rx∂‘¶~€‡/	{Ó∑çZ_PÆÜº≠4æˇwÒ–l¬åå'›Ô;;«Ωóóßù≥A{–ÌùëØ»´nÁ∏sÒ}Ô‚§˝ºCö«óòÆÒ®}r≤…ƒ®·æøŒ|å&·ræZE…Ç)¿˜¯ i’πi•_√ÊŸmëé7°◊éÌìıy&Xü4√≥méÔI∏SL=ÍI’!ÈoŸ:
+s◊|‹Ÿ:B≠O7£b# ê~≈å“‘˜iÉ.it„èÍÒ≠*∞Æ˝·t∂Ù}^A;˛®[¡µùt7^¬w˙R8ïŒ˜Œ
+ü·üæ+,ç8ñ√)ΩrñÛ9ıxÈg¸;r≈Î|KÖÜÉ*âxêjDá,“ô¢’&&aº°w∫…ë2	|ù∞zƒÄZµ™öK≠rP∫X∑πü{∑!¸ÖfBDV¶&îhU≤Ωy˛I¸Îp°KaBõ„AÁè™~ Ë ‡œf }&ÆÆÏ£)ng∂∂‡nc≠,_ˇÒ•3,uchh5…KzßX9˙ïó∂üTã‰ähnΩ9A/>‘TÙKπ∞0∆3˜6<Üˆ¬è≠Œ∏êo˚¸ÍS˛≠Ùk”õ¥<ÌxØ≈/Í™1∑¡¯d8Öy˘ı„tè7 ±æ1M›¯Ï%úâ¸‡Ü«≥Èêá/…≥ÔãzFßEí  $æ˘B˝∫K‰⁄»53á;E%ﬁ.ÁÑÂË"cœöPE⁄é”õX≤˜â®∑’êı¬ı˘ZÆWUµ]qYñÒçrjî	z©K>êäz©J>ú¶zØÚPYMèû≈Q≥{%ñƒ≤€(¨µl÷ÊRz¨!ÿ~Â¿˚V$ëäÑﬂ˛œJ¯ç<w±~9e6¬o#¸b⁄ø4}n¬owc≈I“'e≈ŸoEiÓÀXÛQË˙é•fŒ§•53üÙî3∫é+zñ,§˙¿ŸµK©∑õÚG-o‰∫}ÖÎŒ2ÅT:OAû&¶Å^◊ëÕ†™¿âñ®aˇ  ˇˇÏ=€r€HvÔ˛ä÷‘5ë`]|U≈ÒRds-ëIŸÎΩDëMk‡†dçk™Úíá§*ïJ%y»>ÏV™6ï_»√º˘Oˆ≤üês∫qi ›@§mÕî˙¡ÅÓF_Nü>˜SJΩlk€◊ ÛY#>ΩX¥c’ã•VrÀ€√^,ü/ûΩX™≈∂KÌ,£ü)Ê}j¨˙‡•USØñ‹<¸I÷<º‹ODgcı√ú≠'Rwof›∞¸aï∏Ä∫—–
+„vkD”◊˚ä⁄IWœÑøºÜ>É¢åÊçaº	ÈùÂ≠¬À 
+Ù>SOñ∑íØƒ≥ÜÑÆªf¿çq˚é1 RI$#Ã2êA°}vÒ‘]á%'‡º;˙S8¿<Ñ?ã[.f@ÛLae‰~‡@÷à2 ]¸”@Ékfá¿≤¬⁄ZÅoFCÀ˙˛Ad}/⁄Ün•¡≤*£DÈ)Îtµ-z8∂=[…»˛vOCAù°Ê¿á∆<Ã<∫g‰ #âp™ëÀƒ-}ﬁÅ$7h˘qY:´ˆ∂ÁQRÛAXµè{<IOÍ£Ï’“Û]ı¿äØŒ‚Ó2¶î$Õ¯Ö=Éº±)ÙtÂz3∏ƒIÛÿùÕ‹Î≠≥Èy‘ß¡m¥IêïSÓ‡˝”∑Y˝“µŸõFv“dèÇq©âÒŒò78uΩÀréù9ØΩÿná“Í7Qıü[Eë,ÙÊ ´©¥¬=˛D÷ ~¯¥;ô∞ØÑq¥˝;ÎcﬁœùéÎßß„‚π9ƒﬂY"áeΩñ»wÜ%oıΩFÛOrè SGÌJ¬$]Ûøæø]ﬂª˜≥C∆ü∞Dì%:2ç0oﬁ%jÜ#è“PB∆-ÍXs∫Ox¥ÎMÒh$}s»#wFÔêºk§*p¥˙=Ú¥æ‰µÎ¥ˇ#>7Òb$géDoéËy,Ÿ´S€±Á `‚ª{—)À±mK€∏∂ù±{mÛÊ^&G>b˚(gÏ”ﬂ-©0>˙˛∑§ç˛Yæ}E…YpÒdÃ+˙~Dπ≤-¬s^8NÛp<‰€˚"áº‹"*Â&≥√Í≈µ”8 ¸r◊9ÄõÈ}Ï]…2'2Æ«≤ÃáÍ˜!Ø
+‹Zof<d\ﬂÑI.Yed:pÀg4†‰Õ8}w¬·Rƒk9¬BáÄà(8D9¥xóKOülM/ÅTö⁄#ﬂ8ñ˛‘¨1¨Ó¸êµª∆\ø]. À„ΩÉ›áõ∏dÊå^ZpC\oÜ`>¶tAÄ≤Ù¨Ÿò¯∞ﬁî†ÓA∑ÁÉù›ms#√=Ò‹%Ü1õxpà’™·‚:0utæ=ëVì¯>Áw&∫Tw”bÏÏMcèŒjt\lá•ZCqÊåNÇTuî5´≤('ŸììÛüüß.ŸjXxâ7ì´|Ë.XÊ˘œá˝åÏri>”¢ê¢ƒ°∫°≠X¨e:s˝†¸Â2a¢˚#˜⁄π∂<ÖqàTdﬂ‡+é¬fìòà)ØßNó)_≈Ïò/ÿ7‚√dmº~Äóc1ˆæ!C;»‰mR≈[8√"Ôe\K¶≥^ÏxˇZp˜4ü¨Nj:2ŒÜ˝ÓiˇÏòÕÛ∏€iõäm≠Ü YDââTAxñd©gOnO†É]u†ÉÚ'µ≥ÑÊ`b˙ÂÃ«1Ÿ!â«64Wëâú	ŸÄ·H¯vxå£¿öÌ‹À&c#4	⁄»áIØ]ã°≠ã…'∞‹R«3◊R@ ∂Ä˘u®+AEÉ°Xﬁ%¢z;∆∂¢ˇ$||∞†#dl¬QıÈÇZ≈jå€B;f∏‘‹Ÿﬁﬁﬁ$@ÕÚùGïÅÂôÏg—≠ æ˚ Ñ Ò£OÅÈÙÂµ¢ªÙ>∞µŒ⁄ÚªS~‰ÕvÁÖ˘“Ïô}“Í¿Ÿg™†ÚC/ª±í±›J<¿ÉCÈaÇb˛¥B»ì‚'˘ãÎ‘èaç‚ª+LOÑÎ¬˝ë÷ q˙2˘îYπÆÄ˜≤∆+PÎ˛ªpÅ*úCﬂèÙÆ@üπDA∏$Ô"Dùó»…ê)p\≤µekÄfC∞ëú ‰˝Ù8‚¨Éü>‘EÇ™äk∆Çª),xl˘Áb  Ÿvæ2d€°Ésîo¡û6´\ã–é‰aq*¯òg=±nÄT`ì˝tœ˛ÿ‰ˇΩç~Wç”•uo?(d9“˝FÅºÍÖÚb˙]ÕæcFRæD*—i°£ˆ÷b©õ£[!√HU≠¥A≈<aæoæIª“pÎwûé±&?¬BÓR≠”J;Ü•é∫™¬Œ±ÍEªßπòü>}6
+}uL◊◊ò>˚xÁÒnkïÙŸ ÌÏä¢„Î=≠'Öµè’ÈmAÿnÿíü| ç3ÁÇæ≥h/„Ä)å™dfOÎ†∂e$≥˘>,m˛ñ•
+’ºGQ}\2v‹√9∞øãîk
+`+JÖú2∆›Uƒx¨"´B”∫»AÑt¬@q˙ í≈ÛèTJﬁ5¿L6ÎQ! î'd™k⁄<ZÓëê—˝0…ÒË%·}kKy∞h≈MJΩ 5áVÄ,ıEà(F!X™¢,ïQ	A£sÖ‡íDÓ^¥EΩ-§¶*ìØ+ÿ›T¢gwJùíJ˘å∫Ÿ?‰ó Ùõr…®G‹Ü‚òÍ“óı:02ôﬁã˛YÁ®≤Ôb5{ﬂäÿ"*+PŸn™€ñhÀÒƒ≤J˙“≤n+@
+’r^˝Ï[_o◊ãI	±‘∫¢Ú¯·2a3Î∫K
+@Ì–Ú
+ºZb£¨ñ∏8¿èCÓÊüjY˝o-ZÄ^8Úáö‹ç`xÓ;*èW˚ë6jKˇùÌb+¿∫Ç néºm<yXb˛™∏ñ‘Ã∞∆-TUHíHvvÀm"´_qµ!’ÓæNwÿ˛•Ÿ!˜…‡Ì`hûn[/ÎÒ‡◊rUπxQ?j»-º5í=’π˝q\Ü◊õ[öÜºYﬂ∑üƒuò˛ï˙yˇ>‹
+L´K˚Ù∑'·÷bhH◊6†˙≥∫®¥FÃJs0C¨TWRGì⁄∫K>™B¶FvÖñ310€Â?—ù3¸!AJ´iY!0ãB€ßc⁄ÒF[’<°âï]—˝µ≈vj~uL+µQ
+õ≈®à∂ã·rîpêË‚Ω∆d∑ü,$ºD˜m¢HPYT"É∏‘˛q	≈Íz∂°y¯”f˚MµJ¥à6(Wê¨¶ë[?∂.ftÍî˙”È⁄@F•ñ“ä≠˝û^d√sLYπ≥WDã™úZeOı“i¨W^ ¬ÌÌ1˚´$Jñ'c˘mÄAWv?m-[Åªe1Ø2ÑwÔH≥è”»w©îÛU≤@∏fœŒvâ	B$ï(´∑bÆ^n	Q)iXë…tù/h§ˇ-TGãwæˆ∞›ú!°¬˜~4•W†(9s^¬”≠Î^ƒR%C⁄∫ÁäF—qªåQ~Ω%∂k=‰[AÙÃd√çì äÛ£ˆ‹P}è6e‚Á4Ã≈¢í5+∞åƒí∂€+©ΩäYÆï!ô¶9mT‘ñdå0.ÊHJtK—>⁄∏)kueÁ£nÓ–{¸æÃﬂõÅ	¢µ◊L¸√¸2°Àè∏p£†,Ì°πá&KùT¯Ö’çJò€»ŸBÌ4"ñµ⁄ñ»tI—j≠br¢∞ KuûVÖ˘9¬üì:ìõ?^YÒ±wqÌNàÊKv˛H u'ÕÌâ ˝ôe&≥ﬁ≥œŸpFú'{3*[å)"7‘ºü∏pÒü∆hÈy∞ç•Í¨íkhå∞#Ñ˚Ï( p{Ôõ™5∫E÷|.ﬂÅH∫ÖÁÄ¡∂Ñ›1ı3åNb±?1á∂'Â–∆ı∞Ã˝
+TØe◊¶À“∂ù≈2h¢Î¨é˙òÄ"Ê»≥._ ^zYoUUF⁄òLÇQ-‘§x0˛ÊôwﬂÚx0ÉF>«U¢Oj◊ãW¥V√í†ZQqq˘qÅ|dq¬»¥Ê ÅNxë®÷Aƒ_ŒuL £Ç.©≈Kº’óÏZ…úëDzi1n'ëQûR1*È’KÌ¸ñ–#ﬁ‘—∂»pSÄΩîÔfùPr∑Pj·8t:Ø$µ–7ËTﬁ¨{%π>+Vë@t:ÊÀS≥Ûy2,W≥û,N“'SŒ|B^´\Ç7ÕI©üÃî
+¯”±PEÅ,¯81¿¸Ã∫˘rÒ,j¨`‚_i¥ä¥æl;ã¥	
+uÚ£¨ïS^¥ùÕ(ÅøöY ¶≤àJ@√˘t·î’¥2He°gê9ÙwÅEKà?Q`êUß–Ωäòÿ‹ÄÃË%ªÏ±)‘NVºr
+ß*Å1TZ£¬§˜´`Ø™DäK"?‡±Öi2áFâ÷G™â[5x|•0o*õŸ›¶i¶Ú=¥É NS‰ƒ˘‚†â‡úü˜*.€ÿcØÃm{y4Æ«m˚©¶«‚ŒgqX|rÀ¸ìˇ—:->(¶„T>ã…Ã«≈‰·öº5<UÙx1-^üØ!ˆRâªj(cãÑﬂ%§ñ‹ÆzP,a•î“´K%Éú’ıÇ≈~z©ëj•BíÔXM,⁄Òyu›I∞|˛∞º˙Ÿ®jg†™¬àr1)–†≥aüø»ÌÉg≈ﬁ'_ß*EÅ˚M∏êË4áNÄä£˛IKFˆYò›(4Ú:TÓüıhïôò˝Ìmt∏Èÿ˝¥’í/U“K)ÿj®Bï∫~K¨¨Zfçÿ˝ô_®¢0lX¥Õô÷OuHâÑ»r‰G@Ëò∆T1#™,ˇ)£‚ä•¶C∫60°-fx/X¸ïuÄóƒ|Q»”Û˛ø%êW.Æ.
+˛©T6àÚ@ÆLòÖ≥¿4'¿~Åê¢ã«Pbπ∫ÇõE"˘#£•∏sÍ”Oô⁄c¡ÕâO\±bgâ,wT5⁄>§·ªaJÆêòÇÔ¿˘n¸ÄŒ‘ª≤G¥»@Ö„ˆakàyªfˇu˚–‹ ñˇ<Œ¯e-F'ﬂy¸a‘’8t÷F˝Y√‚ã‡úã√Òœ√:úî@%Í‹ıçÉ•=ØÕ>¶3GØŒ€ù!Í”TuŒªGÊ¿Ëä¿+ÈzJá£ﬂ∫G”Ÿ«|†næ!·9YªPP«M={4ÏÀ%‹è˘¯™Ω∫$È§¿ÉuÄãKﬁ´=_∏^§Ë.YK£}⁄Îˆá≠Œ°y~d∑ŒNÜ≤tt»k4„ÕÿócSÕ∂ù›d˛85˘¸ä§*√ ¿]Ò⁄æ8îﬁR¿-…!ëÄ‰sc‰Q¿ﬁcﬂèV`6√àiÿIﬁªSÀvZhäb7˚˚£ôÂ˚∆o≠++?≈…Ã∫Ù„å„ì÷ãÛ÷·∞˝∫=|{>hw^úòÁ√n#&K´ûò≠>÷∏óÃê…Ø(ãÍŸéF(nOO|á0jÇX£ôƒ¯ç,Üˆúû⁄@J˙Õç»¿&©Àó%˘≠˛6õÀYÔ®54œœ˙}ŒÃ¥§A˚ÙÙlÿ:81π‡8Ÿè1¡0;F∑ú4.π¡ë	√N¸ŒªªD	!∑µh≤öÀ¿ûÃ†É/Ã˛i´Ûv#A&	Í„›,©Ob˙
+¯Ø)‘F`x’‰¸Û≥I¶∂Û›ÚíN>˛p|ÖY…˛±!~g2PçØEìÊ◊"nﬁ [ÃJN<≤N)dºâo‡(,GSŒVÂ'ÓÕ¥ëåë√ŒÈÃèπ3ÕS?Í	ÿ«g<9sÜ¯h∆.Óhc˚∆ÿ≥ÆÒ¨ˆË|Ãbyü£–;›0ú?.\ì-ü¸=r|¬Z•+ı<ÿ n≠9ı˙ÌnVàÌ§è{Íå•+∂ñÅ{àê5q–=%⁄aoö,⁄É˝<≥Lÿèæﬁ°ŒF›ámó™⁄\gb{sxï  ÈµûúÈE^Qòj&(üãj´îQxCÁ¿èKûèÈÃŒÓ¶Öa‹%5Ê4»3ı≈≈"~”°ﬁÂçH·/ÅlÏdä’‰TëhÖñ^™å!Z2Ã¥EZ„’—÷◊XÏ‘m√xäe√¿PÃÓºπÒ}cÉ§π«◊ªÿ»≠—ÿà;Q©ﬂ¢*MÿﬁUiêŸ‘*MÖ›Æ6´`?+M.ííVË}=«¶»¿ÖøjWI„ÖÂ7‚£dD}`%ΩæÇé6b+¿ÚDí¸Ò#ë.Õ{±ØU…öR®Á¢ÜH¸äºŒ%
+€Rxnh9ç¯iòöp8ÖÂÁI#ˆ∑øÙ&÷(≠∆ |*o÷mÜ‹U˘/hª[VÒù,M:∑¥ùÊ‹Bk’á˙Ad_R+ÎAä•<‹2“E9ÅÊ‰>â.1ÚÁ?¸áÇ˝éºâ”	DíÀm7#XL[.{Ø,∑UÊ–Q:¡îÅ‡\’√±≈6Däpí»\hH=Ú‹Ÿå™L0Î¶üÑ\ı"ÁôjTÂ…Ãå6#»2¸◊T9dVqºQÑ≠S˚mmmë÷¡‡eß=íù}ÚÍ¨sdv⁄ù„Ó _J€ÈYÿ%=sÅr≥ˇøÂ!.Öq¶?ÁaÂJÄK˝‹çÂz5–/<‡ë<πM´"ágÖ<¬Q·Û£¨üM¸Å8Ùö[_îg(Ωgq√¬VåìõQÀ@T°g ‘ªW¥Á—â˝û—ÑçÏ≥wc˛å•.n6~ıwø˛ı¯7‡	˙¿¿æGÆ†Q‡PÖÖ)ﬁ˚sÚﬂ†„A„q£P)Å¸y&2™¶∫óÚiùOrB™˛Gü‘˘Ë¡Ù›u…7ïoTÙë≠Kîx˙^pé√#V&äñ'Æ˛Œ80 ÕŒÓﬁÉá≈†A‹ÖHp>#»íVìOÎ¶ç…≤’≤=K≥#ó‚ób≠∑"Ár¡UÕß†Fâüü°ú¥6Kq~œàTI÷Ûüsÿ¨ï ,‰BΩπÂîtsõ?>ÿ,≥ÅëÄe(X®
+ë«6Äi∫åy∑fµAÚÄ⁄˛¶G^Ã/^ﬁA‰O"ôÄ¨
+<râZUh„DÙäwˆ_=xJv?"Ï‚~¥6X|Go.\ÀwŸYA¿zï~RGQÛê
+í…öò2≈F/H„ïP€`~#uòáª„s;éì·V9>\Ë[ı¯ò[ß–l´≈‰ætXù	â~ÜÉ1∆Ù'píLú ›IäÀó=I9y–Ó>9iõ«f04ONL•@(â sd_ŸÖ…Ìãd~ÇÃ¸AYË0ÕÖym¡kEê≈*ËI∑RÎÚ¨YßıÚ‘ˇÂèˇˆœwbÆ\©Å©3 ≥*8;´w´äΩOl:°ËÖÊGìÄ4Ågﬂ$Ωì_níÆ¨@ù[SgÍN¸¿3»ÓìMÚ¯·Œ„]“õ∏ﬁwSjœã˚Ω√}∑Éä¥≥U‡RTÍVÖ…_~¸”tF=NêØÉ†ÿyªı¯Òﬁì›ß;€wL‚mÜœ‹›º∑OÃ√WhL÷Å˚ÁµŸ?Ë∑Œ_ﬁ›—BF€d}~ﬁzŸ7…*¡˝Ow7tÆ îôL7@1?`÷Æ\˜)unâ *8†íÉå</õbIL?ÆIxûôÌ›IÒFFñ.ÅK˛˝˛≥o0=kÒó?˛˚¸U“Ä)d¬o¸Áˇ˝ÔøêÉóØﬁ‘	Aóö"⁄kö÷h
+@xq¿Õ¥…Øòù t∂?≠yêÖTHœH‹_a'≈π$¢íxp|H+™‚èËƒC*v—/o_›‰FﬁK∆áEÔã◊±Jd™“s~®¥têïPç∏éÔáD!ó‰G–Pi-ù<jª™ÇhÆbâ≥å‘€©Tnûjµt„ ◊'‹,t/¨´3 B¥-ñ:¡ß£¢cò%m'!3 ¢…äEÁÍ–…ï‹,eEäÙ2YD%$w"◊õñ’sãDΩËyÚfÀheåà•»ˆ¨W/b©åÀF2HaH˝qh’‘@Ö5
+å;§o!:kÈUE;ÂjÍ’îÖsU6˙Á÷‘£˛U‰/Blá˘Ü‘e¢<‹^˜¸ÂÑÒ\&q'çèÀ-„¯Ïì~˜lÿÓò[o⁄ÊëŸ›Ìü¥^‹âÂI¬ÚÀ∏˝∏„ˆs%¥ÄÆ``ÃìŒÆ#ºL#ÙŸjΩcÆËÂK∆tNZŒå¢óØµÙ' <Ìî•+≠9¶Ç’zŸ}≠æyKâÏU0&ñ5…Hÿ,Jd˝Cˇ0]1	ñ–ôáâ1¯üÂ¥a£É~ﬁÑze¿π˝Ô!˝Bß´#ÿ_á©Ì°óˇ·ΩƒœäÕ]ã)™h-Dy
+ßΩ9aS*K¡íìßd•û=„Ωïˆ§'T¡"
+Vrüâ2ÕH”´JW∞¨G¬¬{ZõîÀö%-X÷ÃQ¨G‚¬¶«bËÌËÍ“,+J`∞|)]I}ôQArÉlYE*É•ÆdÜµïPÑ6ãF|J=à¨ ’§)XÍIT∞¨G™ıT=èyT÷#]¡ÚI$,Xj·ƒ≤’î¥∞Òh◊^ó@{›rô¸ì‹£0—Æ*xÆ>œ≈Ù0Œ]ÆÜí‘≠K‚Íê∂¶£8M+
+lUQHu,€.Ôi.kŸl¥..<
+0™J&ﬂ—ÏfÒL}O‘ÈÎÙ”åñì¸€±fáY¿¥S†aOXDKå€Z‚°÷„ˆB;ufØ.v/ÜÖ’{"#Ã…ç¿≈]ò«lVr∆C Ô…öï£ÌdﬁZI¡€…¨w¥=¡$bA*∫®˙ß¨‘3ä^©áåâﬁJ}	fU+ıìÖçuàï‘
+ 4ﬂUì-í4◊¶¡µ“
+óàV¥ÉNI´‘s/G¥,ûÇäê˛Ú«ﬂˇΩ6¬≠ë~§ÁπÔÌπ‹F≥r0M‘∂èY®1∫æãÆ∫q § æ´lèKœI¢SÖa¶Hòt-ä(&]ãÛGÚ‰lQãl–¿(ﬁYÿ∆É±u®Ufbmb* û+P«á›E9çh>∏√Ö1' \÷0´œjEåF2F4˘ÅŸt˚bxƒx¢SÀ_[5‚GRü_ƒª≈',= FÛºBS—∑1|€3œ{˝Ó/⁄ßÌ·[Åh¬ØDÀÇÙ¡À@øØ§yì;âÍß!#{ˆòÑ3∏≤XÆ 7)6,ÓˆπÏ® ÿ±∂‰+yû|Ûa&˝Ò9≤d°ÿ’QƒYÏπ$y†ÿ˛W€øQ6ô[Ô˚°˛.≥œxgœós˛˛˘>Q‰´ƒ|…ì‰€∂Ofhÿ¿≤ê∞¬hD\·›√—|3⁄h4öπä¨·…xñ|„Øìq√Z	è%C,ùŸ–÷N≤5∫â∂îÉ¢rOüo¬IÁ-ˆ14"Ïçà°‚?qá≥pÓuv;”¿Ô—KD/«f«õŸ›⁄,9s—)=2OZoœ;¸„dC6VF>£N≤p`KG9¥l¨ÀYÒ∆‰» 2sÅ‡ù¿:S
+Wu`{4Lú ≥≠åó<|&iSQÅO∫b-Å–≤B>ÄÄuË3<O|DíƒayÏf°‡H.‹k∫
+Ïuﬂòr¸Á˙FOË\¯™«ñ.ëw˚™⁄∆õ∞∆sÚ,-⁄äˇºl®Rjb'∂us8a6X.0÷)¿∂Í´1
+=ˆM≥sﬁ=>>”zeûüt_IÒO4D"bWΩé>.'QÍçAN,5Äx6Ë{kæò—˝–ùL$	]§±^x˙ËiB±bˆBX2~˝ g2˙›`8-Ú-yÑˇ œu≤ÅpœÊ∂≥( >{NÅ∆Ñ˚ßOÏ¿ôFS∏&ˆâ˘√rcTœÃ¿£µ#à^¥ŸêíBçM“8ÅéQ˚<¡'…˘‹'_†∆	˚;:>ÃªÛ}£ﬁ»É(”jûåæÑq°rÖ™TÏHT∞"êmæ,ÒefuñÏë}È∏U≠øà»∏Ïo$±+ÃõÂ"ËÄ{»≈ìƒO‡ÃnÖ»…ÂÊBÆ¿1]‡r[ó≈2`àÉ\Ü	Z„æsíË*QÚPX)íóçãn‡òe—Ùt”ŒZ◊ñÙxmFÌFÓ¢Híx= $Õ¢=è
+≥ø
+√gøS")‡§Oö*™Ì I°∫±^68†æH=;{πh<R—ÿ≥±?ö⁄ﬁAeL@öùèöRoÈ\˙¸¢ﬁê(c5Ú¡∞MπÜYs¬TÖ¸}ˇ˝Ωˇ  ˇˇ 9ŸÍ

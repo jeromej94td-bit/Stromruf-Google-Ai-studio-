@@ -171,10 +171,11 @@ object AgentBackend {
             sipMaxLines = o.optInt("sip_max_lines", 4),
             routingStrategy = o.optString("routing_strategy", "round_robin"),
             fixedAgentId = o.optString("fixed_agent_id", "").orNullIfEmpty(),
-            llmProvider = o.optString("llm_provider", "openai"),
-            llmBaseUrl = o.optString("llm_base_url", "https://api.openai.com/v1"),
-            llmModel = o.optString("llm_model", "gpt-4o-mini"),
+            llmProvider = o.optString("llm_provider", "gemini"),
+            llmBaseUrl = o.optString("llm_base_url", "https://generativelanguage.googleapis.com/v1beta"),
+            llmModel = o.optString("llm_model", "gemini-3.5-flash"),
             llmApiKey = o.optString("llm_api_key", "").orNullIfEmpty() ?: "",
+            geminiApiKey = o.optString("gemini_api_key", "").orNullIfEmpty() ?: "",
             sttBaseUrl = o.optString("stt_base_url", "https://api.openai.com/v1"),
             sttModel = o.optString("stt_model", "whisper-1"),
             ttsBaseUrl = o.optString("tts_base_url", "https://api.openai.com/v1"),
@@ -199,6 +200,7 @@ object AgentBackend {
             put("fixed_agent_id", c.fixedAgentId ?: JSONObject.NULL)
             put("llm_provider", c.llmProvider); put("llm_base_url", c.llmBaseUrl)
             put("llm_model", c.llmModel); put("llm_api_key", c.llmApiKey)
+            put("gemini_api_key", c.geminiApiKey)
             put("stt_base_url", c.sttBaseUrl); put("stt_model", c.sttModel)
             put("tts_base_url", c.ttsBaseUrl); put("tts_model", c.ttsModel)
             put("openai_api_key", c.openaiApiKey)

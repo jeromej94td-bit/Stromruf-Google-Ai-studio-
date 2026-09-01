@@ -122,7 +122,9 @@ fun StromrufShell(
                     "statistiken" -> StatistikenScreen(
                         viewModel = viewModel
                     )
-                    "agents" -> AgentsScreen()
+                    "agents" -> AgentsScreen(
+                        viewModel = viewModel
+                    )
                 }
             }
         }

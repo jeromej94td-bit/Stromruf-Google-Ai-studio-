@@ -882,32 +882,71 @@ object SupabaseDbClient {
 
     // --- HOTBOX CAMPAIGN LISTS SYNC ---
 
-    suspend fun fetchHotBoxLists(context: Context): List<String> = withContext(Dispatchers.IO) {
-        val headers = getAuthHeaders(context) ?: return@withContext emptyList()
-        val list = mutableListOf<String>()
-        try {
-            val url = "$SUPABASE_URL/rest/v1/hot_box_lists?select=*"
-            val requestBuilder = Request.Builder().url(url)
-            headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
-            val request = requestBuilder.get().build()
+    suspend fun fetchHotBoxLists(
+        context: Context
+    ): List<String> = withContext(Dispatchers.IO) {
 
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val bodyStr = response.body?.string() ?: "[]"
-                    val jsonArray = JSONArray(bodyStr)
-                    for (i in 0 until jsonArray.length()) {
-                        val obj = jsonArray.getJSONObject(i)
-                        val name = obj.getString("name")
-                        list.add(name)
-                    }
-                } else {
-                    Log.e("SupabaseDbClient", "fetchHotBoxLists failure: ${response.code} ${response.message}")
-                }
+        val headers =
+            getAuthHeaders(context)
+                ?: return@withContext emptyList()
+
+        val result = linkedSetOf<String>()
+
+        try {
+
+            val url =
+                "$SUPABASE_URL/rest/v1/hot_box_lists?select=name&order=created_at.asc"
+
+            val requestBuilder =
+                Request.Builder()
+                    .url(url)
+                    .get()
+
+            headers.forEach { (key, value) ->
+                requestBuilder.addHeader(key, value)
             }
+
+            client.newCall(requestBuilder.build())
+                .execute()
+                .use { response ->
+
+                    if (!response.isSuccessful) {
+                        Log.e(
+                            "SupabaseDbClient",
+                            "fetchHotBoxLists: HTTP ${response.code} ${response.message}"
+                        )
+
+                        return@withContext emptyList()
+                    }
+
+                    val json =
+                        JSONArray(
+                            response.body?.string() ?: "[]"
+                        )
+
+                    for (i in 0 until json.length()) {
+
+                        val name =
+                            json.getJSONObject(i)
+                                .optString("name")
+                                .trim()
+
+                        if (name.isNotEmpty()) {
+                            result.add(name)
+                        }
+                    }
+                }
+
         } catch (e: Exception) {
-            Log.e("SupabaseDbClient", "fetchHotBoxLists error", e)
+
+            Log.e(
+                "SupabaseDbClient",
+                "fetchHotBoxLists error",
+                e
+            )
         }
-        list
+
+        result.toList()
     }
 
     suspend fun upsertHotBoxList(context: Context, name: String): Boolean = withContext(Dispatchers.IO) {
@@ -993,6 +1032,34 @@ object SupabaseDbClient {
             true
         } catch (e: Exception) {
             Log.e("SupabaseDbClient", "replaceHotBoxLists error", e)
+            false
+        }
+    }
+
+    suspend fun mergeHotBoxLists(
+        context: Context,
+        names: Collection<String>
+    ): Boolean = withContext(Dispatchers.IO) {
+
+        try {
+            val cleanNames = names
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+
+            for (name in cleanNames) {
+                if (!upsertHotBoxList(context, name)) {
+                    return@withContext false
+                }
+            }
+
+            true
+        } catch (e: Exception) {
+            Log.e(
+                "SupabaseDbClient",
+                "mergeHotBoxLists error",
+                e
+            )
             false
         }
     }

@@ -33,10 +33,15 @@ fun AgentEinstellungenScreen() {
     var laden by remember { mutableStateOf(true) }
     var meldung by remember { mutableStateOf<String?>(null) }
 
-    // Zugang
+    // Zugang & KI-Provider
+    var provider by remember { mutableStateOf("gemini") }
+    var geminiKey by remember { mutableStateOf("") }
+    var geminiKeyVorhanden by remember { mutableStateOf(false) }
     var openAiKey by remember { mutableStateOf("") }
     var keyVorhanden by remember { mutableStateOf(false) }
-    var modell by remember { mutableStateOf("gpt-realtime") }
+    var modell by remember { mutableStateOf("gemini-3.5-flash") }
+    var geminiTestErgebnis by remember { mutableStateOf<String?>(null) }
+    var geminiTestLaeuft by remember { mutableStateOf(false) }
 
     // Agent
     var agentId by remember { mutableStateOf<String?>(null) }
@@ -65,12 +70,46 @@ fun AgentEinstellungenScreen() {
     )) }
 
     LaunchedEffect(Unit) {
+        val existingGeminiKey = com.example.util.AiAgentClient.getGeminiApiKey(context)
+        if (existingGeminiKey.isNotBlank()) {
+            geminiKey = existingGeminiKey
+            geminiKeyVorhanden = true
+        }
+
+        val localConfig = com.example.agent.AgentRuntime.config.value
+        provider = localConfig.llmProvider.ifBlank { "gemini" }
+        modell = localConfig.llmModel.ifBlank { if (provider == "gemini") "gemini-3.5-flash" else "gpt-4o-mini" }
+        if (localConfig.geminiApiKey.isNotBlank()) {
+            geminiKey = localConfig.geminiApiKey
+            geminiKeyVorhanden = true
+        }
+
+        val currentAgents = com.example.agent.AgentRuntime.agents.value
+        if (currentAgents.isNotEmpty()) {
+            val a = currentAgents.first()
+            agentId = a.id
+            name = a.name
+            rolle = a.role
+            begruessung = a.greeting
+            auftrag = a.systemPrompt
+            stimme = a.voiceId
+            tempo = a.voiceSpeed
+            anrede = a.formOfAddress
+        }
+
         runCatching {
             val cfg = SupabaseDbClient.fetchTableRows(context, "agent_runtime_config")
             if (cfg.length() > 0) {
                 val o = cfg.getJSONObject(0)
-                keyVorhanden = o.optString("openai_key_last4").isNotBlank()
-                modell = o.optString("realtime_model", "gpt-realtime")
+                keyVorhanden = o.optString("openai_key_last4").isNotBlank() || o.optString("openai_api_key").isNotBlank()
+                if (o.has("gemini_api_key") && o.optString("gemini_api_key").isNotBlank()) {
+                    geminiKey = o.optString("gemini_api_key")
+                    geminiKeyVorhanden = true
+                }
+                if (o.has("llm_provider")) {
+                    provider = o.optString("llm_provider", "gemini")
+                }
+                modell = o.optString("llm_model", if (provider == "gemini") "gemini-3.5-flash" else "gpt-realtime")
             }
             val agents = SupabaseDbClient.fetchTableRows(context, "agent_profiles")
             if (agents.length() > 0) {
@@ -109,16 +148,41 @@ fun AgentEinstellungenScreen() {
     fun speichern() {
         scope.launch {
             runCatching {
-                if (openAiKey.isNotBlank()) {
-                    val token = SupabaseAuthClient.getSessionToken(context)
-                        ?: throw IllegalStateException("Bitte zuerst in der App anmelden.")
-                    AgentBackendClient.saveOpenAiKey(token, openAiKey)
+                // Save Gemini Key locally
+                if (geminiKey.isNotBlank()) {
+                    com.example.util.AiAgentClient.saveGeminiApiKey(context, geminiKey.trim())
+                    geminiKeyVorhanden = true
                 }
-                SupabaseDbClient.upsertTableRow(
-                    context,
-                    "agent_runtime_config",
-                    JSONObject().put("realtime_model", modell).put("realtime_enabled", true)
+
+                // Update runtime config
+                val currentCfg = com.example.agent.AgentRuntime.config.value
+                val newCfg = currentCfg.copy(
+                    llmProvider = provider,
+                    llmModel = modell,
+                    geminiApiKey = geminiKey.trim().ifBlank { currentCfg.geminiApiKey },
+                    openaiApiKey = openAiKey.trim().ifBlank { currentCfg.openaiApiKey }
                 )
+                com.example.agent.AgentRuntime.speichereKonfiguration(newCfg)
+
+                // Try Supabase save if authenticated
+                val token = SupabaseAuthClient.getSessionToken(context)
+                if (token != null) {
+                    if (openAiKey.isNotBlank()) {
+                        runCatching { AgentBackendClient.saveOpenAiKey(token, openAiKey) }
+                    }
+                    SupabaseDbClient.upsertTableRow(
+                        context,
+                        "agent_runtime_config",
+                        JSONObject().apply {
+                            put("llm_provider", provider)
+                            put("llm_model", modell)
+                            put("realtime_model", modell)
+                            put("realtime_enabled", true)
+                            if (geminiKey.isNotBlank()) put("gemini_api_key", geminiKey.trim())
+                        }
+                    )
+                }
+
                 agentId?.let { id ->
                     val werkzeugArray = JSONArray()
                     werkzeuge.forEach { werkzeugArray.put(it) }
@@ -145,14 +209,30 @@ fun AgentEinstellungenScreen() {
                         .put("transfer_number", weiterleitung)
                         .put("realtime_model", modell)
                         .put("enabled_tools", werkzeugArray)
-                    SupabaseDbClient.upsertTableRow(context, "agent_profiles", a)
+                    runCatching { SupabaseDbClient.upsertTableRow(context, "agent_profiles", a) }
+
+                    // Also save locally in AgentRuntime
+                    val existing = com.example.agent.AgentRuntime.agents.value.find { it.id == id }
+                    if (existing != null) {
+                        com.example.agent.AgentRuntime.speichereAgent(
+                            existing.copy(
+                                name = name.ifBlank { existing.name },
+                                role = rolle.ifBlank { existing.role },
+                                greeting = begruessung.ifBlank { existing.greeting },
+                                systemPrompt = auftrag.ifBlank { existing.systemPrompt },
+                                voiceId = stimme,
+                                voiceSpeed = tempo,
+                                formOfAddress = anrede
+                            )
+                        )
+                    }
                 }
                 if (openAiKey.isNotBlank()) {
                     keyVorhanden = true
                     openAiKey = ""
                 }
-                meldung = "Gespeichert. Gilt ab dem naechsten Gespraech."
-            }.onFailure { meldung = "Konnte nicht speichern: ${it.message}" }
+                meldung = "Gespeichert. Gilt ab dem nächsten Gespräch."
+            }.onFailure { meldung = "Konnte nicht vollständig speichern: ${it.message}" }
         }
     }
 
@@ -172,35 +252,147 @@ fun AgentEinstellungenScreen() {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
         }
 
-        // ---------- Zugang ----------
-        Abschnitt("Zugang zu ChatGPT") {
-            OutlinedTextField(
-                value = openAiKey,
-                onValueChange = { openAiKey = it },
-                label = {
-                    Text(if (keyVorhanden) "OpenAI-Schluessel (hinterlegt, zum Aendern neu eingeben)"
-                    else "OpenAI-Schluessel (sk-...)")
-                },
-                visualTransformation = PasswordVisualTransformation(),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Text(
-                "Der Schluessel wird verschluesselt in Supabase Vault gespeichert und nie an das Handy zurueckgegeben.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text("Modell", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+        // ---------- KI-Anbieter & API-Schlüssel ----------
+        Abschnitt("KI-Anbieter & API-Schlüssel") {
+            Text("KI-Engine wählen", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
-                    selected = modell == "gpt-realtime",
-                    onClick = { modell = "gpt-realtime" },
-                    label = { Text("Beste Qualitaet") }
+                    selected = provider == "gemini",
+                    onClick = {
+                        provider = "gemini"
+                        if (!modell.startsWith("gemini")) modell = "gemini-3.5-flash"
+                    },
+                    label = { Text("Google Gemini (Empfohlen)") }
                 )
                 FilterChip(
-                    selected = modell == "gpt-realtime-mini",
-                    onClick = { modell = "gpt-realtime-mini" },
-                    label = { Text("Guenstig und schnell") }
+                    selected = provider == "openai",
+                    onClick = {
+                        provider = "openai"
+                        if (modell.startsWith("gemini")) modell = "gpt-4o-mini"
+                    },
+                    label = { Text("OpenAI / ChatGPT") }
+                )
+            }
+
+            if (provider == "gemini") {
+                OutlinedTextField(
+                    value = geminiKey,
+                    onValueChange = { geminiKey = it },
+                    label = {
+                        Text(if (geminiKeyVorhanden) "Google Gemini API-Key (konfiguriert)"
+                        else "Google Gemini API-Key (AIzaSy...)")
+                    },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "Wird für direkte KI-Gespräche, CRM-Assistenten und Gesprächslogik verwendet.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Text("Gemini Modell", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = modell == "gemini-3.5-flash",
+                        onClick = { modell = "gemini-3.5-flash" },
+                        label = { Text("3.5 Flash (Empfohlen)") }
+                    )
+                    FilterChip(
+                        selected = modell == "gemini-3.1-flash-lite-preview",
+                        onClick = { modell = "gemini-3.1-flash-lite-preview" },
+                        label = { Text("3.1 Flash-Lite") }
+                    )
+                    FilterChip(
+                        selected = modell == "gemini-3.1-pro-preview",
+                        onClick = { modell = "gemini-3.1-pro-preview" },
+                        label = { Text("3.1 Pro (Denken)") }
+                    )
+                }
+                Text(
+                    "⚡ Kosten: ~0,001 € / Min · Bis zu 1.500 Calls/Tag im Free-Tier komplett 0,00 € kostenlos!",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                OutlinedButton(
+                    onClick = {
+                        val keyToTest = geminiKey.trim().ifBlank {
+                            com.example.util.AiAgentClient.getGeminiApiKey(context)
+                        }
+                        if (keyToTest.isBlank()) {
+                            geminiTestErgebnis = "Bitte zuerst einen Gemini API-Key eintragen."
+                            return@OutlinedButton
+                        }
+                        geminiTestLaeuft = true
+                        geminiTestErgebnis = null
+                        scope.launch {
+                            try {
+                                val ok = com.example.util.AiAgentClient.testApiKey(keyToTest)
+                                geminiTestErgebnis = if (ok) "✓ Gemini API-Key ist gültig und aktiv!" else "❌ API-Key ungültig oder Aufruf fehlgeschlagen."
+                            } catch (e: Exception) {
+                                geminiTestErgebnis = "❌ Fehler: ${e.message}"
+                            } finally {
+                                geminiTestLaeuft = false
+                            }
+                        }
+                    },
+                    enabled = !geminiTestLaeuft,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (geminiTestLaeuft) "Prüfe Gemini..." else "Gemini API-Key testen")
+                }
+                geminiTestErgebnis?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (it.startsWith("✓")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    )
+                }
+            } else {
+                OutlinedTextField(
+                    value = openAiKey,
+                    onValueChange = { openAiKey = it },
+                    label = {
+                        Text(if (keyVorhanden) "OpenAI-Schlüssel (hinterlegt, zum Ändern neu eingeben)"
+                        else "OpenAI-Schlüssel (sk-...)")
+                    },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "Der Schlüssel wird sicher gespeichert und für OpenAI Realtime / Whisper / GPT verwendet.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text("OpenAI Modell", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = modell == "gpt-4o-mini",
+                        onClick = { modell = "gpt-4o-mini" },
+                        label = { Text("GPT-4o Mini") }
+                    )
+                    FilterChip(
+                        selected = modell == "gpt-realtime",
+                        onClick = { modell = "gpt-realtime" },
+                        label = { Text("Realtime") }
+                    )
+                    FilterChip(
+                        selected = modell == "gpt-realtime-mini",
+                        onClick = { modell = "gpt-realtime-mini" },
+                        label = { Text("Realtime Mini") }
+                    )
+                }
+                Text(
+                    when (modell) {
+                        "gpt-realtime" -> "⚡ Kosten: ~0,185 € / Min (Audio-zu-Audio WebSocket)"
+                        "gpt-realtime-mini" -> "⚡ Kosten: ~0,085 € / Min (Realtime Audio Mini)"
+                        else -> "⚡ Kosten: ~0,022 € / Min (Whisper STT + GPT-4o-mini + TTS)"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
                 )
             }
         }

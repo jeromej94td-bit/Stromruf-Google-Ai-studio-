@@ -25,7 +25,7 @@ data class AgentProfile(
     val sortOrder: Int = 0
 )
 
-/** SIP + Schlüssel (agent_runtime_config). ChatGPT ist Standard. */
+/** SIP + Schlüssel (agent_runtime_config). Google Gemini & ChatGPT unterstützt. */
 data class RuntimeConfig(
     val sipDisplayName: String = "Mein SIP-Trunk",
     val sipUser: String = "", val sipPassword: String = "",
@@ -34,21 +34,25 @@ data class RuntimeConfig(
     val sipCallerId: String = "", val sipMaxLines: Int = 4,
     val routingStrategy: String = "round_robin",
     val fixedAgentId: String? = null,
-    val llmProvider: String = "openai",            // openai | anthropic
-    val llmBaseUrl: String = "https://api.openai.com/v1",
-    val llmModel: String = "gpt-4o-mini",
-    val llmApiKey: String = "",                    // optional (z.B. Anthropic)
+    val llmProvider: String = "gemini",            // gemini | openai | anthropic
+    val llmBaseUrl: String = "https://generativelanguage.googleapis.com/v1beta",
+    val llmModel: String = "gemini-3.5-flash",
+    val llmApiKey: String = "",                    // optional (z.B. Anthropic / Custom)
+    val geminiApiKey: String = "",                 // Google Gemini API Key
     val sttBaseUrl: String = "https://api.openai.com/v1",
     val sttModel: String = "whisper-1",
     val ttsBaseUrl: String = "https://api.openai.com/v1",
     val ttsModel: String = "tts-1",
-    val openaiApiKey: String = "",                 // EIN Schlüssel für STT+TTS+Chat
+    val openaiApiKey: String = "",                 // Schlüssel für STT+TTS+OpenAI Chat
     val aiDisclosureText: String = "Kurzer Hinweis: Sie sprechen mit einem digitalen Assistenten.",
     val recordingEnabled: Boolean = true,
     val retentionDays: Int = 7
 ) {
-    val chatKey: String get() =
-        if (llmProvider == "openai") llmApiKey.ifBlank { openaiApiKey } else llmApiKey
+    val chatKey: String get() = when (llmProvider.lowercase()) {
+        "gemini" -> geminiApiKey.ifBlank { llmApiKey }.ifBlank { openaiApiKey }
+        "openai" -> llmApiKey.ifBlank { openaiApiKey }
+        else -> llmApiKey.ifBlank { geminiApiKey }.ifBlank { openaiApiKey }
+    }
     val speechKey: String get() = openaiApiKey
 }
 

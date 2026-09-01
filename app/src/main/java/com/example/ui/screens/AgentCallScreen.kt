@@ -49,12 +49,15 @@ private val Gelb = Color(0xFFFFC864)
 private val Rot = Color(0xFFEF4444)
 
 // ============================================================================
-// Hauptscreen: Live | Agenten | Anrufe | Kampagnen | Wissen | Setup
+// Hauptscreen: Agenten | Live | KI-Assistent | Anrufe | Kampagnen | Wissen | Setup
 // ============================================================================
 @Composable
-fun AgentCallScreen(modifier: Modifier = Modifier) {
-    val tabs = listOf("Live", "Agenten", "Anrufe", "Kampagnen", "Wissen", "Setup")
-    var tab by remember { mutableStateOf(1) }
+fun AgentCallScreen(
+    modifier: Modifier = Modifier,
+    viewModel: com.example.viewmodel.StromrufViewModel? = null
+) {
+    val tabs = listOf("Agenten", "Live", "KI-Assistent", "Anrufe", "Kampagnen", "Wissen", "Setup")
+    var tab by remember { mutableStateOf(0) }
     val sessions by AgentRuntime.sessions.collectAsState()
     val aktive = sessions.count { it.status.collectAsState().value.aktiv }
 
@@ -67,7 +70,7 @@ fun AgentCallScreen(modifier: Modifier = Modifier) {
                 Tab(selected = tab == i, onClick = { tab = i }, text = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(t, fontSize = 13.sp)
-                        if (i == 0 && aktive > 0) {
+                        if (i == 1 && aktive > 0) {
                             Spacer(Modifier.width(4.dp))
                             Box(Modifier.size(16.dp).background(Gruen, CircleShape),
                                 contentAlignment = Alignment.Center) {
@@ -79,12 +82,21 @@ fun AgentCallScreen(modifier: Modifier = Modifier) {
             }
         }
         when (tab) {
-            0 -> LiveTab()
-            1 -> AgentenTab()
-            2 -> AnrufeTab()
-            3 -> KampagnenTab()
-            4 -> WissenTab()
-            5 -> EinrichtungTab()
+            0 -> AgentenTab()
+            1 -> LiveTab()
+            2 -> {
+                if (viewModel != null) {
+                    com.example.ui.AiAgentScreen(viewModel = viewModel)
+                } else {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("KI-Assistent wird initialisiert...", color = Color.White)
+                    }
+                }
+            }
+            3 -> AnrufeTab()
+            4 -> KampagnenTab()
+            5 -> WissenTab()
+            6 -> EinrichtungTab()
         }
     }
 }
@@ -130,6 +142,7 @@ private fun LiveTab() {
 
 @Composable
 private fun LiveKarte(s: AgentSession) {
+    val cfg by AgentRuntime.config.collectAsState()
     val status by s.status.collectAsState()
     val transcript by s.transcript.collectAsState()
     val fehler by s.fehler.collectAsState()
@@ -140,6 +153,13 @@ private fun LiveKarte(s: AgentSession) {
             dauer = (System.currentTimeMillis() - s.startedAt) / 1000; delay(1000)
         }
     }
+    val callCost = remember(dauer, cfg) {
+        AgentCostCalculator.calculateCallCost(dauer.toInt(), cfg, s.direction)
+    }
+    val callCostFormatted = remember(callCost) {
+        if (callCost < 0.001) "< 0,01 €" else String.format(Locale.GERMANY, "%.3f €", callCost)
+    }
+
     Card(colors = CardDefaults.cardColors(containerColor = Karte),
         shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(12.dp)) {
@@ -155,7 +175,7 @@ private fun LiveKarte(s: AgentSession) {
                 Column(Modifier.weight(1f)) {
                     Text("${s.agent.name} · ${s.contactName ?: s.remoteNumber}",
                         fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Color.White)
-                    Text("${status.label} · ${dauer / 60}:${"%02d".format(dauer % 60)}" +
+                    Text("${status.label} · ${dauer / 60}:${"%02d".format(dauer % 60)} · ~$callCostFormatted" +
                          if (s.campaignId != null) " · Kampagne" else "",
                         fontSize = 11.sp, color = Color.Gray)
                 }
@@ -184,15 +204,32 @@ private fun LiveKarte(s: AgentSession) {
 // ============================================================================
 @Composable
 private fun AgentenTab() {
-    var unterReiter by remember { mutableStateOf("training") }
+    var unterReiter by remember { mutableStateOf("profile") }
 
     Column(Modifier.fillMaxSize()) {
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
+            FilterChip(
+                selected = unterReiter == "profile",
+                onClick = { unterReiter = "profile" },
+                label = { Text("Agenten-Profile") }
+            )
+            FilterChip(
+                selected = unterReiter == "kosten",
+                onClick = { unterReiter = "kosten" },
+                label = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.AccountBalanceWallet, null, modifier = Modifier.size(13.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Kosten & Tarife")
+                    }
+                }
+            )
             FilterChip(
                 selected = unterReiter == "training",
                 onClick = { unterReiter = "training" },
@@ -203,29 +240,28 @@ private fun AgentenTab() {
                 onClick = { unterReiter = "einstellungen" },
                 label = { Text("So arbeitet der Agent") }
             )
-            FilterChip(
-                selected = unterReiter == "profile",
-                onClick = { unterReiter = "profile" },
-                label = { Text("Agenten-Profile") }
-            )
         }
 
         when (unterReiter) {
+            "kosten" -> AgentKostenScreen()
             "training" -> AgentTrainingScreen()
             "einstellungen" -> AgentEinstellungenScreen()
             else -> {
-                AgentenProfilListe()
+                AgentenProfilListe(onKostenKlick = { unterReiter = "kosten" })
             }
         }
     }
 }
 
 @Composable
-private fun AgentenProfilListe() {
+private fun AgentenProfilListe(
+    onKostenKlick: () -> Unit = {}
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val agents by AgentRuntime.agents.collectAsState()
     val geladen by AgentRuntime.geladen.collectAsState()
+    val cfg by AgentRuntime.config.collectAsState()
     var editor by remember { mutableStateOf<AgentProfile?>(null) }
     var anrufDialog by remember { mutableStateOf<AgentProfile?>(null) }
     var meldung by remember { mutableStateOf<String?>(null) }
@@ -288,6 +324,9 @@ private fun AgentenProfilListe() {
             }
             items(agents, key = { it.id }) { a ->
                 val agentSources = knowledgeList.filter { it.agentId == a.id }
+                val agentCost = remember(cfg, a.direction) {
+                    AgentCostCalculator.calculateCost(cfg, a.direction)
+                }
                 Card(colors = CardDefaults.cardColors(containerColor = Karte),
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.clickable { editor = a }) {
@@ -306,8 +345,33 @@ private fun AgentenProfilListe() {
                             }, colors = SwitchDefaults.colors(checkedTrackColor = ThemeAccent))
                         }
 
+                        // Kosten-Badge für diesen Agenten
+                        Row(
+                            Modifier
+                                .padding(top = 4.dp)
+                                .clickable { onKostenKlick() },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Bolt,
+                                null,
+                                tint = if (agentCost.isFreeTier) Gruen else ThemeAccent,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                if (agentCost.isFreeTier) "Kosten: 0,00 € (Free Tier) · ~${String.format(Locale.GERMANY, "%.3f", agentCost.totalPerMin)} € / Min"
+                                else "Kosten: ~${String.format(Locale.GERMANY, "%.3f", agentCost.totalPerMin)} € / Min (${agentCost.providerName})",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (agentCost.isFreeTier) Gruen else ThemeAccent
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Icon(Icons.Default.ChevronRight, null, tint = Color.Gray, modifier = Modifier.size(13.dp))
+                        }
+
                         // Wissensquellen-Badge & Datei-Upload Button
-                        Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.AttachFile, null, tint = ThemeAccent, modifier = Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
                             Text(
@@ -684,6 +748,7 @@ private fun AnrufeTab() {
 private fun VerlaufKarte(s: CallSessionRow, onGeloescht: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val cfg by AgentRuntime.config.collectAsState()
     var offen by remember { mutableStateOf(false) }
     var spielt by remember { mutableStateOf(false) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
@@ -691,6 +756,12 @@ private fun VerlaufKarte(s: CallSessionRow, onGeloescht: () -> Unit) {
     val df = remember { SimpleDateFormat("dd.MM. HH:mm", Locale.GERMANY) }
     val restTage = s.recordingExpiresAt?.let {
         ((it - System.currentTimeMillis()) / 86_400_000L).coerceAtLeast(0)
+    }
+    val callCost = remember(s.durationSec, cfg) {
+        AgentCostCalculator.calculateCallCost(s.durationSec, cfg, s.direction)
+    }
+    val costStr = remember(callCost) {
+        if (callCost < 0.001) "< 0,01 €" else String.format(Locale.GERMANY, "%.3f €", callCost)
     }
 
     Card(colors = CardDefaults.cardColors(containerColor = Karte),
@@ -709,6 +780,7 @@ private fun VerlaufKarte(s: CallSessionRow, onGeloescht: () -> Unit) {
                         fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Color.White)
                     Text("${df.format(Date(s.startedAt))} · ${s.durationSec / 60}:" +
                          "%02d".format(s.durationSec % 60) +
+                         " · ~$costStr" +
                          (s.outcome?.let { " · $it" } ?: "") +
                          (s.sentiment?.let { " · Stimmung: $it" } ?: ""),
                         fontSize = 11.sp, color = Color.Gray)
@@ -1245,22 +1317,44 @@ private fun EinrichtungTab() {
                 colors = SliderDefaults.colors(thumbColor = ThemeAccent, activeTrackColor = ThemeAccent))
         }
 
-        Abschnitt("ChatGPT (Sprache verstehen, denken, sprechen)") {
-            Feld("OpenAI API-Schlüssel (Whisper + Chat + Stimmen)", c.openaiApiKey,
-                passwort = true) { c = c.copy(openaiApiKey = it) }
-            Text("Sprachmodell", fontSize = 12.sp, color = Color.Gray)
-            ChipReihe(listOf("openai" to "ChatGPT", "anthropic" to "Claude"),
+        Abschnitt("KI-Engine & Sprachmodelle (Verstehen, Denken, Antworten)") {
+            Text("KI-Anbieter", fontSize = 12.sp, color = Color.Gray)
+            ChipReihe(listOf("gemini" to "Google Gemini (Empfohlen)", "openai" to "ChatGPT / OpenAI", "anthropic" to "Claude"),
                 c.llmProvider) { p ->
-                c = if (p == "openai") c.copy(llmProvider = "openai",
-                        llmBaseUrl = "https://api.openai.com/v1", llmModel = "gpt-4o-mini")
-                    else c.copy(llmProvider = "anthropic",
-                        llmBaseUrl = "https://api.anthropic.com", llmModel = "claude-sonnet-4-6")
+                c = when (p) {
+                    "gemini" -> c.copy(llmProvider = "gemini", llmModel = "gemini-3.5-flash")
+                    "openai" -> c.copy(llmProvider = "openai", llmBaseUrl = "https://api.openai.com/v1", llmModel = "gpt-4o-mini")
+                    else -> c.copy(llmProvider = "anthropic", llmBaseUrl = "https://api.anthropic.com", llmModel = "claude-sonnet-4-6")
+                }
             }
-            Feld("Modell", c.llmModel) { c = c.copy(llmModel = it) }
-            if (c.llmProvider == "anthropic")
+
+            if (c.llmProvider == "gemini") {
+                Feld("Google Gemini API-Schlüssel (AIzaSy...)", c.geminiApiKey, passwort = true) {
+                    c = c.copy(geminiApiKey = it)
+                }
+                Text("Gemini Sprachmodell", fontSize = 12.sp, color = Color.Gray)
+                ChipReihe(listOf(
+                    "gemini-3.5-flash" to "3.5 Flash (Empfohlen)",
+                    "gemini-3.1-flash-lite-preview" to "3.1 Flash-Lite",
+                    "gemini-3.1-pro-preview" to "3.1 Pro (Denken)"
+                ), c.llmModel) { c = c.copy(llmModel = it) }
+            } else if (c.llmProvider == "openai") {
+                Feld("OpenAI API-Schlüssel (Whisper + Chat + Stimmen)", c.openaiApiKey, passwort = true) {
+                    c = c.copy(openaiApiKey = it)
+                }
+                Feld("Modell", c.llmModel) { c = c.copy(llmModel = it) }
+            } else {
                 Feld("Anthropic API-Schlüssel", c.llmApiKey, passwort = true) {
                     c = c.copy(llmApiKey = it)
                 }
+                Feld("Modell", c.llmModel) { c = c.copy(llmModel = it) }
+            }
+
+            if (c.llmProvider != "openai") {
+                Feld("Optional: OpenAI API-Schlüssel für TTS / Whisper Stimmen", c.openaiApiKey, passwort = true) {
+                    c = c.copy(openaiApiKey = it)
+                }
+            }
         }
 
         Abschnitt("Eingehende Anrufe (eine Nummer, mehrere Agenten)") {

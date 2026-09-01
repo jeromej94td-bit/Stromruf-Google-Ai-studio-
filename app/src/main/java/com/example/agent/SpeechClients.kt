@@ -56,20 +56,73 @@ object Tts {
     } catch (e: Exception) { null }
 }
 
-/** Gesprächsantworten – ChatGPT-Standard, Anthropic optional. */
+/** Gesprächsantworten – Google Gemini Standard, ChatGPT & Anthropic optional. */
 object Llm {
     private const val FALLBACK = "Entschuldigung, da ist gerade etwas dazwischengekommen. " +
             "Könnten Sie das bitte wiederholen?"
 
     fun antwort(cfg: RuntimeConfig, system: String, verlauf: List<Pair<Boolean, String>>): String =
-        if (cfg.llmProvider == "anthropic") anthropic(cfg, system, verlauf)
-        else openAi(cfg, system, verlauf)
+        when (cfg.llmProvider.lowercase()) {
+            "anthropic" -> anthropic(cfg, system, verlauf)
+            "openai" -> openAi(cfg, system, verlauf)
+            else -> gemini(cfg, system, verlauf)
+        }
 
     private fun msgs(verlauf: List<Pair<Boolean, String>>) = JSONArray().apply {
         verlauf.forEach { (vomAgent, text) ->
             put(JSONObject().put("role", if (vomAgent) "assistant" else "user").put("content", text))
         }
     }
+
+    private fun gemini(cfg: RuntimeConfig, system: String, v: List<Pair<Boolean, String>>) = try {
+        val contents = JSONArray()
+        v.forEach { (vomAgent, text) ->
+            contents.put(JSONObject().apply {
+                put("role", if (vomAgent) "model" else "user")
+                put("parts", JSONArray().put(JSONObject().put("text", text)))
+            })
+        }
+        if (contents.length() == 0) {
+            contents.put(JSONObject().apply {
+                put("role", "user")
+                put("parts", JSONArray().put(JSONObject().put("text", "Hallo, ich rufe an.")))
+            })
+        }
+        val model = if (cfg.llmModel.startsWith("gemini")) cfg.llmModel else "gemini-3.5-flash"
+        val payload = JSONObject().apply {
+            put("contents", contents)
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().put(JSONObject().put("text", system)))
+            })
+        }.toString()
+        val apiKey = cfg.chatKey
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+        val req = Request.Builder().url(url)
+            .post(payload.toRequestBody(SpeechHttp.JSON)).build()
+        SpeechHttp.client.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) FALLBACK
+            else {
+                val root = JSONObject(r.body?.string() ?: "{}")
+                val candidates = root.optJSONArray("candidates")
+                if (candidates != null && candidates.length() > 0) {
+                    val candidate = candidates.getJSONObject(0)
+                    val contentObj = candidate.optJSONObject("content")
+                    val parts = contentObj?.optJSONArray("parts")
+                    var answerText: String? = null
+                    if (parts != null) {
+                        for (i in 0 until parts.length()) {
+                            val part = parts.getJSONObject(i)
+                            if (part.has("text")) {
+                                answerText = part.getString("text")
+                                break
+                            }
+                        }
+                    }
+                    answerText ?: FALLBACK
+                } else FALLBACK
+            }
+        }
+    } catch (e: Exception) { FALLBACK }
 
     private fun openAi(cfg: RuntimeConfig, system: String, v: List<Pair<Boolean, String>>) = try {
         val all = JSONArray().put(JSONObject().put("role", "system").put("content", system))

@@ -22,9 +22,38 @@ object AgentRuntime {
     private lateinit var appContext: Context
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    val STANDARD_AGENTEN = listOf(
+        AgentProfile(
+            id = "agent_mia_default",
+            name = "Mia",
+            role = "Empfang & Kundenservice",
+            direction = "beide",
+            greeting = "Guten Tag, hier ist Mia vom STROMRUF Kundenservice. Wie kann ich Ihnen heute behilflich sein?",
+            systemPrompt = "Du bist Mia, die freundliche und kompetente Telefonassistentin von STROMRUF. Du nimmst Kundenanliegen entgegen, hilfst bei Fragen zu Strom- und Gastarifen, erfasst Zählerstände und nimmst Rückrufwünsche auf. Antworte stets höflich, präzise und in natürlichem Deutsch.",
+            language = "de",
+            voiceId = "nova",
+            voiceSpeed = 1.0f,
+            maxParallel = 4,
+            isActive = true
+        ),
+        AgentProfile(
+            id = "agent_leo_default",
+            name = "Leo",
+            role = "Vertrieb & Tarifoptimierung",
+            direction = "ausgehend",
+            greeting = "Hallo! Mein Name ist Leo von STROMRUF. Ich rufe bezüglich Ihres Strom- und Gasvergleichs an.",
+            systemPrompt = "Du bist Leo, ein charismatischer und strukturierter Energieberater bei STROMRUF. Du führst Bedarfsanalysen durch, fragst nach dem aktuellen Jahresverbrauch (kWh) und hilfst beim Tarifwechsel zu günstigeren Ökostrom- oder Gewerbetarifen.",
+            language = "de",
+            voiceId = "onyx",
+            voiceSpeed = 1.0f,
+            maxParallel = 2,
+            isActive = true
+        )
+    )
+
     private val _sessions = MutableStateFlow<List<AgentSession>>(emptyList())
     val sessions: StateFlow<List<AgentSession>> = _sessions
-    private val _agents = MutableStateFlow<List<AgentProfile>>(emptyList())
+    private val _agents = MutableStateFlow<List<AgentProfile>>(STANDARD_AGENTEN)
     val agents: StateFlow<List<AgentProfile>> = _agents
     private val _config = MutableStateFlow(RuntimeConfig())
     val config: StateFlow<RuntimeConfig> = _config
@@ -53,18 +82,23 @@ object AgentRuntime {
                 if (cfg.sipUser.isNotBlank() && cfg.sipDomain.isNotBlank())
                     withContext(Dispatchers.Main) { SipEngine.register(cfg) }
             }
-            AgentBackend.fetchAgents(appContext)?.let { _agents.value = it }
-            _campaigns.value = AgentBackend.fetchCampaigns(appContext)
+            val fetched = AgentBackend.fetchAgents(appContext)
+            if (fetched != null && fetched.isNotEmpty()) {
+                _agents.value = fetched
+            } else if (_agents.value.isEmpty()) {
+                _agents.value = STANDARD_AGENTEN
+            }
+            _campaigns.value = AgentBackend.fetchCampaigns(appContext) ?: emptyList()
             _geladen.value = true
             onFertig?.invoke()
         }
     }
 
     fun speichereKonfiguration(cfg: RuntimeConfig, onFertig: (Boolean) -> Unit = {}) {
+        _config.value = cfg
         scope.launch {
             val ok = AgentBackend.saveConfig(appContext, cfg)
-            if (ok) {
-                _config.value = cfg
+            if (ok && cfg.sipUser.isNotBlank() && cfg.sipDomain.isNotBlank()) {
                 withContext(Dispatchers.Main) { SipEngine.register(cfg) }
             }
             withContext(Dispatchers.Main) { onFertig(ok) }
@@ -72,22 +106,20 @@ object AgentRuntime {
     }
 
     fun speichereAgent(a: AgentProfile, onFertig: (Boolean) -> Unit = {}) {
+        val list = _agents.value.toMutableList()
+        val i = list.indexOfFirst { it.id == a.id }
+        if (i >= 0) list[i] = a else list += a
+        _agents.value = list
         scope.launch {
             val ok = AgentBackend.upsertAgent(appContext, a)
-            if (ok) {
-                val list = _agents.value.toMutableList()
-                val i = list.indexOfFirst { it.id == a.id }
-                if (i >= 0) list[i] = a else list += a
-                _agents.value = list
-            }
             withContext(Dispatchers.Main) { onFertig(ok) }
         }
     }
 
     fun loescheAgent(id: String) {
+        _agents.value = _agents.value.filterNot { it.id == id }
         scope.launch {
-            if (AgentBackend.deleteAgent(appContext, id))
-                _agents.value = _agents.value.filterNot { it.id == id }
+            AgentBackend.deleteAgent(appContext, id)
         }
     }
 

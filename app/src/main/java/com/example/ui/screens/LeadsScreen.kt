@@ -45,6 +45,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -178,6 +179,43 @@ fun LeadsScreen(
     val hotBoxLists by viewModel.hotBoxLists.collectAsState()
     val selectedFocusList by viewModel.selectedHotBoxListName.collectAsState()
     val selectedHotBoxListNames by viewModel.selectedHotBoxListNames.collectAsState()
+
+    val effectiveHotBoxLists = remember(hotBoxLists, contacts) {
+        val result = linkedSetOf<String>()
+        hotBoxLists.forEach { name ->
+            val clean = name.trim()
+            if (clean.isNotEmpty()) {
+                result.add(clean)
+            }
+        }
+        contacts
+            .asSequence()
+            .filter { it.isHotBox }
+            .mapNotNull {
+                it.hotBoxListName
+                    ?.trim()
+                    ?.takeIf { name -> name.isNotEmpty() }
+            }
+            .forEach { result.add(it) }
+        result.toList()
+    }
+
+    LaunchedEffect(effectiveHotBoxLists) {
+        val current = hotBoxLists
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        val effective = effectiveHotBoxLists.toSet()
+        if (effective != current) {
+            viewModel.setHotBoxLists(effectiveHotBoxLists.toSet())
+        }
+    }
+
+    LaunchedEffect(effectiveHotBoxLists, selectedFocusList) {
+        if (effectiveHotBoxLists.isNotEmpty() && selectedFocusList !in effectiveHotBoxLists) {
+            viewModel.selectHotBoxList(effectiveHotBoxLists.first())
+        }
+    }
 
     val isAutoCallActive by viewModel.isAutoCallActive.collectAsState()
     val isAutoCallPaused by viewModel.isAutoCallPaused.collectAsState()
@@ -349,7 +387,7 @@ fun LeadsScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val lists = hotBoxLists.toList()
+                        val lists = effectiveHotBoxLists
                         items(lists) { opt ->
                             val isSelected = selectedHotBoxListNames.contains(opt)
                             val cfg = com.example.ui.theme.LocalThemeConfig.current

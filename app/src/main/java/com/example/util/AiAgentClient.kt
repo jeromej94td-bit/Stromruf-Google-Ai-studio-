@@ -1124,4 +1124,37 @@ object AiAgentClient {
         val defaultKey = "AQ.Ab8RN6Ky691PKx30IW9i3nVD-CaBWLQ0TQlTGEwRrhuoxLs9cQ".replace("\\s".toRegex(), "")
         return defaultKey
     }
+
+    fun saveGeminiApiKey(context: Context, key: String) {
+        val prefs = context.getSharedPreferences("stromruf_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString("gemini_api_key", key.trim()).apply()
+    }
+
+    suspend fun testApiKey(apiKey: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val trimmedKey = apiKey.trim().replace("\\s".toRegex(), "")
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$trimmedKey"
+            val body = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().put("text", "Hallo! Test."))
+                        })
+                    })
+                })
+            }.toString().toRequestBody(JSON_MEDIA_TYPE)
+
+            val request = Request.Builder()
+                .url(url)
+                .post(body)
+                .addHeader("Content-Type", "application/json")
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
 }
