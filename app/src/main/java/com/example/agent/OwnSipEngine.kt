@@ -30,10 +30,11 @@ object OwnSipEngine {
         if (!config.isComplete()) { _status.value = "Zugangsdaten fehlen"; onResult(false, "Benutzername, Passwort und Registrar eintragen."); return }
         runCatching {
             profile?.let { manager?.close(it.uriString) }
-            profile = SipProfile.Builder(config.username, config.registrar).setAuthUserName(config.username)
+            val newProfile = SipProfile.Builder(config.username, config.registrar).setAuthUserName(config.username)
                 .setPassword(config.password).setPort(config.port).setProtocol(config.transport)
                 .apply { if (config.proxy.isNotBlank()) setOutboundProxy(config.proxy) }.build()
-            manager?.open(profile, null, object : SipManager.Listener {
+            profile = newProfile
+            manager?.open(newProfile, null, object : SipManager.Listener {
                 override fun onRegistering(uri: String?) { _status.value = "Registriere..." }
                 override fun onRegistrationDone(uri: String?, expiry: Long) { _status.value = "Registriert"; onResult(true, "Easybell ist registriert.") }
                 override fun onRegistrationFailed(uri: String?, code: Int, message: String?) { _status.value = "Registrierung fehlgeschlagen"; onResult(false, message ?: "SIP-Fehler ($code).") }
