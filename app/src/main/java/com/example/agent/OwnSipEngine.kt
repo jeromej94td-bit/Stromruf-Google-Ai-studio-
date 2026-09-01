@@ -5,6 +5,7 @@ import android.media.MediaRecorder
 import android.net.sip.SipAudioCall
 import android.net.sip.SipManager
 import android.net.sip.SipProfile
+import android.net.sip.SipRegistrationListener
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,11 +34,19 @@ object OwnSipEngine {
             val newProfile = SipProfile.Builder(config.username, config.registrar).setAuthUserName(config.username)
                 .setPassword(config.password).setPort(config.port).setProtocol(config.transport)
                 .apply { if (config.proxy.isNotBlank()) setOutboundProxy(config.proxy) }.build()
+            val sipManager = requireNotNull(manager) { "SIP ist auf diesem Gerät nicht verfügbar." }
+            sipManager.open(newProfile)
             profile = newProfile
-            manager?.open(newProfile, null, object : SipManager.Listener {
-                override fun onRegistering(uri: String?) { _status.value = "Registriere..." }
-                override fun onRegistrationDone(uri: String?, expiry: Long) { _status.value = "Registriert"; onResult(true, "Easybell ist registriert.") }
-                override fun onRegistrationFailed(uri: String?, code: Int, message: String?) { _status.value = "Registrierung fehlgeschlagen"; onResult(false, message ?: "SIP-Fehler ($code).") }
+            sipManager.register(newProfile, 300, object : SipRegistrationListener {
+                override fun onRegistering(localProfileUri: String?) { _status.value = "Registriere..." }
+                override fun onRegistrationDone(localProfileUri: String?, expiryTime: Long) {
+                    _status.value = "Registriert"
+                    onResult(true, "Easybell ist registriert.")
+                }
+                override fun onRegistrationFailed(localProfileUri: String?, errorCode: Int, errorMessage: String?) {
+                    _status.value = "Registrierung fehlgeschlagen"
+                    onResult(false, errorMessage ?: "SIP-Fehler ($errorCode).")
+                }
             })
         }.onFailure { _status.value = "Registrierungsfehler"; onResult(false, it.message ?: "SIP-Registrierung fehlgeschlagen.") }
     }
