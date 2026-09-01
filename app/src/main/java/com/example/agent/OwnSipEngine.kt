@@ -65,7 +65,7 @@ object OwnSipEngine {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val file = File(dir, "call_${stamp}_${number.replace(Regex("[^0-9+]"), "_")}.m4a")
         runCatching {
-            recorder = MediaRecorder(context).apply { setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION); setOutputFormat(MediaRecorder.OutputFormat.MPEG_4); setAudioEncoder(MediaRecorder.AudioEncoder.AAC); setOutputFile(file.absolutePath); prepare(); start() }
+            recorder = MediaRecorder().apply { setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION); setOutputFormat(MediaRecorder.OutputFormat.MPEG_4); setAudioEncoder(MediaRecorder.AudioEncoder.AAC); setOutputFile(file.absolutePath); prepare(); start() }
         }.onFailure { Log.e("OwnSipEngine", "Aufnahme konnte nicht gestartet werden", it); recorder = null }
     }
 
