@@ -1,20 +1,15 @@
-import sys
+import sys, re
 
 file_path = "app/src/main/java/com/example/MainActivity.kt"
 with open(file_path, "r", encoding="utf-8") as f:
-    lines = f.readlines()
+    content = f.read()
 
-split_idx = -1
-for i, line in enumerate(lines):
-    if "RECONSTRUCTED MISSING COMPONENTS" in line:
-        split_idx = i - 1
-        break
-
-if split_idx == -1:
-    print("Not found")
+parts = re.split(r"// \-+\n// RECONSTRUCTED MISSING COMPONENTS", content)
+if len(parts) < 2:
+    print("Could not find split string")
     sys.exit(1)
 
-base_content = "".join(lines[:split_idx])
+base_content = parts[0]
 
 reconstructed = """// ------------------------------------------------------------------
 // RECONSTRUCTED MISSING COMPONENTS
@@ -184,4 +179,4 @@ with open(file_path, "w", encoding="utf-8") as f:
     f.write(base_content)
     f.write(reconstructed)
 
-print("Updated!")
+print("Updated reconstructed components.")

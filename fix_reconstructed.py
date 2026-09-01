@@ -2,19 +2,15 @@ import sys
 
 file_path = "app/src/main/java/com/example/MainActivity.kt"
 with open(file_path, "r", encoding="utf-8") as f:
-    lines = f.readlines()
+    content = f.read()
 
-split_idx = -1
-for i, line in enumerate(lines):
-    if "RECONSTRUCTED MISSING COMPONENTS" in line:
-        split_idx = i - 1
-        break
-
-if split_idx == -1:
-    print("Not found")
+split_str = "// ------------------------------------------------------------------\n// RECONSTRUCTED MISSING COMPONENTS"
+if split_str not in content:
+    print("Could not find split string")
     sys.exit(1)
 
-base_content = "".join(lines[:split_idx])
+parts = content.split(split_str)
+base_content = parts[0]
 
 reconstructed = """// ------------------------------------------------------------------
 // RECONSTRUCTED MISSING COMPONENTS
@@ -78,7 +74,7 @@ fun OngoingCallDialog(
     wrapUpData: Any? = null,
     onNoteChange: (String) -> Unit = {},
     onCallReasonChange: (String) -> Unit = {},
-    onToggleOffset: (Any?) -> Unit = {},
+    onToggleOffset: (Any) -> Unit = {},
     onOutcomeChange: (String) -> Unit = {},
     contact: Any? = null,
     recentCallLogs: Any? = null,
@@ -184,4 +180,4 @@ with open(file_path, "w", encoding="utf-8") as f:
     f.write(base_content)
     f.write(reconstructed)
 
-print("Updated!")
+print("Updated reconstructed components.")
