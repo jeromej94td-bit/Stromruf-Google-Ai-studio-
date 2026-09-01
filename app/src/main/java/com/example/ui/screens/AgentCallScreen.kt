@@ -56,7 +56,7 @@ fun AgentCallScreen(
     modifier: Modifier = Modifier,
     viewModel: com.example.viewmodel.StromrufViewModel? = null
 ) {
-    val tabs = listOf("Agenten", "Live", "KI-Assistent", "Anrufe", "Kampagnen", "Wissen", "Setup")
+    val tabs = listOf("Agenten", "Smart Calls", "Live", "KI-Assistent", "Anrufe", "Kampagnen", "Wissen", "Setup")
     var tab by remember { mutableStateOf(0) }
     val sessions by AgentRuntime.sessions.collectAsState()
     val aktive = sessions.count { it.status.collectAsState().value.aktiv }
@@ -70,7 +70,7 @@ fun AgentCallScreen(
                 Tab(selected = tab == i, onClick = { tab = i }, text = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(t, fontSize = 13.sp)
-                        if (i == 1 && aktive > 0) {
+                        if (i == 2 && aktive > 0) {
                             Spacer(Modifier.width(4.dp))
                             Box(Modifier.size(16.dp).background(Gruen, CircleShape),
                                 contentAlignment = Alignment.Center) {
@@ -83,8 +83,9 @@ fun AgentCallScreen(
         }
         when (tab) {
             0 -> AgentenTab()
-            1 -> LiveTab()
-            2 -> {
+            1 -> SmartCallsScreen()
+            2 -> LiveTab()
+            3 -> {
                 if (viewModel != null) {
                     com.example.ui.AiAgentScreen(viewModel = viewModel)
                 } else {
@@ -93,10 +94,10 @@ fun AgentCallScreen(
                     }
                 }
             }
-            3 -> AnrufeTab()
-            4 -> KampagnenTab()
-            5 -> WissenTab()
-            6 -> EinrichtungTab()
+            4 -> AnrufeTab()
+            5 -> KampagnenTab()
+            6 -> WissenTab()
+            7 -> EinrichtungTab()
         }
     }
 }
