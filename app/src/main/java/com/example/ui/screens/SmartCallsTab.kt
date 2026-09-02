@@ -104,6 +104,14 @@ fun SmartCallsTab() {
     val isRecording by sipClient.isRecording.collectAsState()
     val lastRecordingFile by sipClient.lastRecordingFile.collectAsState()
 
+    LaunchedEffect(isMuted) {
+        sipClient.setMuted(isMuted)
+    }
+
+    LaunchedEffect(isSpeakerOn) {
+        sipClient.setSpeakerphoneOn(isSpeakerOn)
+    }
+
     // Recordings list state
     var recordingsList by remember { mutableStateOf<List<File>>(emptyList()) }
     var currentlyPlayingPath by remember { mutableStateOf<String?>(null) }
