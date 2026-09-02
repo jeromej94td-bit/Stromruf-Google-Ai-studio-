@@ -488,13 +488,17 @@ class NativeSipClient(private val context: Context) {
 
                             // The 200 response completes the SIP dialog only after ACK.
                             val responseCseq = extractCSeqNumber(message) ?: cseq
-                            sendAck(config, responseCseq)
+                            lastInviteResponseUdpSender = lastUdpSender
+                            sendAck(config, responseCseq, lastInviteResponseUdpSender)
+                            startAckRetry(config, responseCseq, lastInviteResponseUdpSender)
                             if (remoteMedia != null) {
                                 startRtpAudio(remoteMedia)
                             } else {
                                 Log.e(tag, "200 OK contained no supported RTP audio SDP")
                             }
 
+                            updateSessionTimer(message)
+                            startSessionRefresh(config)
                             startInCallTimer()
                             startCallRecording()
                         }
@@ -503,8 +507,12 @@ class NativeSipClient(private val context: Context) {
                         // Answer it and ACK our own refresh responses so the call stays up.
                         method == "INVITE" && _state.value == SipState.IN_CALL -> {
                             extractDialogInfo(message)
+                            updateSessionTimer(message)
                             val responseCseq = extractCSeqNumber(message) ?: cseq
-                            sendAck(config, responseCseq)
+                            lastInviteResponseUdpSender = lastUdpSender
+                            sendAck(config, responseCseq, lastInviteResponseUdpSender)
+                            startAckRetry(config, responseCseq, lastInviteResponseUdpSender)
+                            startSessionRefresh(config)
                         }
                     }
                 }
