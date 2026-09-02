@@ -17,6 +17,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /** Gesamte Supabase-Anbindung des Agents-Reiters. */
@@ -102,6 +103,79 @@ object AgentBackend {
             h.forEach { (k, v) -> rb.addHeader(k, v) }
             client.newCall(rb.build()).execute().use { it.isSuccessful }
         } catch (e: Exception) { false }
+    }
+
+    // =================== Smart Calls / summary-only memory ===================
+    /**
+     * Stores only the Gemini summary. Audio and the full transcript deliberately
+     * never leave the device through this path.
+     */
+    suspend fun saveSmartCallNote(
+        context: Context,
+        phone: String,
+        contactId: String?,
+        contactName: String?,
+        callStartedAt: Long,
+        durationSeconds: Long,
+        summary: String,
+        sourceFileName: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        val cleanSummary = summary.trim()
+        val cleanSource = sourceFileName.trim()
+        if (durationSeconds <= 60L || cleanSummary.isBlank() || cleanSource.isBlank()) {
+            return@withContext false
+        }
+
+        val uid = userId(context) ?: return@withContext false
+        val noteId = UUID.nameUUIDFromBytes(
+            "$uid:$cleanSource".toByteArray(Charsets.UTF_8)
+        ).toString()
+
+        upsert(context, "smartcall_notes", JSONObject().apply {
+            put("id", noteId)
+            put("user_id", uid)
+            put("phone", phone.trim().ifBlank { "Unbekannt" })
+            put("contact_id", contactId?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            put("contact_name", contactName?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            put(
+                "call_started_at",
+                iso(callStartedAt.takeIf { it > 0 } ?: System.currentTimeMillis())
+            )
+            put(
+                "duration_seconds",
+                durationSeconds.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            )
+            put("summary", cleanSummary)
+            put("source_file_name", cleanSource)
+            put("updated_at", iso(System.currentTimeMillis()))
+        })
+    }
+
+    suspend fun fetchSmartCallNotes(
+        context: Context,
+        limit: Int = 50
+    ): List<SmartCallNote> = withContext(Dispatchers.IO) {
+        val safeLimit = limit.coerceIn(1, 100)
+        val arr = get(
+            context,
+            "smartcall_notes?select=id,phone,contact_id,contact_name,call_started_at," +
+                "duration_seconds,summary,source_file_name" +
+                "&order=call_started_at.desc&limit=$safeLimit"
+        ) ?: return@withContext emptyList()
+
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            SmartCallNote(
+                id = o.optString("id", ""),
+                phone = o.optString("phone", "Unbekannt"),
+                contactId = o.optString("contact_id", "").orNullIfEmpty(),
+                contactName = o.optString("contact_name", "").orNullIfEmpty(),
+                callStartedAt = parseIso(o.optString("call_started_at", "")),
+                durationSeconds = o.optInt("duration_seconds", 0),
+                summary = o.optString("summary", ""),
+                sourceFileName = o.optString("source_file_name", "")
+            ).takeIf { it.id.isNotBlank() && it.summary.isNotBlank() }
+        }
     }
 
     // =================== Agenten ===================
