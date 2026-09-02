@@ -56,7 +56,7 @@ fun AgentCallScreen(
     modifier: Modifier = Modifier,
     viewModel: com.example.viewmodel.StromrufViewModel? = null
 ) {
-    val tabs = listOf("Agenten", "Smart Calls", "Live", "KI-Assistent", "Anrufe", "Kampagnen", "Wissen", "Setup")
+    val tabs = listOf("Agenten", "Smart Calls 2", "Live", "KI-Assistent", "Anrufe", "Kampagnen", "Wissen", "Setup")
     var tab by remember { mutableStateOf(0) }
     val sessions by AgentRuntime.sessions.collectAsState()
     val aktive = sessions.count { it.status.collectAsState().value.aktiv }
