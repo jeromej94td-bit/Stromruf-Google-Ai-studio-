@@ -813,6 +813,14 @@ class DialerInCallService : InCallService() {
             } catch (e: java.lang.Exception) {
                 Log.e("DialerInCallService", "Failed to disconnect calls in list: ${e.localizedMessage}")
             }
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    val tm = instance?.getSystemService(android.telecom.TelecomManager::class.java)
+                    tm?.endCall()
+                }
+            } catch (e: Throwable) {
+                Log.e("DialerInCallService", "TelecomManager endCall fallback: ${e.localizedMessage}")
+            }
             activeCall.value = null
             instance?.updateBubble()
             activeCallNumber.value = ""
@@ -820,7 +828,7 @@ class DialerInCallService : InCallService() {
             activeCallCompany.value = ""
             activeCallReason.value = ""
             activeCallNotes.value = ""
-            activeCallState.value = Call.STATE_NEW
+            activeCallState.value = Call.STATE_DISCONNECTED
             wasRinging = false
             userDeclined = false
             stopTimer()

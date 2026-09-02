@@ -1696,13 +1696,21 @@ fun StromrufMainDashboard(
                 contactName = contactName,
                 contactPhone = contactPhone,
                 onHangUp = { finalDuration ->
+                    lastCallActive = false
+                    lastCallNumber = ""
+                    lastCallName = ""
                     com.example.service.DialerInCallService.hangUp()
+                    viewModel.clearActiveCall()
                     viewModel.startWrapUpForDirectCall(contactPhone, contactName, finalDuration)
                 },
                 isAutoCallActive = isAutoCallActive,
                 onHangUpAndPause = { finalDuration ->
+                    lastCallActive = false
+                    lastCallNumber = ""
+                    lastCallName = ""
                     viewModel.pauseAutoCall()
                     com.example.service.DialerInCallService.hangUp()
+                    viewModel.clearActiveCall()
                     viewModel.startWrapUpForDirectCall(contactPhone, contactName, finalDuration)
                 },
                 wrapUpData = wrapUpData,
@@ -1716,6 +1724,9 @@ fun StromrufMainDashboard(
                 contact = matchingContact,
                 recentCallLogs = callLogs,
                 onForceClose = {
+                    lastCallActive = false
+                    lastCallNumber = ""
+                    lastCallName = ""
                     com.example.service.DialerInCallService.hangUp()
                     viewModel.clearActiveCall()
                 },
@@ -1730,6 +1741,9 @@ fun StromrufMainDashboard(
                             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         }
                     }
+                },
+                onSaveInCallData = {
+                    viewModel.saveCurrentInCallData(contactPhone)
                 }
             )
         }
@@ -10435,7 +10449,8 @@ fun OngoingCallDialog(
     recentCallLogs: List<com.example.database.CallLogEntity>,
     onForceClose: () -> Unit,
     onMinimize: () -> Unit,
-    onAddToHotbox: (String, String) -> Unit
+    onAddToHotbox: (String, String) -> Unit,
+    onSaveInCallData: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var localElapsedSeconds by remember { mutableStateOf(0L) }
@@ -10849,6 +10864,31 @@ fun OngoingCallDialog(
                                 unfocusedLabelColor = Color(0xFF64748B)
                             )
                         )
+
+                        // Quick Save Button
+                        Button(
+                            onClick = onSaveInCallData,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(44.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00F0FF).copy(alpha = 0.15f)),
+                            border = BorderStroke(1.dp, Color(0xFF00F0FF).copy(alpha = 0.6f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Save,
+                                contentDescription = "Zwischenspeichern",
+                                tint = Color(0xFF00F0FF),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "💾 Kundendaten jetzt zwischenspeichern",
+                                color = Color(0xFF00F0FF),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
 

@@ -916,6 +916,10 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
 
     fun autoSaveHotBoxCall(phone: String, name: String?, durationSeconds: Long) {
         simulationJob?.cancel()
+        _activeCall.value = null
+        _showWrapUpDialog.value = false
+        val wrapData = _wrapUpData.value
+
         viewModelScope.launch {
             val normalized = normalizePhone(phone)
             val recentLogs = callLogs.value.filter { phoneNumbersMatch(it.phone, normalized) }
@@ -931,27 +935,31 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             val existing = repository.getContactByPhone(normalized)
             val now = System.currentTimeMillis()
             
-            val wrapData = _wrapUpData.value
-            val isMatching = (wrapData.phone == normalized)
-            val enteredName = if (isMatching && wrapData.name.isNotBlank()) wrapData.name else null
-            val enteredCustNo = if (isMatching && wrapData.customerNumber.isNotBlank()) wrapData.customerNumber else null
-            val enteredCompany = if (isMatching && wrapData.company.isNotBlank()) wrapData.company else (if (!enteredCustNo.isNullOrBlank()) "Kd.-Nr: $enteredCustNo" else null)
+            val enteredCustNo = wrapData.customerNumber.trim().takeIf { it.isNotBlank() }
+            val enteredName = wrapData.name.trim().takeIf { it.isNotBlank() }
+            val enteredCompany = wrapData.company.trim().takeIf { it.isNotBlank() } ?: (if (!enteredCustNo.isNullOrBlank()) "Kd.-Nr: $enteredCustNo" else null)
 
-            val finalContactName = enteredName ?: name ?: existing?.name ?: "Anonym ($normalized)"
+            val finalContactName = enteredName ?: name?.takeIf { it.isNotBlank() && !it.all { c -> c.isDigit() || c == '+' || c == ' ' } } ?: existing?.name ?: (if (enteredCustNo != null) "Kunde $enteredCustNo" else "Anonym ($normalized)")
             val finalCompany = enteredCompany ?: existing?.company
-            val finalOutcome = if (effectiveDuration > 10) "erreicht_interesse" else "nicht_erreicht"
+            val userOutcome = wrapData.outcome.trim().takeIf { it.isNotBlank() } ?: (if (effectiveDuration > 10) "erreicht_interesse" else "nicht_erreicht")
             
-            val userReason = if (isMatching) wrapData.callReason else null
-            val userNote = if (isMatching && wrapData.note.isNotBlank()) wrapData.note else null
-            val finalNote = userNote ?: "Automatischer Hotbox-Anruf (${formatDuration(effectiveDuration)})"
+            val userReason = wrapData.callReason?.trim()?.takeIf { it.isNotBlank() }
+            val userNote = wrapData.note.trim().takeIf { it.isNotBlank() }
+            val finalNote = if (!userNote.isNullOrBlank()) {
+                if (enteredCustNo != null && !userNote.contains(enteredCustNo)) "$userNote | Kd.-Nr: $enteredCustNo" else userNote
+            } else {
+                val durStr = formatDuration(effectiveDuration)
+                if (enteredCustNo != null) "Automatischer Hotbox-Anruf ($durStr) | Kd.-Nr: $enteredCustNo" else "Automatischer Hotbox-Anruf ($durStr)"
+            }
             
             // 1. Update existing contact or create if new
             val contactId = if (existing != null) {
                 val updatedContact = existing.copy(
                     name = enteredName ?: existing.name,
                     company = finalCompany ?: existing.company,
+                    email = if (wrapData.email.isNotBlank()) wrapData.email else existing.email,
                     lastCallAt = now,
-                    lastOutcome = finalOutcome,
+                    lastOutcome = userOutcome,
                     isHotBox = true,
                     hotBoxListName = existing.hotBoxListName ?: _selectedHotBoxListName.value,
                     callReason = userReason ?: existing.callReason,
@@ -967,11 +975,11 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                     name = finalContactName,
                     phone = normalized,
                     company = finalCompany,
-                    email = if (isMatching) wrapData.email.takeIf { it.isNotBlank() } else null,
+                    email = wrapData.email.takeIf { it.isNotBlank() },
                     lastCallAt = now,
-                    lastOutcome = finalOutcome,
+                    lastOutcome = userOutcome,
                     isHotBox = true,
-                    hotBoxListName = _selectedHotBoxListName.value,
+                    hotBoxListName = _selectedHotBoxListName.value.ifBlank { "Hotbox" },
                     hasBeenCalledInHotCycle = true,
                     callReason = userReason
                 )
@@ -984,7 +992,7 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                 id = UUID.randomUUID().toString(),
                 phone = normalized,
                 contactName = finalContactName,
-                outcome = finalOutcome,
+                outcome = userOutcome,
                 note = finalNote,
                 timestamp = now,
                 durationSeconds = effectiveDuration,
@@ -994,45 +1002,46 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             safeInsertCallLog(callLog)
 
             // 3. Save any follow ups scheduled during the call
-            if (isMatching) {
-                wrapData.selectedOffsets.forEach { offset ->
-                    val dueTime = calculateOffsetTime(offset)
-                    val fId = UUID.randomUUID().toString()
-                    val followup = FollowUpEntity(
-                        id = fId,
-                        contactId = contactId,
-                        contactName = finalContactName,
-                        contactPhone = normalized,
-                        note = userNote,
-                        dueAt = dueTime,
-                        isCompleted = false,
-                        callReason = userReason
-                    )
-                    val saved = repository.insertFollowUp(followup)
-                    onScheduleAlarm?.invoke(fId, finalContactName, normalized, saved.dueAt)
-                }
-                wrapData.customDates.forEach { timestamp ->
-                    val fId = UUID.randomUUID().toString()
-                    val followup = FollowUpEntity(
-                        id = fId,
-                        contactId = contactId,
-                        contactName = finalContactName,
-                        contactPhone = normalized,
-                        note = userNote,
-                        dueAt = timestamp,
-                        isCompleted = false,
-                        callReason = userReason
-                    )
-                    val saved = repository.insertFollowUp(followup)
-                    onScheduleAlarm?.invoke(fId, finalContactName, normalized, saved.dueAt)
-                }
+            wrapData.selectedOffsets.forEach { offset ->
+                val dueTime = calculateOffsetTime(offset)
+                val fId = UUID.randomUUID().toString()
+                val followup = FollowUpEntity(
+                    id = fId,
+                    contactId = contactId,
+                    contactName = finalContactName,
+                    contactPhone = normalized,
+                    note = userNote ?: "Wiedervorlage Hotbox",
+                    dueAt = dueTime,
+                    isCompleted = false,
+                    callReason = userReason
+                )
+                val saved = repository.insertFollowUp(followup)
+                onScheduleAlarm?.invoke(fId, finalContactName, normalized, saved.dueAt)
+            }
+            wrapData.customDates.forEach { timestamp ->
+                val fId = UUID.randomUUID().toString()
+                val followup = FollowUpEntity(
+                    id = fId,
+                    contactId = contactId,
+                    contactName = finalContactName,
+                    contactPhone = normalized,
+                    note = userNote ?: "Wiedervorlage Hotbox",
+                    dueAt = timestamp,
+                    isCompleted = false,
+                    callReason = userReason
+                )
+                val saved = repository.insertFollowUp(followup)
+                onScheduleAlarm?.invoke(fId, finalContactName, normalized, saved.dueAt)
             }
             
             // 4. Clear states
             _showWrapUpDialog.value = false
             _activeCall.value = null
             _wrapUpData.value = WrapUpData()
+            _showToastTrigger.emit("Hotbox-Anruf beendet • Kundendaten & Kd.-Nr gespeichert ✅")
             
+            checkAndMovePassiveFollowUpsToHotBox()
+
             // 5. Trigger next call countdown if autopilot is still active and not paused
             if (isAutoCallActiveGlobal.value && !isAutoCallPausedGlobal.value) {
                 startAutoCallCountdown()
@@ -1071,6 +1080,21 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
 
             val initialCompany = existing?.company ?: (if (initialCustNo.isNotBlank()) "Kd.-Nr: $initialCustNo" else "")
 
+            val current = _wrapUpData.value
+            val alreadyHasUserData = (current.phone.isBlank() || phoneNumbersMatch(current.phone, normalized)) && 
+                (current.customerNumber.isNotBlank() || current.note.isNotBlank() || current.name.isNotBlank() || current.company.isNotBlank())
+
+            if (alreadyHasUserData) {
+                _wrapUpData.value = current.copy(
+                    phone = normalized,
+                    name = current.name.ifBlank { initialName },
+                    company = current.company.ifBlank { initialCompany },
+                    customerNumber = current.customerNumber.ifBlank { initialCustNo },
+                    existingContact = existing ?: current.existingContact
+                )
+                return@launch
+            }
+
             _wrapUpData.value = WrapUpData(
                 phone = normalized,
                 name = initialName,
@@ -1087,8 +1111,50 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         }
     }
 
+    fun saveCurrentInCallData(phone: String) {
+        val current = _wrapUpData.value
+        viewModelScope.launch {
+            val normalized = normalizePhone(phone.ifBlank { current.phone })
+            if (normalized.isBlank()) return@launch
+            val existing = repository.getContactByPhone(normalized)
+            val enteredCustNo = current.customerNumber.trim().takeIf { it.isNotBlank() }
+            val enteredName = current.name.trim().takeIf { it.isNotBlank() }
+            val enteredCompany = current.company.trim().takeIf { it.isNotBlank() } ?: (if (!enteredCustNo.isNullOrBlank()) "Kd.-Nr: $enteredCustNo" else null)
+            val userReason = current.callReason?.trim()?.takeIf { it.isNotBlank() }
+            val userOutcome = current.outcome.trim().takeIf { it.isNotBlank() }
+            
+            if (existing != null) {
+                val updated = existing.copy(
+                    name = enteredName ?: existing.name,
+                    company = enteredCompany ?: existing.company,
+                    email = if (current.email.isNotBlank()) current.email else existing.email,
+                    lastOutcome = userOutcome ?: existing.lastOutcome,
+                    callReason = userReason ?: existing.callReason
+                )
+                repository.insertContact(updated)
+            } else {
+                val newContact = ContactEntity(
+                    id = UUID.randomUUID().toString(),
+                    name = enteredName ?: (if (enteredCustNo != null) "Kunde $enteredCustNo" else "Kunde ($normalized)"),
+                    phone = normalized,
+                    company = enteredCompany,
+                    email = current.email.takeIf { it.isNotBlank() },
+                    lastCallAt = System.currentTimeMillis(),
+                    lastOutcome = userOutcome,
+                    callReason = userReason
+                )
+                repository.insertContact(newContact)
+            }
+            _showToastTrigger.emit("Kundendaten & Kd.-Nr zwischengespeichert 💾")
+        }
+    }
+
     fun startWrapUpForDirectCall(phone: String, name: String?, durationSeconds: Long) {
         simulationJob?.cancel()
+        _activeCall.value = null
+        _showWrapUpDialog.value = false
+        val currentWrapData = _wrapUpData.value
+
         viewModelScope.launch {
             val normalized = normalizePhone(phone)
             val recentLogs = callLogs.value.filter { phoneNumbersMatch(it.phone, normalized) }
@@ -1106,129 +1172,132 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             
             if (isHot) {
                 autoSaveHotBoxCall(normalized, name ?: existing?.name, effectiveDuration)
+                return@launch
+            }
+
+            val enteredCustNo = currentWrapData.customerNumber.trim().takeIf { it.isNotBlank() }
+            val enteredName = currentWrapData.name.trim().takeIf { it.isNotBlank() }
+            val enteredCompany = currentWrapData.company.trim().takeIf { it.isNotBlank() } ?: (if (!enteredCustNo.isNullOrBlank()) "Kd.-Nr: $enteredCustNo" else null)
+            
+            val userOutcome = currentWrapData.outcome.trim().takeIf { it.isNotBlank() } ?: (if (effectiveDuration >= 20) "erreicht_interesse" else "nicht_erreicht")
+            val currentCallType = _activeCall.value?.callType ?: "einwaehlen"
+            
+            val finalContactName = enteredName ?: name?.takeIf { it.isNotBlank() && !it.all { c -> c.isDigit() || c == '+' || c == ' ' } } ?: existing?.name ?: currentWrapData.name.takeIf { it.isNotBlank() } ?: (if (enteredCustNo != null) "Kunde $enteredCustNo" else "Kunde ($normalized)")
+            val finalCompany = enteredCompany ?: existing?.company
+            val userReason = currentWrapData.callReason?.trim()?.takeIf { it.isNotBlank() } ?: existing?.callReason
+            val userNote = currentWrapData.note.trim().takeIf { it.isNotBlank() }
+            val finalNote = if (!userNote.isNullOrBlank()) {
+                if (enteredCustNo != null && !userNote.contains(enteredCustNo)) "$userNote | Kd.-Nr: $enteredCustNo" else userNote
             } else {
-                val current = _wrapUpData.value
-                val isMatching = (current.phone == normalized)
-                val enteredName = if (isMatching && current.name.isNotBlank()) current.name else null
-                val enteredCustNo = if (isMatching && current.customerNumber.isNotBlank()) current.customerNumber else null
-                val enteredCompany = if (isMatching && current.company.isNotBlank()) current.company else (if (!enteredCustNo.isNullOrBlank()) "Kd.-Nr: $enteredCustNo" else null)
-                
-                val finalOutcome = if (effectiveDuration >= 60) "erreicht_interesse" else "nicht_erreicht"
-                val currentCallType = _activeCall.value?.callType ?: "einwaehlen"
-                
-                val finalContactName = enteredName ?: name ?: existing?.name ?: current.name.takeIf { it.isNotBlank() } ?: "Kunde ($normalized)"
-                val finalCompany = enteredCompany ?: existing?.company
-                val userReason = if (isMatching) current.callReason else null
-                val userNote = if (isMatching && current.note.isNotBlank()) current.note else null
-                val finalNote = userNote ?: "Automatischer Anruf (${formatDuration(effectiveDuration)})"
+                val durStr = formatDuration(effectiveDuration)
+                if (enteredCustNo != null) "Anruf ($durStr) | Kd.-Nr: $enteredCustNo" else "Anruf ($durStr)"
+            }
 
-                val now = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
 
-                // 1. Update existing contact or create if new
-                val contactId = if (existing != null) {
-                    val updatedContact = existing.copy(
-                        name = enteredName ?: existing.name,
-                        company = finalCompany ?: existing.company,
-                        email = if (isMatching && current.email.isNotBlank()) current.email else existing.email,
-                        lastCallAt = now,
-                        lastOutcome = finalOutcome,
-                        callReason = userReason ?: existing.callReason
-                    )
-                    repository.insertContact(updatedContact)
-                    existing.id
-                } else {
-                    val newId = UUID.randomUUID().toString()
-                    val newContact = ContactEntity(
-                        id = newId,
-                        name = finalContactName,
-                        phone = normalized,
-                        company = finalCompany,
-                        email = if (isMatching) current.email.takeIf { it.isNotBlank() } else null,
-                        lastCallAt = now,
-                        lastOutcome = finalOutcome,
-                        isHotBox = false,
-                        callReason = userReason
-                    )
-                    repository.insertContact(newContact)
-                    newId
-                }
-                
-                // 2. Record Call Log
-                val callLog = CallLogEntity(
-                    id = UUID.randomUUID().toString(),
-                    phone = normalized,
-                    contactName = finalContactName,
-                    outcome = finalOutcome,
-                    note = finalNote,
-                    timestamp = now,
-                    durationSeconds = effectiveDuration,
-                    callReason = userReason,
-                    callType = currentCallType
+            // 1. Update existing contact or create if new
+            val contactId = if (existing != null) {
+                val updatedContact = existing.copy(
+                    name = enteredName ?: existing.name,
+                    company = finalCompany ?: existing.company,
+                    email = if (currentWrapData.email.isNotBlank()) currentWrapData.email else existing.email,
+                    lastCallAt = now,
+                    lastOutcome = userOutcome,
+                    callReason = userReason ?: existing.callReason
                 )
-                safeInsertCallLog(callLog)
+                repository.insertContact(updatedContact)
+                existing.id
+            } else {
+                val newId = UUID.randomUUID().toString()
+                val newContact = ContactEntity(
+                    id = newId,
+                    name = finalContactName,
+                    phone = normalized,
+                    company = finalCompany,
+                    email = currentWrapData.email.takeIf { it.isNotBlank() },
+                    lastCallAt = now,
+                    lastOutcome = userOutcome,
+                    isHotBox = false,
+                    callReason = userReason
+                )
+                repository.insertContact(newContact)
+                newId
+            }
+            
+            // 2. Record Call Log
+            val callLog = CallLogEntity(
+                id = UUID.randomUUID().toString(),
+                phone = normalized,
+                contactName = finalContactName,
+                outcome = userOutcome,
+                note = finalNote,
+                timestamp = now,
+                durationSeconds = effectiveDuration,
+                callReason = userReason,
+                callType = currentCallType
+            )
+            safeInsertCallLog(callLog)
 
-                // If this was an AI-assisted call, also save as an AiCallEntity
-                if ((currentCallType == "ai_anruf" || currentCallType == "ai") && finalNote.isNotBlank()) {
-                    val aiCallEntity = com.example.database.AiCallEntity(
-                        id = UUID.randomUUID().toString(),
-                        phone = normalized.ifBlank { "Unbekannt" },
-                        contactName = finalContactName,
-                        timestamp = now,
-                        audioFilePath = null,
-                        transcript = finalNote,
-                        durationSeconds = effectiveDuration,
-                        notes = "AI Anrufs-Notiz"
-                    )
-                    repository.insertAiCall(aiCallEntity)
-                }
+            // If this was an AI-assisted call, also save as an AiCallEntity
+            if ((currentCallType == "ai_anruf" || currentCallType == "ai") && finalNote.isNotBlank()) {
+                val aiCallEntity = com.example.database.AiCallEntity(
+                    id = UUID.randomUUID().toString(),
+                    phone = normalized.ifBlank { "Unbekannt" },
+                    contactName = finalContactName,
+                    timestamp = now,
+                    audioFilePath = null,
+                    transcript = finalNote,
+                    durationSeconds = effectiveDuration,
+                    notes = "AI Anrufs-Notiz"
+                )
+                repository.insertAiCall(aiCallEntity)
+            }
 
-                // 3. Save any follow ups scheduled during the call
-                if (isMatching) {
-                    current.selectedOffsets.forEach { offset ->
-                        val dueTime = calculateOffsetTime(offset)
-                        val fId = UUID.randomUUID().toString()
-                        val followup = FollowUpEntity(
-                            id = fId,
-                            contactId = contactId,
-                            contactName = finalContactName,
-                            contactPhone = normalized,
-                            note = userNote,
-                            dueAt = dueTime,
-                            isCompleted = false,
-                            callReason = userReason
-                        )
-                        val saved = repository.insertFollowUp(followup)
-                        onScheduleAlarm?.invoke(fId, finalContactName, normalized, saved.dueAt)
-                    }
-                    current.customDates.forEach { timestamp ->
-                        val fId = UUID.randomUUID().toString()
-                        val followup = FollowUpEntity(
-                            id = fId,
-                            contactId = contactId,
-                            contactName = finalContactName,
-                            contactPhone = normalized,
-                            note = userNote,
-                            dueAt = timestamp,
-                            isCompleted = false,
-                            callReason = userReason
-                        )
-                        val saved = repository.insertFollowUp(followup)
-                        onScheduleAlarm?.invoke(fId, finalContactName, normalized, saved.dueAt)
-                    }
-                }
-                
-                // 4. Clear states
-                _showWrapUpDialog.value = false
-                _activeCall.value = null
-                _wrapUpData.value = WrapUpData()
+            // 3. Save any follow ups scheduled during the call
+            currentWrapData.selectedOffsets.forEach { offset ->
+                val dueTime = calculateOffsetTime(offset)
+                val fId = UUID.randomUUID().toString()
+                val followup = FollowUpEntity(
+                    id = fId,
+                    contactId = contactId,
+                    contactName = finalContactName,
+                    contactPhone = normalized,
+                    note = userNote ?: "Wiedervorlage",
+                    dueAt = dueTime,
+                    isCompleted = false,
+                    callReason = userReason
+                )
+                val saved = repository.insertFollowUp(followup)
+                onScheduleAlarm?.invoke(fId, finalContactName, normalized, saved.dueAt)
+            }
+            currentWrapData.customDates.forEach { timestamp ->
+                val fId = UUID.randomUUID().toString()
+                val followup = FollowUpEntity(
+                    id = fId,
+                    contactId = contactId,
+                    contactName = finalContactName,
+                    contactPhone = normalized,
+                    note = userNote ?: "Wiedervorlage",
+                    dueAt = timestamp,
+                    isCompleted = false,
+                    callReason = userReason
+                )
+                val saved = repository.insertFollowUp(followup)
+                onScheduleAlarm?.invoke(fId, finalContactName, normalized, saved.dueAt)
+            }
+            
+            // 4. Clear states
+            _showWrapUpDialog.value = false
+            _activeCall.value = null
+            _wrapUpData.value = WrapUpData()
+            _showToastTrigger.emit("Anruf beendet • Kundendaten & Kd.-Nr gespeichert ✅")
 
-                checkAndMovePassiveFollowUpsToHotBox()
+            checkAndMovePassiveFollowUpsToHotBox()
 
-                if (isAutoCallActiveGlobal.value && !isAutoCallPausedGlobal.value) {
-                    startAutoCallCountdown()
-                } else if (isPromisedThroughCallActive.value) {
-                    startPromisedThroughCallCountdown()
-                }
+            if (isAutoCallActiveGlobal.value && !isAutoCallPausedGlobal.value) {
+                startAutoCallCountdown()
+            } else if (isPromisedThroughCallActive.value) {
+                startPromisedThroughCallCountdown()
             }
         }
     }
@@ -1670,10 +1739,15 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         viewModelScope.launch {
             val allCurrentContacts = contacts.value
             val activeLists = _selectedHotBoxListNames.value
-            val hotContacts = allCurrentContacts.filter { contact ->
-                contact.isHotBox && getEffectiveHotBoxListName(contact.hotBoxListName) in activeLists
+            var hotContacts = allCurrentContacts.filter { contact ->
+                contact.isHotBox && (activeLists.isEmpty() || getEffectiveHotBoxListName(contact.hotBoxListName) in activeLists)
             }
             if (hotContacts.isEmpty()) {
+                // Fallback: check any hotbox contact regardless of list filter
+                hotContacts = allCurrentContacts.filter { it.isHotBox }
+            }
+            if (hotContacts.isEmpty()) {
+                _showToastTrigger.emit("Keine Kontakte in der Hotbox! 🔥 Bitte erst Kontakte zur Hotbox hinzufügen.")
                 onNoHotContacts()
                 return@launch
             }
@@ -1729,15 +1803,28 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
     }
 
     fun setAutoCallActive(active: Boolean) {
-        isAutoCallActiveGlobal.value = active
         if (active) {
-            isAutoCallPausedGlobal.value = false
-            if (_activeCall.value == null && !_showWrapUpDialog.value) {
-                startAutoCallCountdown()
+            val allCurrentContacts = contacts.value
+            val hasAnyHot = allCurrentContacts.any { it.isHotBox }
+            if (!hasAnyHot) {
+                viewModelScope.launch {
+                    _showToastTrigger.emit("Keine Hotbox-Kontakte vorhanden! Bitte Kontakte zur Hotbox hinzufügen 🔥")
+                }
+                isAutoCallActiveGlobal.value = false
+                return
             }
+            isAutoCallActiveGlobal.value = true
+            isAutoCallPausedGlobal.value = false
+            // Clear any lingering active call state if telecom has no active call
+            if (com.example.service.DialerInCallService.activeCall.value == null) {
+                _activeCall.value = null
+                _showWrapUpDialog.value = false
+            }
+            startAutoCallCountdown()
         } else {
             countdownJob?.cancel()
             _autoCallCountdown.value = null
+            isAutoCallActiveGlobal.value = false
             isAutoCallPausedGlobal.value = false
         }
     }
@@ -1762,13 +1849,16 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
 
     fun resumeAutoCall() {
         isAutoCallPausedGlobal.value = false
-        if (_activeCall.value == null && !_showWrapUpDialog.value) {
-            startAutoCallCountdown()
+        if (com.example.service.DialerInCallService.activeCall.value == null) {
+            _activeCall.value = null
+            _showWrapUpDialog.value = false
         }
+        startAutoCallCountdown()
     }
 
     fun startAutoCallCountdown() {
         if (!isAutoCallActiveGlobal.value || isAutoCallPausedGlobal.value) return
+        if (com.example.service.DialerInCallService.activeCall.value != null) return
         countdownJob?.cancel()
         countdownJob = viewModelScope.launch {
             val delaySecs = _autoCallDelaySeconds.value

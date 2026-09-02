@@ -773,13 +773,14 @@ fun SmartCallsTab() {
                 // Call Action Button
                 Button(
                     onClick = {
-                        if (sipState == SipState.REGISTERED) {
-                            sipClient.makeCall(targetNumber)
-                        } else {
-                            Toast.makeText(ctx, "Bitte zuerst SIP-Konto verbinden", Toast.LENGTH_SHORT).show()
+                        when (sipState) {
+                            SipState.REGISTERED -> sipClient.makeCall(targetNumber)
+                            SipState.CONNECTING -> Toast.makeText(ctx, "Verbindung wird noch aufgebaut...", Toast.LENGTH_SHORT).show()
+                            SipState.ERROR -> Toast.makeText(ctx, "SIP Fehler. Bitte neu verbinden.", Toast.LENGTH_SHORT).show()
+                            else -> Toast.makeText(ctx, "Bitte zuerst SIP-Konto verbinden", Toast.LENGTH_SHORT).show()
                         }
                     },
-                    enabled = targetNumber.isNotBlank() && (sipState == SipState.REGISTERED || sipState == SipState.DISCONNECTED),
+                    enabled = targetNumber.isNotBlank(),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(50.dp),

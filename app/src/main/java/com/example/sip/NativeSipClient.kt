@@ -367,16 +367,24 @@ class NativeSipClient(private val context: Context) {
     fun makeCall(targetNumber: String) {
         val config = currentConfig
         if (config == null || _state.value != SipState.REGISTERED) return
-        activeCallTarget = targetNumber
+        
+        val cleanNumber = targetNumber.replace(Regex("[^0-9+]"), "")
+        activeCallTarget = cleanNumber
         _state.value = SipState.DIALING
-        _statusText.value = "Wählt $targetNumber..."
+        _statusText.value = "Wählt $cleanNumber..."
         cseq++
         callId = UUID.randomUUID().toString()
         fromTag = generateRandomHex(8)
         toTag = null
 
         scope.launch {
-            sendInvite(targetNumber, config, null)
+            try {
+                sendInvite(cleanNumber, config, null)
+            } catch (e: Exception) {
+                android.util.Log.e(tag, "Error sending invite", e)
+                _state.value = SipState.ERROR
+                _statusText.value = "Netzwerkfehler beim Anruf: ${e.message}"
+            }
         }
     }
 

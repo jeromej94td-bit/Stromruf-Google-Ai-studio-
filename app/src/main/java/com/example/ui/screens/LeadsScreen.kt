@@ -511,8 +511,8 @@ fun LeadsScreen(
                             text = btnText,
                             icon = if (autoActive) Icons.Default.Pause else Icons.Default.PlayArrow,
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = listContacts.isNotEmpty(),
-                            pulsing = true,
+                            enabled = true,
+                            pulsing = autoActive,
                             onLongClick = {
                                 val targetContact = contacts.find { it.id == nextHotBoxId } ?: contacts.firstOrNull { it.isHotBox }
                                 if (targetContact != null) {
@@ -542,8 +542,13 @@ fun LeadsScreen(
                                     viewModel.setAutoCallActive(false)
                                     Toast.makeText(context, "Hotbox gestoppt", Toast.LENGTH_SHORT).show()
                                 } else {
-                                    viewModel.setAutoCallActive(true)
-                                    Toast.makeText(context, "Hotbox gestartet", Toast.LENGTH_SHORT).show()
+                                    val hasHot = contacts.any { it.isHotBox }
+                                    if (!hasHot) {
+                                        Toast.makeText(context, "Bitte erst Kontakte zur Hotbox hinzufügen! 🔥", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        viewModel.setAutoCallActive(true)
+                                        Toast.makeText(context, "Hotbox gestartet 🚀", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
                         )
