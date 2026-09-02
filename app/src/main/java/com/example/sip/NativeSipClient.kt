@@ -101,6 +101,8 @@ class NativeSipClient(private val context: Context) {
     @Volatile private var lastUdpSender: InetSocketAddress? = null
     private var sipKeepAliveCallId = UUID.randomUUID().toString()
     private var sipKeepAliveCseq = 1
+    private var ackRetryJob: Job? = null
+    @Volatile private var lastInviteResponseUdpSender: InetSocketAddress? = null
 
     // RTP media state. SIP only establishes the call; these sockets carry the audio.
     private enum class G711Codec { PCMA, PCMU }
@@ -246,12 +248,17 @@ class NativeSipClient(private val context: Context) {
         }
     }
 
-    private fun sendSipMessage(message: String, config: SipAccountConfig) {
+    private fun sendSipMessage(
+        message: String,
+        config: SipAccountConfig,
+        udpDestination: InetSocketAddress? = null
+    ) {
         val bytes = message.toByteArray(Charsets.UTF_8)
         synchronized(sipSendLock) {
             when (config.protocol) {
                 SipTransportProtocol.UDP -> {
-                val destination = lastUdpSender
+                val destination = udpDestination
+                    ?: lastUdpSender
                     ?: InetSocketAddress(config.sipRegistrar, config.port)
                 val packet = DatagramPacket(
                     bytes,
