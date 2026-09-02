@@ -9,6 +9,7 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.PowerManager
 import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -130,6 +131,7 @@ class NativeSipClient(private val context: Context) {
     @Volatile private var muted = false
     @Volatile private var speakerphoneOn = true
     @Volatile private var lastRtpSentAt = 0L
+    private var callWakeLock: PowerManager.WakeLock? = null
     private val sipSendLock = Any()
     private val rtpSendLock = Any()
 
@@ -138,8 +140,10 @@ class NativeSipClient(private val context: Context) {
         const val RTP_FRAME_SAMPLES = 160 // 20 ms at 8 kHz
         const val RTP_PORT_MIN = 20000
         const val RTP_PORT_MAX = 50000
-        const val SIP_KEEPALIVE_INTERVAL_MS = 15_000L
-        const val RTP_KEEPALIVE_INTERVAL_MS = 5_000L
+        // Keep the SIP signaling flow active below Easybell/mobile NAT idle limits.
+        const val SIP_KEEPALIVE_INTERVAL_MS = 10_000L
+        // If AudioRecord stalls, keep sending real RTP silence instead of going silent.
+        const val RTP_KEEPALIVE_INTERVAL_MS = 1_000L
         const val DEFAULT_SESSION_EXPIRES_SECONDS = 1800
         const val MIN_SESSION_EXPIRES_SECONDS = 20
     }
@@ -211,8 +215,9 @@ class NativeSipClient(private val context: Context) {
             SipTransportProtocol.TCP -> {
                 val socket = Socket()
                 socket.connect(InetSocketAddress(config.sipRegistrar, config.port), 10000)
-                // SIP is a long-lived signaling connection. The keepalive job below
-                // prevents idle disconnects; reads must not end a call on a short timeout.
+                // Keep the TCP/TLS signaling transport alive for the entire call.
+                socket.tcpNoDelay = true
+                socket.keepAlive = true
                 socket.soTimeout = 0
                 tcpSocket = socket
                 socketWriter = socket.getOutputStream()
@@ -224,8 +229,9 @@ class NativeSipClient(private val context: Context) {
                 sslContext.init(null, null, SecureRandom())
                 val factory = sslContext.socketFactory
                 val socket = factory.createSocket(config.sipRegistrar, config.port) as SSLSocket
-                // SIP is a long-lived signaling connection. The keepalive job below
-                // prevents idle disconnects; reads must not end a call on a short timeout.
+                // Keep the TCP/TLS signaling transport alive for the entire call.
+                socket.tcpNoDelay = true
+                socket.keepAlive = true
                 socket.soTimeout = 0
                 socket.startHandshake()
                 sslSocket = socket
@@ -263,10 +269,53 @@ class NativeSipClient(private val context: Context) {
     }
 
     private fun startSipKeepAlive(config: SipAccountConfig) {
-        // Do not inject bare CRLF or out-of-dialog OPTIONS into Easybell's
-        // active TLS dialog. The media path is kept alive by RTP packets.
-        sipKeepAliveJob?.cancel()
-        sipKeepAliveJob = null
+        stopSipKeepAlive()
+        sipKeepAliveJob = scope.launch(Dispatchers.IO) {
+            while (
+                isActive &&
+                _state.value != SipState.DISCONNECTED &&
+                _state.value != SipState.ERROR
+            ) {
+                delay(SIP_KEEPALIVE_INTERVAL_MS)
+                if (!isActive ||
+                    _state.value == SipState.DISCONNECTED ||
+                    _state.value == SipState.ERROR
+                ) {
+                    break
+                }
+                // Do not compete with the initial REGISTER challenge/response.
+                if (_state.value == SipState.CONNECTING) continue
+
+                runCatching {
+                    // OPTIONS is a valid SIP transaction and keeps the long-lived
+                    // UDP/TCP/TLS signaling path open without changing the call dialog.
+                    sendSipOptionsKeepAlive(config)
+                }.onFailure { error ->
+                    Log.w(tag, "SIP OPTIONS keepalive failed", error)
+                }
+            }
+        }
+    }
+
+    private fun sendSipOptionsKeepAlive(config: SipAccountConfig) {
+        val transport = config.protocol.name
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+        val optionsCseq = sipKeepAliveCseq++
+        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
+
+        val sb = StringBuilder()
+        sb.append("OPTIONS sip:$domain SIP/2.0\r\n")
+        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append("To: <sip:$domain>\r\n")
+        sb.append("Call-ID: $sipKeepAliveCallId@$localIp\r\n")
+        sb.append("CSeq: $optionsCseq OPTIONS\r\n")
+        sb.append("User-Agent: SmartCalls/1.2.0 Android\r\n")
+        sb.append("Accept: application/sdp\r\n")
+        sb.append("Content-Length: 0\r\n\r\n")
+        sendSipMessage(sb.toString(), config)
     }
 
     private fun stopSipKeepAlive() {
@@ -296,12 +345,22 @@ class NativeSipClient(private val context: Context) {
                 // Keepalive check / retry
             } catch (e: Exception) {
                 if (scope.isActive && _state.value != SipState.DISCONNECTED) {
+                    val stateAtFailure = _state.value
                     Log.e(tag, "Error reading SIP stream", e)
-                    stopInCallTimer()
-                    stopRtpAudio()
-                    stopCallRecording()
-                    _state.value = SipState.ERROR
-                    _statusText.value = "Verbindung unterbrochen: ${e.message}"
+                    stopSipKeepAlive()
+                    if (stateAtFailure == SipState.IN_CALL) {
+                        // A signaling socket error must not tear down an otherwise
+                        // active RTP stream. RTP continues while the peer/SBC
+                        // recovers its signaling path.
+                        _statusText.value =
+                            "Im Gespräch (SIP-Signalisierung kurz unterbrochen)"
+                    } else {
+                        stopInCallTimer()
+                        stopRtpAudio()
+                        stopCallRecording()
+                        _state.value = SipState.ERROR
+                        _statusText.value = "Verbindung unterbrochen: \${e.message}"
+                    }
                 }
                 break
             }
@@ -321,7 +380,9 @@ class NativeSipClient(private val context: Context) {
             headerBuilder.append(line).append("\r\n")
         }
 
-        if (headerBuilder.isEmpty()) return null
+        if (headerBuilder.isEmpty()) {
+            throw EOFException("SIP-Verbindung wurde geschlossen")
+        }
 
         val headers = headerBuilder.toString()
         var contentLength = 0
@@ -1190,6 +1251,7 @@ class NativeSipClient(private val context: Context) {
         negotiatedCodecs = remote.codecs
 
         try {
+            acquireCallWakeLock()
             prepareAudioDevices()
             audioTrack?.play()
             // Open the NAT/media path immediately, even if AudioRecord needs a moment
@@ -1219,8 +1281,31 @@ class NativeSipClient(private val context: Context) {
         }
     }
 
-    private fun prepareAudioDevices() {
-        val manager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    private fun acquireCallWakeLock() {
+        if (callWakeLock?.isHeld == true) return
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            ?: return
+        callWakeLock = runCatching {
+            powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "Stromruf:SmartCallsCall"
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }.getOrNull()
+    }
+
+    private fun releaseCallWakeLock() {
+        callWakeLock?.let { lock ->
+            runCatching {
+                if (lock.isHeld) lock.release()
+            }
+        }
+        callWakeLock = null
+    }
+
+    private fun prepareAudioDevices() {        val manager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             ?: throw IllegalStateException("AudioManager nicht verfügbar")
         audioManager = manager
         if (previousAudioMode == null) previousAudioMode = manager.mode
@@ -1452,6 +1537,7 @@ class NativeSipClient(private val context: Context) {
     }
 
     private fun stopRtpAudio() {
+        releaseCallWakeLock()
         rtpReceiveJob?.cancel()
         audioCaptureJob?.cancel()
         rtpKeepAliveJob?.cancel()
