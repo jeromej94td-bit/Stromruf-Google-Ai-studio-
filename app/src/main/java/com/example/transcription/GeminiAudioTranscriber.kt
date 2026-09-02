@@ -208,7 +208,7 @@ class GeminiAudioTranscriber(private val context: Context) {
         }
     }
 
-    private fun estimateDurationSeconds(
+    fun estimateDurationSeconds(
         audioFile: File,
         fallbackDurationSeconds: Long
     ): Long {
