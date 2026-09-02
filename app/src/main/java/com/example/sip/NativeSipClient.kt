@@ -71,6 +71,10 @@ class NativeSipClient(private val context: Context) {
     private var currentConfig: SipAccountConfig? = null
     private var clientJob: Job? = null
     private var durationJob: Job? = null
+    private var sipKeepAliveJob: Job? = null
+    private var sessionRefreshJob: Job? = null
+    private var sessionExpiresSeconds = DEFAULT_SESSION_EXPIRES_SECONDS
+    private var sessionRefresher = "uac"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Network connection objects
@@ -107,6 +111,7 @@ class NativeSipClient(private val context: Context) {
     private var rtpSocket: DatagramSocket? = null
     private var rtpReceiveJob: Job? = null
     private var audioCaptureJob: Job? = null
+    private var rtpKeepAliveJob: Job? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     @Volatile private var remoteRtpAddress: InetSocketAddress? = null
@@ -122,12 +127,19 @@ class NativeSipClient(private val context: Context) {
     private var previousSpeakerphoneOn: Boolean? = null
     @Volatile private var muted = false
     @Volatile private var speakerphoneOn = true
+    @Volatile private var lastRtpSentAt = 0L
+    private val sipSendLock = Any()
+    private val rtpSendLock = Any()
 
     private companion object {
         const val RTP_SAMPLE_RATE = 8000
         const val RTP_FRAME_SAMPLES = 160 // 20 ms at 8 kHz
         const val RTP_PORT_MIN = 20000
         const val RTP_PORT_MAX = 50000
+        const val SIP_KEEPALIVE_INTERVAL_MS = 15_000L
+        const val RTP_KEEPALIVE_INTERVAL_MS = 5_000L
+        const val DEFAULT_SESSION_EXPIRES_SECONDS = 1800
+        const val MIN_SESSION_EXPIRES_SECONDS = 20
     }
 
     // Digest Authentication
@@ -174,6 +186,7 @@ class NativeSipClient(private val context: Context) {
                 findLocalIp()
                 connectSocket(config)
                 sendRegister(config, null)
+                startSipKeepAlive(config)
                 listenForMessages(config)
             } catch (e: Exception) {
                 Log.e(tag, "Connection error", e)
@@ -194,7 +207,9 @@ class NativeSipClient(private val context: Context) {
             SipTransportProtocol.TCP -> {
                 val socket = Socket()
                 socket.connect(InetSocketAddress(config.sipRegistrar, config.port), 10000)
-                socket.soTimeout = 30000
+                // SIP is a long-lived signaling connection. The keepalive job below
+                // prevents idle disconnects; reads must not end a call on a short timeout.
+                socket.soTimeout = 0
                 tcpSocket = socket
                 socketWriter = socket.getOutputStream()
                 socketReader = BufferedReader(InputStreamReader(socket.getInputStream()))
@@ -205,7 +220,9 @@ class NativeSipClient(private val context: Context) {
                 sslContext.init(null, null, SecureRandom())
                 val factory = sslContext.socketFactory
                 val socket = factory.createSocket(config.sipRegistrar, config.port) as SSLSocket
-                socket.soTimeout = 30000
+                // SIP is a long-lived signaling connection. The keepalive job below
+                // prevents idle disconnects; reads must not end a call on a short timeout.
+                socket.soTimeout = 0
                 socket.startHandshake()
                 sslSocket = socket
                 socketWriter = socket.getOutputStream()
@@ -217,8 +234,9 @@ class NativeSipClient(private val context: Context) {
 
     private fun sendSipMessage(message: String, config: SipAccountConfig) {
         val bytes = message.toByteArray(Charsets.UTF_8)
-        when (config.protocol) {
-            SipTransportProtocol.UDP -> {
+        synchronized(sipSendLock) {
+            when (config.protocol) {
+                SipTransportProtocol.UDP -> {
                 val destination = lastUdpSender
                     ?: InetSocketAddress(config.sipRegistrar, config.port)
                 val packet = DatagramPacket(
@@ -234,9 +252,40 @@ class NativeSipClient(private val context: Context) {
                     write(bytes)
                     flush()
                 }
+                }
             }
         }
         Log.d(tag, "Sent SIP Message:\n$message")
+    }
+
+    private fun startSipKeepAlive(config: SipAccountConfig) {
+        sipKeepAliveJob?.cancel()
+        sipKeepAliveJob = scope.launch(Dispatchers.IO) {
+            while (isActive &&
+                _state.value != SipState.DISCONNECTED &&
+                _state.value != SipState.ERROR
+            ) {
+                delay(SIP_KEEPALIVE_INTERVAL_MS)
+                if (!isActive ||
+                    _state.value == SipState.DISCONNECTED ||
+                    _state.value == SipState.ERROR
+                ) break
+                runCatching {
+                    // Double CRLF is the SIP outbound keepalive. It keeps the
+                    // TLS/TCP flow and the NAT binding alive without a new call.
+                    if (config.protocol != SipTransportProtocol.UDP) {
+                        sendSipMessage("\r\n\r\n", config)
+                    }
+                }.onFailure { error ->
+                    Log.w(tag, "SIP keepalive failed", error)
+                }
+            }
+        }
+    }
+
+    private fun stopSipKeepAlive() {
+        sipKeepAliveJob?.cancel()
+        sipKeepAliveJob = null
     }
 
     private fun listenForMessages(config: SipAccountConfig) {
@@ -357,15 +406,28 @@ class NativeSipClient(private val context: Context) {
                             }
 
                             // The 200 response completes the SIP dialog only after ACK.
-                            sendAck(config)
+                            val responseCseq = extractCSeqNumber(message) ?: cseq
+                            sendAck(config, responseCseq)
                             if (remoteMedia != null) {
                                 startRtpAudio(remoteMedia)
                             } else {
                                 Log.e(tag, "200 OK contained no supported RTP audio SDP")
                             }
 
+                            updateSessionTimer(message)
+                            startSessionRefresh(config)
                             startInCallTimer()
                             startCallRecording()
+                        }
+
+                        // A provider may refresh the established dialog with a re-INVITE.
+                        // Answer it and ACK our own refresh responses so the call stays up.
+                        method == "INVITE" && _state.value == SipState.IN_CALL -> {
+                            extractDialogInfo(message)
+                            updateSessionTimer(message)
+                            val responseCseq = extractCSeqNumber(message) ?: cseq
+                            sendAck(config, responseCseq)
+                            startSessionRefresh(config)
                         }
                     }
                 }
@@ -404,6 +466,19 @@ class NativeSipClient(private val context: Context) {
                                     "Authorization"
                                 }
                                 sendInvite(activeCallTarget!!, config, auth, headerName)
+                            }
+
+                            method == "INVITE" && _state.value == SipState.IN_CALL -> {
+                                val requestUri = remoteContactUri
+                                    ?: inviteRequestUri
+                                    ?: "sip:${activeCallTarget ?: ""}@${config.sipRegistrar}"
+                                val auth = buildDigestAuth("INVITE", requestUri, config)
+                                val headerName = if (statusCode == 407) {
+                                    "Proxy-Authorization"
+                                } else {
+                                    "Authorization"
+                                }
+                                sendSessionRefresh(config, auth, headerName)
                             }
                         }
                     } else {
@@ -449,6 +524,27 @@ class NativeSipClient(private val context: Context) {
         // Requests arrive on the same SIP connection. Ignoring BYE here used to
         // leave the UI and media session in an invalid state.
         when (firstLine.substringBefore(" ").uppercase(Locale.ROOT)) {
+            "INVITE" -> {
+                if (_state.value == SipState.IN_CALL) {
+                    parseRemoteSdp(message)?.let { remote ->
+                        remoteRtpAddress = InetSocketAddress(remote.address, remote.port)
+                        negotiatedPayloadType = remote.payloadType
+                        negotiatedCodecs = remote.codecs
+                    }
+                    sendInviteResponseForRequest(message, config)
+                } else {
+                    sendSipResponseForRequest(message, 491, "Request Pending", config)
+                }
+            }
+
+            "UPDATE" -> {
+                if (_state.value == SipState.IN_CALL) {
+                    sendSipResponseForRequest(message, 200, "OK", config)
+                } else {
+                    sendSipResponseForRequest(message, 481, "Call/Transaction Does Not Exist", config)
+                }
+            }
+
             "BYE" -> {
                 sendSipResponseForRequest(message, 200, "OK", config)
                 finishCallWithState(
@@ -520,6 +616,9 @@ class NativeSipClient(private val context: Context) {
         remoteContactUri = null
         remoteToHeader = null
         routeSet = emptyList()
+        stopSessionRefresh()
+        sessionExpiresSeconds = DEFAULT_SESSION_EXPIRES_SECONDS
+        sessionRefresher = "uac"
 
         scope.launch {
             try {
@@ -533,24 +632,10 @@ class NativeSipClient(private val context: Context) {
             }
         }
     }
-    private fun sendInvite(
-        targetNumber: String,
-        config: SipAccountConfig,
-        authHeader: String?,
-        authHeaderName: String = "Proxy-Authorization"
-    ) {
-        val transport = config.protocol.name
-        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
-        val user = config.sipUser
-        val domain = config.sipRegistrar
-        val requestUri = "sip:$targetNumber@$domain"
+    private fun buildLocalSdp(): String {
         val rtpPort = rtpSocket?.localPort
-            ?: throw IllegalStateException("RTP-Socket wurde vor dem INVITE nicht geöffnet")
-
-        inviteRequestUri = requestUri
-        inviteViaBranch = viaBranch
-
-        val sdp = StringBuilder()
+            ?: throw IllegalStateException("RTP-Socket wurde vor dem SDP nicht geöffnet")
+        return StringBuilder()
             .append("v=0\r\n")
             .append("o=SmartCalls 1000 1000 IN IP4 $localIp\r\n")
             .append("s=SmartCall\r\n")
@@ -563,6 +648,64 @@ class NativeSipClient(private val context: Context) {
             .append("a=ptime:20\r\n")
             .append("a=sendrecv\r\n")
             .toString()
+    }
+
+    private fun sendSessionRefresh(
+        config: SipAccountConfig,
+        authHeader: String? = null,
+        authHeaderName: String = "Authorization"
+    ) {
+        if (_state.value != SipState.IN_CALL) return
+        val target = activeCallTarget ?: return
+        val requestUri = remoteContactUri
+            ?: inviteRequestUri
+            ?: "sip:$target@${config.sipRegistrar}"
+        if (rtpSocket == null) return
+        val refreshCseq = ++cseq
+        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
+        val transport = config.protocol.name
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+        val sdp = buildLocalSdp()
+        val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
+
+        val sb = StringBuilder()
+        sb.append("INVITE $requestUri SIP/2.0\r\n")
+        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: \"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append("To: ${remoteToHeader ?: "<sip:$target@$domain>"}\r\n")
+        sb.append("Call-ID: $callId@$localIp\r\n")
+        sb.append("CSeq: $refreshCseq INVITE\r\n")
+        sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
+        routeSet.forEach { route -> sb.append("Route: $route\r\n") }
+        sb.append("Supported: timer\r\n")
+        sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
+        sb.append("Content-Type: application/sdp\r\n")
+        sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        if (authHeader != null) {
+            sb.append("$authHeaderName: $authHeader\r\n")
+        }
+        sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
+        sb.append(sdp)
+        sendSipMessage(sb.toString(), config)
+    }
+
+    private fun sendInvite(
+        targetNumber: String,
+        config: SipAccountConfig,
+        authHeader: String?,
+        authHeaderName: String = "Proxy-Authorization"
+    ) {
+        val transport = config.protocol.name
+        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+        val requestUri = "sip:$targetNumber@$domain"
+        inviteRequestUri = requestUri
+        inviteViaBranch = viaBranch
+
+        val sdp = buildLocalSdp()
 
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
 
@@ -577,6 +720,8 @@ class NativeSipClient(private val context: Context) {
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         sb.append("Content-Type: application/sdp\r\n")
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        sb.append("Supported: timer\r\n")
+        sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         if (authHeader != null) {
             sb.append("$authHeaderName: $authHeader\r\n")
         }
@@ -585,7 +730,7 @@ class NativeSipClient(private val context: Context) {
 
         sendSipMessage(sb.toString(), config)
     }
-    private fun sendAck(config: SipAccountConfig) {
+    private fun sendAck(config: SipAccountConfig, inviteCseq: Int = cseq) {
         val target = activeCallTarget ?: return
         val transport = config.protocol.name
         val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
@@ -606,7 +751,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("From: \"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag\r\n")
         sb.append("To: $toHeader\r\n")
         sb.append("Call-ID: $callId@$localIp\r\n")
-        sb.append("CSeq: $cseq ACK\r\n")
+        sb.append("CSeq: $inviteCseq ACK\r\n")
         routeSet.forEach { route -> sb.append("Route: $route\r\n") }
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
@@ -631,6 +776,7 @@ class NativeSipClient(private val context: Context) {
         val routes = routeSet.toList()
 
         stopInCallTimer()
+        stopSessionRefresh()
         stopRtpAudio()
         stopCallRecording()
 
@@ -714,6 +860,7 @@ class NativeSipClient(private val context: Context) {
     }
 
     private fun clearCallDialog() {
+        stopSessionRefresh()
         activeCallTarget = null
         inviteRequestUri = null
         inviteViaBranch = null
@@ -730,7 +877,8 @@ class NativeSipClient(private val context: Context) {
                 .find(it)?.groupValues?.getOrNull(1)
         }
         remoteContactUri = parseSipUri(extractHeaderValue(message, "Contact"))
-        routeSet = headerValues(message, "Record-Route")
+        // RFC 3261: the UAC uses the Record-Route list in reverse order.
+        routeSet = headerValues(message, "Record-Route").asReversed()
     }
 
     private fun extractToTag(message: String) {
@@ -740,6 +888,11 @@ class NativeSipClient(private val context: Context) {
     private fun extractCSeqMethod(message: String): String? {
         val value = extractHeaderValue(message, "CSeq") ?: return null
         return value.trim().split(Regex("\\s+")).getOrNull(1)?.uppercase(Locale.ROOT)
+    }
+
+    private fun extractCSeqNumber(message: String): Int? {
+        val value = extractHeaderValue(message, "CSeq") ?: return null
+        return value.trim().split(Regex("\\s+")).firstOrNull()?.toIntOrNull()
     }
 
     private fun headerValues(message: String, name: String): List<String> =
@@ -840,6 +993,32 @@ class NativeSipClient(private val context: Context) {
         )
     }
 
+    private fun sendInviteResponseForRequest(request: String, config: SipAccountConfig) {
+        val sdp = runCatching { buildLocalSdp() }.getOrElse {
+            sendSipResponseForRequest(request, 488, "Not Acceptable Here", config)
+            return
+        }
+        val transport = config.protocol.name
+        val sb = StringBuilder("SIP/2.0 200 OK\r\n")
+        listOf("Via", "From", "To", "Call-ID", "CSeq").forEach { name ->
+            headerValues(request, name).forEach { value ->
+                sb.append("$name: $value\r\n")
+            }
+        }
+        sb.append("Contact: <sip:${config.sipUser}@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
+        sb.append("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, UPDATE\r\n")
+        sb.append("Supported: timer\r\n")
+        val requestSession = parseSessionExpiresSeconds(request)
+            ?: sessionExpiresSeconds
+        sb.append("Session-Expires: $requestSession;refresher=uac\r\n")
+        sb.append("Content-Type: application/sdp\r\n")
+        sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
+        sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
+        sb.append(sdp)
+        sendSipMessage(sb.toString(), config)
+    }
+
     private fun sendSipResponseForRequest(
         request: String,
         statusCode: Int,
@@ -854,6 +1033,49 @@ class NativeSipClient(private val context: Context) {
         }
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
+    }
+
+    private fun parseSessionExpiresSeconds(message: String): Int? {
+        val value = extractHeaderValue(message, "Session-Expires") ?: return null
+        return Regex("^\\s*(\\d+)")
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?.coerceAtLeast(MIN_SESSION_EXPIRES_SECONDS)
+    }
+
+    private fun updateSessionTimer(message: String) {
+        parseSessionExpiresSeconds(message)?.let { seconds ->
+            sessionExpiresSeconds = seconds
+        }
+        val value = extractHeaderValue(message, "Session-Expires") ?: return
+        Regex("(?i)(?:^|;)\\s*refresher\\s*=\\s*(uac|uas)")
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { sessionRefresher = it.lowercase(Locale.ROOT) }
+        Log.d(tag, "SIP session timer: ${sessionExpiresSeconds}s, refresher=$sessionRefresher")
+    }
+
+    private fun startSessionRefresh(config: SipAccountConfig) {
+        stopSessionRefresh()
+        if (!sessionRefresher.equals("uac", ignoreCase = true)) return
+        sessionRefreshJob = scope.launch(Dispatchers.IO) {
+            while (isActive && _state.value == SipState.IN_CALL) {
+                val waitMs = (sessionExpiresSeconds * 1000L / 2).coerceAtLeast(10_000L)
+                delay(waitMs)
+                if (isActive && _state.value == SipState.IN_CALL) {
+                    runCatching { sendSessionRefresh(config) }
+                        .onFailure { Log.w(tag, "SIP session refresh failed", it) }
+                }
+            }
+        }
+    }
+
+    private fun stopSessionRefresh() {
+        sessionRefreshJob?.cancel()
+        sessionRefreshJob = null
     }
 
     private fun parseAuthHeader(authHeader: String) {
@@ -966,6 +1188,7 @@ class NativeSipClient(private val context: Context) {
         negotiatedCodecs = mapOf(8 to G711Codec.PCMA, 0 to G711Codec.PCMU)
         rtpSequence = SecureRandom().nextInt(65536)
         rtpTimestamp = SecureRandom().nextInt().toLong() and 0xffffffffL
+        lastRtpSentAt = 0L
     }
 
     private fun startRtpAudio(remote: RemoteRtpDescription) {
@@ -983,12 +1206,25 @@ class NativeSipClient(private val context: Context) {
         try {
             prepareAudioDevices()
             audioTrack?.play()
+            // Open the NAT/media path immediately, even if AudioRecord needs a moment
+            // to become ready. This avoids provider-side no-RTP timeouts after answer.
+            runCatching { sendRtpKeepAlive(socket) }
+                .onFailure { Log.w(tag, "Initial RTP keepalive failed", it) }
 
             rtpReceiveJob = scope.launch(Dispatchers.IO) {
                 receiveRtpAudio(socket)
             }
             audioCaptureJob = scope.launch(Dispatchers.IO) {
                 captureAndSendRtp(socket)
+            }
+            rtpKeepAliveJob = scope.launch(Dispatchers.IO) {
+                while (isActive && _state.value == SipState.IN_CALL && !socket.isClosed) {
+                    delay(RTP_KEEPALIVE_INTERVAL_MS)
+                    if (System.currentTimeMillis() - lastRtpSentAt >= RTP_KEEPALIVE_INTERVAL_MS) {
+                        runCatching { sendRtpKeepAlive(socket) }
+                            .onFailure { Log.w(tag, "RTP keepalive failed", it) }
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(tag, "Failed to start RTP audio", e)
@@ -1098,7 +1334,14 @@ class NativeSipClient(private val context: Context) {
                         RTP_FRAME_SAMPLES - filled,
                         AudioRecord.READ_BLOCKING
                     )
-                    if (read <= 0) return
+                    if (read < 0) {
+                        Log.w(tag, "AudioRecord wurde beendet ($read)")
+                        return
+                    }
+                    if (read == 0) {
+                        delay(20)
+                        continue
+                    }
                     filled += read
                 }
                 if (filled < RTP_FRAME_SAMPLES) continue
@@ -1124,25 +1367,34 @@ class NativeSipClient(private val context: Context) {
     }
 
     private fun sendRtpPacket(socket: DatagramSocket, payload: ByteArray) {
-        val destination = remoteRtpAddress ?: return
-        val packet = ByteArray(12 + payload.size)
-        packet[0] = 0x80.toByte()
-        packet[1] = (negotiatedPayloadType and 0x7f).toByte()
-        packet[2] = ((rtpSequence ushr 8) and 0xff).toByte()
-        packet[3] = (rtpSequence and 0xff).toByte()
-        packet[4] = ((rtpTimestamp ushr 24) and 0xff).toByte()
-        packet[5] = ((rtpTimestamp ushr 16) and 0xff).toByte()
-        packet[6] = ((rtpTimestamp ushr 8) and 0xff).toByte()
-        packet[7] = (rtpTimestamp and 0xff).toByte()
-        packet[8] = ((rtpSsrc ushr 24) and 0xff).toByte()
-        packet[9] = ((rtpSsrc ushr 16) and 0xff).toByte()
-        packet[10] = ((rtpSsrc ushr 8) and 0xff).toByte()
-        packet[11] = (rtpSsrc and 0xff).toByte()
-        payload.copyInto(packet, destinationOffset = 12)
+        synchronized(rtpSendLock) {
+            val destination = remoteRtpAddress ?: return
+            val packet = ByteArray(12 + payload.size)
+            packet[0] = 0x80.toByte()
+            packet[1] = (negotiatedPayloadType and 0x7f).toByte()
+            packet[2] = ((rtpSequence ushr 8) and 0xff).toByte()
+            packet[3] = (rtpSequence and 0xff).toByte()
+            packet[4] = ((rtpTimestamp ushr 24) and 0xff).toByte()
+            packet[5] = ((rtpTimestamp ushr 16) and 0xff).toByte()
+            packet[6] = ((rtpTimestamp ushr 8) and 0xff).toByte()
+            packet[7] = (rtpTimestamp and 0xff).toByte()
+            packet[8] = ((rtpSsrc ushr 24) and 0xff).toByte()
+            packet[9] = ((rtpSsrc ushr 16) and 0xff).toByte()
+            packet[10] = ((rtpSsrc ushr 8) and 0xff).toByte()
+            packet[11] = (rtpSsrc and 0xff).toByte()
+            payload.copyInto(packet, destinationOffset = 12)
 
-        socket.send(DatagramPacket(packet, packet.size, destination))
-        rtpSequence = (rtpSequence + 1) and 0xffff
-        rtpTimestamp = (rtpTimestamp + RTP_FRAME_SAMPLES) and 0xffffffffL
+            socket.send(DatagramPacket(packet, packet.size, destination))
+            rtpSequence = (rtpSequence + 1) and 0xffff
+            rtpTimestamp = (rtpTimestamp + RTP_FRAME_SAMPLES) and 0xffffffffL
+            lastRtpSentAt = System.currentTimeMillis()
+        }
+    }
+
+    private fun sendRtpKeepAlive(socket: DatagramSocket) {
+        val codec = negotiatedCodecs[negotiatedPayloadType] ?: G711Codec.PCMA
+        val silence = ByteArray(RTP_FRAME_SAMPLES) { encodeG711Sample(0, codec) }
+        sendRtpPacket(socket, silence)
     }
 
     private suspend fun receiveRtpAudio(socket: DatagramSocket) {
@@ -1216,8 +1468,10 @@ class NativeSipClient(private val context: Context) {
     private fun stopRtpAudio() {
         rtpReceiveJob?.cancel()
         audioCaptureJob?.cancel()
+        rtpKeepAliveJob?.cancel()
         rtpReceiveJob = null
         audioCaptureJob = null
+        rtpKeepAliveJob = null
 
         try {
             audioRecord?.stop()
@@ -1555,6 +1809,8 @@ class NativeSipClient(private val context: Context) {
 
     fun disconnect() {
         stopInCallTimer()
+        stopSessionRefresh()
+        stopSipKeepAlive()
         stopRtpAudio()
         stopCallRecording()
         clientJob?.cancel()
