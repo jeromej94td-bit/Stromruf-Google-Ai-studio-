@@ -197,9 +197,11 @@ class NativeSipClient(private val context: Context) {
                 startSipKeepAlive(config)
                 listenForMessages(config)
             } catch (e: Exception) {
-                Log.e(tag, "Connection error", e)
-                _state.value = SipState.ERROR
-                _statusText.value = "Fehler: ${e.localizedMessage ?: "Verbindung fehlgeschlagen"}"
+                if (_state.value != SipState.DISCONNECTED) {
+                    Log.e(tag, "Connection error", e)
+                    _state.value = SipState.ERROR
+                    _statusText.value = "Fehler: ${e.localizedMessage ?: "Verbindung fehlgeschlagen"}"
+                }
             }
         }
     }
@@ -414,11 +416,28 @@ class NativeSipClient(private val context: Context) {
         if (firstLine.startsWith("SIP/2.0", ignoreCase = true)) {
             val statusCode = firstLine.split(Regex("\\s+")).getOrNull(1)?.toIntOrNull() ?: return
             val method = extractCSeqMethod(message)
+            val responseCallId = extractHeaderValue(message, "Call-ID")?.trim()
+            val currentCallId = "$callId@$localIp"
 
             // OPTIONS keepalive responses must never terminate an active call,
             // even when the provider answers with 4xx/5xx.
             if (method == "OPTIONS") {
                 Log.d(tag, "SIP OPTIONS keepalive response: $statusCode")
+                return
+            }
+
+            // A delayed response from REGISTER, a previous INVITE, or another
+            // transaction must not tear down the currently established dialog.
+            val relevantResponse = when (method) {
+                "REGISTER" -> _state.value == SipState.CONNECTING
+                "INVITE" -> responseCallId == currentCallId &&
+                    (_state.value == SipState.DIALING ||
+                        _state.value == SipState.RINGING ||
+                        _state.value == SipState.IN_CALL)
+                else -> false
+            }
+            if (!relevantResponse) {
+                Log.d(tag, "Ignoring SIP response for another transaction: $method/$statusCode")
                 return
             }
 
@@ -570,9 +589,20 @@ class NativeSipClient(private val context: Context) {
             return
         }
 
-        // Requests arrive on the same SIP connection. Ignoring BYE here used to
-        // leave the UI and media session in an invalid state.
-        when (firstLine.substringBefore(" ").uppercase(Locale.ROOT)) {
+        // Requests arrive on the same SIP connection. Ignore call-control
+        // messages from another dialog so an unrelated BYE cannot end this call.
+        val requestMethod = firstLine.substringBefore(" ").uppercase(Locale.ROOT)
+        val requestCallId = extractHeaderValue(message, "Call-ID")?.trim()
+        if (_state.value == SipState.IN_CALL &&
+            requestMethod != "OPTIONS" &&
+            requestCallId != "$callId@$localIp"
+        ) {
+            Log.w(tag, "Ignoring $requestMethod for another SIP dialog")
+            sendSipResponseForRequest(message, 481, "Call/Transaction Does Not Exist", config)
+            return
+        }
+
+        when (requestMethod) {
             "INVITE" -> {
                 if (_state.value == SipState.IN_CALL) {
                     parseRemoteSdp(message)?.let { remote ->
@@ -1881,6 +1911,10 @@ class NativeSipClient(private val context: Context) {
     }
 
     fun disconnect() {
+        // Set the state before closing sockets. The blocking reader then sees
+        // an intentional disconnect instead of reporting a false transport error.
+        _state.value = SipState.DISCONNECTED
+        _statusText.value = "Nicht verbunden"
         stopInCallTimer()
         stopSessionRefresh()
         stopSipKeepAlive()
@@ -1905,7 +1939,5 @@ class NativeSipClient(private val context: Context) {
         lastUdpSender = null
         clearCallDialog()
 
-        _state.value = SipState.DISCONNECTED
-        _statusText.value = "Nicht verbunden"
     }
 }
