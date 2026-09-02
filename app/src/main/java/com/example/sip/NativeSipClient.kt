@@ -263,6 +263,9 @@ class NativeSipClient(private val context: Context) {
             } catch (e: Exception) {
                 if (scope.isActive && _state.value != SipState.DISCONNECTED) {
                     Log.e(tag, "Error reading SIP stream", e)
+                    stopInCallTimer()
+                    stopRtpAudio()
+                    stopCallRecording()
                     _state.value = SipState.ERROR
                     _statusText.value = "Verbindung unterbrochen: ${e.message}"
                 }
@@ -1226,13 +1229,10 @@ class NativeSipClient(private val context: Context) {
         }
         audioRecord = null
 
-        try {
-            audioTrack?.pause()
-            audioTrack?.flush()
-            audioTrack?.stop()
-            audioTrack?.release()
-        } catch (_: Exception) {
-        }
+        runCatching { audioTrack?.pause() }
+        runCatching { audioTrack?.flush() }
+        runCatching { audioTrack?.stop() }
+        runCatching { audioTrack?.release() }
         audioTrack = null
 
         try {
