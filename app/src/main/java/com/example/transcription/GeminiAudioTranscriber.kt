@@ -1,6 +1,7 @@
 package com.example.transcription
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.util.Base64
 import android.util.Log
 import com.example.util.SecureIntegrationSettings
@@ -60,7 +61,8 @@ class GeminiAudioTranscriber(private val context: Context) {
      */
     suspend fun transcribeAndSummarize(
         audioFile: File,
-        customKey: String? = null
+        customKey: String? = null,
+        fallbackDurationSeconds: Long = 0L
     ): Result<TranscriptionResult> = withContext(Dispatchers.IO) {
         val apiKey = customKey ?: getApiKey()
         if (apiKey.isNullOrBlank()) {
@@ -189,7 +191,10 @@ class GeminiAudioTranscriber(private val context: Context) {
                 summary = summary,
                 fullTranscript = transcript,
                 rawText = responseText,
-                estimatedDurationSeconds = 0L
+                estimatedDurationSeconds = estimateDurationSeconds(
+                    audioFile,
+                    fallbackDurationSeconds
+                )
             )
 
             // Save to cache
@@ -200,6 +205,30 @@ class GeminiAudioTranscriber(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Transcription failed", e)
             Result.failure(e)
+        }
+    }
+
+    fun estimateDurationSeconds(
+        audioFile: File,
+        fallbackDurationSeconds: Long
+    ): Long {
+        val metadataDurationMs = runCatching {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(audioFile.absolutePath)
+                retriever.extractMetadata(
+                    MediaMetadataRetriever.METADATA_KEY_DURATION
+                )?.toLongOrNull()
+            } finally {
+                retriever.release()
+            }
+        }.getOrNull()
+
+        return when {
+            metadataDurationMs != null && metadataDurationMs > 0L ->
+                (metadataDurationMs + 999L) / 1000L
+            fallbackDurationSeconds > 0L -> fallbackDurationSeconds
+            else -> 0L
         }
     }
 

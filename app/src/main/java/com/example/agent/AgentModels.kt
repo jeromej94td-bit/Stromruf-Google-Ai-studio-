@@ -67,6 +67,18 @@ data class CallSessionRow(
     val recordingPath: String?, val recordingExpiresAt: Long?
 )
 
+/** Summary-only note from Smart Calls (public.smartcall_notes). No audio or transcript is stored. */
+data class SmartCallNote(
+    val id: String,
+    val phone: String,
+    val contactId: String?,
+    val contactName: String?,
+    val callStartedAt: Long,
+    val durationSeconds: Int,
+    val summary: String,
+    val sourceFileName: String
+)
+
 /** Wissensquelle (agent_knowledge). */
 data class KnowledgeEntry(
     val id: String = UUID.randomUUID().toString(),
