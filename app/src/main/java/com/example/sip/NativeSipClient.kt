@@ -1305,7 +1305,8 @@ class NativeSipClient(private val context: Context) {
         callWakeLock = null
     }
 
-    private fun prepareAudioDevices() {        val manager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    private fun prepareAudioDevices() {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             ?: throw IllegalStateException("AudioManager nicht verfügbar")
         audioManager = manager
         if (previousAudioMode == null) previousAudioMode = manager.mode
