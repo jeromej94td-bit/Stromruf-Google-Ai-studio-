@@ -826,7 +826,11 @@ class NativeSipClient(private val context: Context) {
 
         sendSipMessage(sb.toString(), config)
     }
-    private fun sendAck(config: SipAccountConfig, inviteCseq: Int = cseq) {
+    private fun sendAck(
+        config: SipAccountConfig,
+        inviteCseq: Int = cseq,
+        udpDestination: InetSocketAddress? = null
+    ) {
         val target = activeCallTarget ?: return
         val transport = config.protocol.name
         val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
@@ -852,8 +856,34 @@ class NativeSipClient(private val context: Context) {
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
 
-        sendSipMessage(sb.toString(), config)
+        sendSipMessage(sb.toString(), config, udpDestination)
     }
+
+    private fun startAckRetry(
+        config: SipAccountConfig,
+        inviteCseq: Int,
+        udpDestination: InetSocketAddress?
+    ) {
+        ackRetryJob?.cancel()
+        ackRetryJob = scope.launch(Dispatchers.IO) {
+            // Cover a lost first ACK and the provider's 200 OK retransmissions.
+            for (waitMs in listOf(500L, 1_000L, 2_000L, 4_000L)) {
+                delay(waitMs)
+                if (!isActive || _state.value != SipState.IN_CALL) return@launch
+                runCatching {
+                    sendAck(config, inviteCseq, udpDestination)
+                }.onFailure { error ->
+                    Log.w(tag, "SIP ACK retry failed", error)
+                }
+            }
+        }
+    }
+
+    private fun stopAckRetry() {
+        ackRetryJob?.cancel()
+        ackRetryJob = null
+    }
+
     fun hangUp() {
         val config = currentConfig ?: return
         val stateBefore = _state.value
