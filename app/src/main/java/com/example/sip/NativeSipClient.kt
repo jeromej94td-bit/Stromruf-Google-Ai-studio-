@@ -906,6 +906,7 @@ class NativeSipClient(private val context: Context) {
         val routes = routeSet.toList()
 
         stopInCallTimer()
+        stopAckRetry()
         stopSessionRefresh()
         stopRtpAudio()
         stopCallRecording()
