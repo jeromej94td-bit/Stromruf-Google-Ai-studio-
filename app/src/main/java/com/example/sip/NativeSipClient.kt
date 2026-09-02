@@ -142,8 +142,10 @@ class NativeSipClient(private val context: Context) {
         const val RTP_PORT_MAX = 50000
         // Keep the SIP signaling flow active below Easybell/mobile NAT idle limits.
         const val SIP_KEEPALIVE_INTERVAL_MS = 10_000L
-        // If AudioRecord stalls, keep sending real RTP silence instead of going silent.
-        const val RTP_KEEPALIVE_INTERVAL_MS = 1_000L
+        // Run the RTP watchdog at frame cadence. If AudioRecord stalls, it
+        // fills any gap with real RTP silence instead of going silent.
+        const val RTP_KEEPALIVE_INTERVAL_MS = 20L
+        const val RTP_KEEPALIVE_GAP_MS = 60L
         const val DEFAULT_SESSION_EXPIRES_SECONDS = 1800
         const val MIN_SESSION_EXPIRES_SECONDS = 20
     }
@@ -1298,7 +1300,7 @@ class NativeSipClient(private val context: Context) {
             rtpKeepAliveJob = scope.launch(Dispatchers.IO) {
                 while (isActive && _state.value == SipState.IN_CALL && !socket.isClosed) {
                     delay(RTP_KEEPALIVE_INTERVAL_MS)
-                    if (System.currentTimeMillis() - lastRtpSentAt >= RTP_KEEPALIVE_INTERVAL_MS) {
+                    if (System.currentTimeMillis() - lastRtpSentAt >= RTP_KEEPALIVE_GAP_MS) {
                         runCatching { sendRtpKeepAlive(socket) }
                             .onFailure { Log.w(tag, "RTP keepalive failed", it) }
                     }
