@@ -712,6 +712,8 @@ class NativeSipClient(private val context: Context) {
         remoteContactUri = null
         remoteToHeader = null
         routeSet = emptyList()
+        stopAckRetry()
+        lastInviteResponseUdpSender = null
         stopSessionRefresh()
         sessionExpiresSeconds = DEFAULT_SESSION_EXPIRES_SECONDS
         sessionRefresher = "uac"
@@ -986,7 +988,9 @@ class NativeSipClient(private val context: Context) {
     }
 
     private fun clearCallDialog() {
+        stopAckRetry()
         stopSessionRefresh()
+        lastInviteResponseUdpSender = null
         activeCallTarget = null
         inviteRequestUri = null
         inviteViaBranch = null
