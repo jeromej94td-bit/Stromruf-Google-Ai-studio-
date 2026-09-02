@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.content.Context
 import android.widget.Toast
+import com.example.util.CustomerNumberExtractor
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -513,12 +514,14 @@ fun LeadsScreen(
                             enabled = listContacts.isNotEmpty(),
                             pulsing = true,
                             onLongClick = {
-                                val numberRegex = Regex("\\d+")
                                 val targetContact = contacts.find { it.id == nextHotBoxId } ?: contacts.firstOrNull { it.isHotBox }
                                 if (targetContact != null) {
-                                    val digitsOnly = numberRegex.find(targetContact.name)?.value 
-                                        ?: numberRegex.find(targetContact.company ?: "")?.value 
-                                        ?: ""
+                                    val digitsOnly = CustomerNumberExtractor.extractCustomerNumber(
+                                        targetContact.name,
+                                        targetContact.company,
+                                        targetContact.callReason,
+                                        targetContact.phone
+                                    ) ?: ""
                                     if (digitsOnly.isNotEmpty()) {
                                         try {
                                             val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -598,15 +601,19 @@ fun LeadsScreen(
                         leadingTint = if (done) TextMuted else ThemeAccent,
                         onClick = { onOpenContact(c) },
                         onLongClick = {
-                            val nameDigits = Regex("\\d+").find(c.name)?.value ?: ""
-                            val digits = if (nameDigits.isNotEmpty()) nameDigits else {
-                                Regex("\\d+").find(c.phone)?.value ?: ""
-                            }
+                            val digits = CustomerNumberExtractor.extractCustomerNumber(
+                                c.name,
+                                c.company,
+                                c.callReason,
+                                c.phone
+                            ) ?: ""
                             if (digits.isNotEmpty()) {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                 val clip = android.content.ClipData.newPlainText("Kundennummer", digits)
                                 clipboard.setPrimaryClip(clip)
                                 Toast.makeText(context, "Kundennummer $digits kopiert! 📋", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Keine Kundennummer gefunden! ⚠️", Toast.LENGTH_SHORT).show()
                             }
                         },
                         badge = {
@@ -767,15 +774,19 @@ fun LeadsScreen(
                             )
                         },
                         onLongClick = {
-                            val match = Regex("\\d+").find(n.customerNumber)
-                            val digits = match?.value ?: ""
+                            val digits = CustomerNumberExtractor.extractCustomerNumber(
+                                n.customerNumber,
+                                n.customerName,
+                                n.company,
+                                n.phone
+                            ) ?: ""
                             if (digits.isNotEmpty()) {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                 val clip = android.content.ClipData.newPlainText("Kundennummer", digits)
                                 clipboard.setPrimaryClip(clip)
-                                Toast.makeText(context, "Kundennummer $digits kopiert", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Kundennummer $digits kopiert! 📋", Toast.LENGTH_SHORT).show()
                             } else {
-                                Toast.makeText(context, "Keine Zahlen in Kundennummer gefunden", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Keine Kundennummer gefunden", Toast.LENGTH_SHORT).show()
                             }
                         },
                         badge = {
@@ -843,15 +854,18 @@ fun LeadsScreen(
                             onOpenContact(ContactEntity(id = a.id, name = "Angebot ${a.customerNumber}", phone = a.phone, company = null, email = null, lastCallAt = a.dateCreated, lastOutcome = null, isHotBox = false))
                         },
                         onLongClick = {
-                            val match = Regex("\\d+").find(a.customerNumber)
-                            val digits = match?.value ?: ""
+                            val digits = CustomerNumberExtractor.extractCustomerNumber(
+                                a.customerNumber,
+                                a.notes,
+                                a.phone
+                            ) ?: ""
                             if (digits.isNotEmpty()) {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                 val clip = android.content.ClipData.newPlainText("Kundennummer", digits)
                                 clipboard.setPrimaryClip(clip)
-                                Toast.makeText(context, "Kundennummer $digits kopiert", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Kundennummer $digits kopiert! 📋", Toast.LENGTH_SHORT).show()
                             } else {
-                                Toast.makeText(context, "Keine Zahlen in Kundennummer gefunden", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Keine Kundennummer gefunden", Toast.LENGTH_SHORT).show()
                             }
                         },
                         badge = {

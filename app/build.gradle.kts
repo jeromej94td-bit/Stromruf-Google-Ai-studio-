@@ -80,6 +80,7 @@ dependencies {
   // implementation(libs.androidx.camera.lifecycle)
   // implementation(libs.androidx.camera.view)
   implementation("androidx.security:security-crypto:1.1.0-alpha06")
+  implementation("androidx.documentfile:documentfile:1.0.1")
   implementation("net.openid:appauth:0.11.1")
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)

@@ -59,6 +59,7 @@ data class WrapUpData(
     val phone: String = "",
     val name: String = "",
     val company: String = "",
+    val customerNumber: String = "",
     val email: String = "",
     val note: String = "",
     val outcome: String = "",
@@ -793,21 +794,38 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             initializeWrapUpForActiveCall(normalized, name)
         }
 
-        // Clipboard copy when in hotbox
-        val isHotBoxContact = if (contactId != null) {
-            contacts.value.any { it.id == contactId && it.isHotBox }
+        // Clipboard copy when customer number is found or when in HotBox / Auto-Call / Dialer
+        val matchingContact = if (contactId != null) {
+            contacts.value.firstOrNull { it.id == contactId }
         } else {
-            contacts.value.any { (it.phone == normalized || it.phone == phone) && it.isHotBox }
+            contacts.value.firstOrNull { it.phone == normalized || it.phone == phone || (name != null && it.name == name) }
         }
 
-        if (isHotBoxContact || isAutoCallActiveGlobal.value || callType == "hotbox") {
-            val digitsOnly = phone.filter { it.isDigit() }
-            if (digitsOnly.isNotEmpty()) {
-                viewModelScope.launch {
-                    _copyToClipboardTrigger.emit(digitsOnly)
-                }
+        val isHotBoxContact = matchingContact?.isHotBox == true || (callType == "hotbox") || isAutoCallActiveGlobal.value
+
+        val neukundeMatch = neukunden.value.firstOrNull { it.phone == normalized || it.phone == phone }
+        val angebotMatch = heisseAngebote.value.firstOrNull { it.phone == normalized || it.phone == phone }
+        val promisedMatch = promisedAnnahmen.value.firstOrNull { it.phone == normalized || it.phone == phone }
+
+        // Extract customer number (Kundennummer) - pure digits (typically 6-digit, starting with 9 or 7, or leading numbers)
+        val extractedCustomerNumber = com.example.util.CustomerNumberExtractor.extractCustomerNumber(
+            neukundeMatch?.customerNumber,
+            angebotMatch?.customerNumber,
+            promisedMatch?.customerNumber,
+            matchingContact?.company,
+            name,
+            matchingContact?.name,
+            matchingContact?.callReason
+        )
+
+        if (!extractedCustomerNumber.isNullOrBlank()) {
+            viewModelScope.launch {
+                _copyToClipboardTrigger.emit(extractedCustomerNumber)
             }
-            val idToSet = contactId ?: contacts.value.firstOrNull { it.phone == normalized || it.phone == phone }?.id
+        }
+
+        if (isHotBoxContact) {
+            val idToSet = contactId ?: matchingContact?.id ?: contacts.value.firstOrNull { it.phone == normalized || it.phone == phone }?.id
             if (idToSet != null) {
                 _lastCalledHotBoxContactId.value = idToSet
             }
@@ -912,11 +930,17 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             
             val existing = repository.getContactByPhone(normalized)
             val now = System.currentTimeMillis()
-            val finalContactName = name ?: existing?.name ?: "Anonym ($normalized)"
-            val finalOutcome = if (effectiveDuration > 10) "erreicht_interesse" else "nicht_erreicht"
             
             val wrapData = _wrapUpData.value
             val isMatching = (wrapData.phone == normalized)
+            val enteredName = if (isMatching && wrapData.name.isNotBlank()) wrapData.name else null
+            val enteredCustNo = if (isMatching && wrapData.customerNumber.isNotBlank()) wrapData.customerNumber else null
+            val enteredCompany = if (isMatching && wrapData.company.isNotBlank()) wrapData.company else (if (!enteredCustNo.isNullOrBlank()) "Kd.-Nr: $enteredCustNo" else null)
+
+            val finalContactName = enteredName ?: name ?: existing?.name ?: "Anonym ($normalized)"
+            val finalCompany = enteredCompany ?: existing?.company
+            val finalOutcome = if (effectiveDuration > 10) "erreicht_interesse" else "nicht_erreicht"
+            
             val userReason = if (isMatching) wrapData.callReason else null
             val userNote = if (isMatching && wrapData.note.isNotBlank()) wrapData.note else null
             val finalNote = userNote ?: "Automatischer Hotbox-Anruf (${formatDuration(effectiveDuration)})"
@@ -924,6 +948,8 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             // 1. Update existing contact or create if new
             val contactId = if (existing != null) {
                 val updatedContact = existing.copy(
+                    name = enteredName ?: existing.name,
+                    company = finalCompany ?: existing.company,
                     lastCallAt = now,
                     lastOutcome = finalOutcome,
                     isHotBox = true,
@@ -940,8 +966,8 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                     id = newId,
                     name = finalContactName,
                     phone = normalized,
-                    company = null,
-                    email = null,
+                    company = finalCompany,
+                    email = if (isMatching) wrapData.email.takeIf { it.isNotBlank() } else null,
                     lastCallAt = now,
                     lastOutcome = finalOutcome,
                     isHotBox = true,
@@ -1021,11 +1047,36 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             val normalized = normalizePhone(phone)
             val existing = repository.getContactByPhone(normalized)
             val currentCallType = _activeCall.value?.callType ?: "einwaehlen"
+
+            val neukundeMatch = neukunden.value.firstOrNull { phoneNumbersMatch(it.phone, normalized) }
+            val angebotMatch = heisseAngebote.value.firstOrNull { phoneNumbersMatch(it.phone, normalized) }
+            val promisedMatch = promisedAnnahmen.value.firstOrNull { phoneNumbersMatch(it.phone, normalized) }
+
+            val initialCustNo = com.example.util.CustomerNumberExtractor.extractCustomerNumber(
+                neukundeMatch?.customerNumber,
+                angebotMatch?.customerNumber,
+                promisedMatch?.customerNumber,
+                existing?.company,
+                existing?.name,
+                name
+            ) ?: ""
+
+            val initialName = when {
+                !name.isNullOrBlank() && !name.all { it.isDigit() || it == '+' || it == ' ' } -> name
+                !existing?.name.isNullOrBlank() && !existing.name.all { it.isDigit() || it == '+' || it == ' ' } -> existing.name
+                !neukundeMatch?.customerName.isNullOrBlank() -> neukundeMatch.customerName
+                !promisedMatch?.name.isNullOrBlank() -> promisedMatch.name
+                else -> ""
+            }
+
+            val initialCompany = existing?.company ?: (if (initialCustNo.isNotBlank()) "Kd.-Nr: $initialCustNo" else "")
+
             _wrapUpData.value = WrapUpData(
                 phone = normalized,
-                name = name ?: existing?.name ?: "",
-                company = existing?.company ?: "",
-                email = existing?.email ?: "",
+                name = initialName,
+                company = initialCompany,
+                customerNumber = initialCustNo,
+                email = existing?.email ?: neukundeMatch?.email ?: "",
                 outcome = "",
                 existingContact = existing,
                 saveContact = existing == null,
@@ -1058,11 +1109,15 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             } else {
                 val current = _wrapUpData.value
                 val isMatching = (current.phone == normalized)
+                val enteredName = if (isMatching && current.name.isNotBlank()) current.name else null
+                val enteredCustNo = if (isMatching && current.customerNumber.isNotBlank()) current.customerNumber else null
+                val enteredCompany = if (isMatching && current.company.isNotBlank()) current.company else (if (!enteredCustNo.isNullOrBlank()) "Kd.-Nr: $enteredCustNo" else null)
                 
                 val finalOutcome = if (effectiveDuration >= 60) "erreicht_interesse" else "nicht_erreicht"
                 val currentCallType = _activeCall.value?.callType ?: "einwaehlen"
                 
-                val finalContactName = name ?: existing?.name ?: current.name.takeIf { it.isNotBlank() } ?: "Kunde ($normalized)"
+                val finalContactName = enteredName ?: name ?: existing?.name ?: current.name.takeIf { it.isNotBlank() } ?: "Kunde ($normalized)"
+                val finalCompany = enteredCompany ?: existing?.company
                 val userReason = if (isMatching) current.callReason else null
                 val userNote = if (isMatching && current.note.isNotBlank()) current.note else null
                 val finalNote = userNote ?: "Automatischer Anruf (${formatDuration(effectiveDuration)})"
@@ -1072,6 +1127,9 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                 // 1. Update existing contact or create if new
                 val contactId = if (existing != null) {
                     val updatedContact = existing.copy(
+                        name = enteredName ?: existing.name,
+                        company = finalCompany ?: existing.company,
+                        email = if (isMatching && current.email.isNotBlank()) current.email else existing.email,
                         lastCallAt = now,
                         lastOutcome = finalOutcome,
                         callReason = userReason ?: existing.callReason
@@ -1084,7 +1142,7 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                         id = newId,
                         name = finalContactName,
                         phone = normalized,
-                        company = if (isMatching) current.company.takeIf { it.isNotBlank() } else null,
+                        company = finalCompany,
                         email = if (isMatching) current.email.takeIf { it.isNotBlank() } else null,
                         lastCallAt = now,
                         lastOutcome = finalOutcome,
@@ -1209,8 +1267,38 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         _wrapUpData.value = _wrapUpData.value.copy(callReason = reason)
     }
 
-    fun updateWrapUpFields(name: String, company: String, email: String) {
-        _wrapUpData.value = _wrapUpData.value.copy(name = name, company = company, email = email)
+    fun setWrapUpName(name: String) {
+        _wrapUpData.value = _wrapUpData.value.copy(name = name)
+    }
+
+    fun setWrapUpCustomerNumber(customerNumber: String) {
+        val currentCompany = _wrapUpData.value.company
+        val updatedCompany = if (currentCompany.isBlank() || currentCompany.startsWith("Kd.-Nr")) {
+            if (customerNumber.isNotBlank()) "Kd.-Nr: $customerNumber" else ""
+        } else {
+            currentCompany
+        }
+        _wrapUpData.value = _wrapUpData.value.copy(customerNumber = customerNumber, company = updatedCompany)
+    }
+
+    fun setWrapUpCompany(company: String) {
+        _wrapUpData.value = _wrapUpData.value.copy(company = company)
+    }
+
+    fun updateWrapUpFields(name: String, company: String, email: String, customerNumber: String = "") {
+        val finalCompany = if (company.isNotBlank()) {
+            company
+        } else if (customerNumber.isNotBlank()) {
+            "Kd.-Nr: $customerNumber"
+        } else {
+            ""
+        }
+        _wrapUpData.value = _wrapUpData.value.copy(
+            name = name,
+            company = finalCompany,
+            email = email,
+            customerNumber = if (customerNumber.isNotBlank()) customerNumber else _wrapUpData.value.customerNumber
+        )
     }
 
     fun toggleWrapUpOffset(offset: String) {
@@ -1237,10 +1325,12 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
     fun saveWrapUp() {
         val data = _wrapUpData.value
         val now = System.currentTimeMillis()
-        val finalContactName = if (data.existingContact != null) {
-            data.existingContact.name
-        } else if (data.name.isNotBlank()) {
+        val enteredCustNo = data.customerNumber.takeIf { it.isNotBlank() }
+        val finalCompany = data.company.takeIf { it.isNotBlank() } ?: (if (enteredCustNo != null) "Kd.-Nr: $enteredCustNo" else null)
+        val finalContactName = if (data.name.isNotBlank()) {
             data.name
+        } else if (data.existingContact != null && data.existingContact.name.isNotBlank()) {
+            data.existingContact.name
         } else {
             "Anonym (${data.phone})"
         }
@@ -1251,6 +1341,9 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                 val contactId = if (data.existingContact != null) {
                     // Update existing contact details or just lastCallInfo
                     val updatedContact = data.existingContact.copy(
+                        name = if (data.name.isNotBlank()) data.name else data.existingContact.name,
+                        company = finalCompany ?: data.existingContact.company,
+                        email = if (data.email.isNotBlank()) data.email else data.existingContact.email,
                         lastCallAt = now,
                         lastOutcome = data.outcome,
                         isHotBox = data.isHotBox,
@@ -1268,7 +1361,7 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                         id = newId,
                         name = data.name,
                         phone = data.phone,
-                        company = data.company.takeIf { it.isNotBlank() },
+                        company = finalCompany,
                         email = data.email.takeIf { it.isNotBlank() },
                         lastCallAt = now,
                         lastOutcome = data.outcome,
@@ -1731,27 +1824,24 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                             return@forEach
                         }
                         
-                        // Extract any name/ID from the line
+                        // Extract any name / customer number from the line
                         // Remove the phone number from the line to see what's left.
-                        val remainingText = trimmedLine.replace(rawPhone, "")
-                            .split(Regex("[,;\t|]")) // split by typical delimiters
-                            .map { it.trim() }
-                            .filter { it.isNotEmpty() && !it.all { char -> char.isDigit() || char.isWhitespace() || char == '+' || char == '-' || char == '(' || char == ')' || char == '/' } }
+                        val remainingTextRaw = trimmedLine.replace(rawPhone, "").replace(Regex("[,;\t|]+"), " ").trim()
+                        val custNo = com.example.util.CustomerNumberExtractor.extractCustomerNumber(remainingTextRaw)
                         
-                        // Let's form a nice name from the remaining parts
-                        val parsedName = if (remainingText.isNotEmpty()) {
-                            remainingText.joinToString(" ").trim()
+                        val parsedName = if (remainingTextRaw.isNotEmpty()) {
+                            remainingTextRaw
                         } else {
-                            // If nothing useful remains, check if there's any non-phone text in the line
-                            val fallback = trimmedLine.replace(rawPhone, "").replace(Regex("[,;\t|]"), " ").trim()
-                            if (fallback.isNotEmpty()) fallback else "Lead $normalized"
+                            "Lead $normalized"
                         }
+                        
+                        val companyField = if (!custNo.isNullOrBlank()) "Kd.-Nr: $custNo" else null
                         
                         val newContact = ContactEntity(
                             id = UUID.randomUUID().toString(),
                             name = parsedName,
                             phone = normalized,
-                            company = null,
+                            company = companyField,
                             email = null,
                             lastCallAt = null,
                             lastOutcome = null,

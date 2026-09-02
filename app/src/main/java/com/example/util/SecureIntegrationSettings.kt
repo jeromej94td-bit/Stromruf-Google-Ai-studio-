@@ -49,6 +49,22 @@ class SecureIntegrationSettings(context: Context) {
         prefs = p!!
     }
 
+    fun saveGeminiKey(key: String) {
+        prefs.edit().putString("gemini_api_key", key.trim()).apply()
+    }
+
+    fun getGeminiKey(): String? {
+        val custom = prefs.getString("gemini_api_key", null)?.takeIf { it.isNotBlank() }
+        if (!custom.isNullOrBlank()) return custom
+        // Fallback to BuildConfig injected from Secrets
+        val buildKey = runCatching { com.example.BuildConfig.GEMINI_API_KEY }.getOrNull()
+        return if (!buildKey.isNullOrBlank() && buildKey != "MY_GEMINI_API_KEY") buildKey else null
+    }
+
+    fun clearGeminiKey() {
+        prefs.edit().remove("gemini_api_key").apply()
+    }
+
     fun saveOpenAiKey(key: String) {
         prefs.edit().putString("openai_api_key", key.trim()).apply()
     }

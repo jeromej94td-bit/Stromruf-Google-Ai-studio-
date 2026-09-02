@@ -70,12 +70,12 @@ private val Industrial = ThemeStyleConfig(
     auraColor = Steel_Aura, onAccent = Color(0xFF0A1826)
 )
 
-fun getThemeStyleConfig(style: String): ThemeStyleConfig = when (style) {
-    "gold_luxury"      -> GoldLux
-    "cyber_voltage"    -> CyberVolt
-    "rose_metal"       -> RoseMetal
-    "industrial_steel" -> Industrial
-    else               -> Platinum   // "platinum_metal" + Fallback
+fun getThemeStyleConfig(style: String): ThemeStyleConfig = when (style.lowercase()) {
+    "gold_luxury", "gold", "gold_lux" -> GoldLux
+    "cyber_voltage", "cyber", "cyber_dark", "matrix", "emerald" -> CyberVolt
+    "rose_metal", "rose", "rose_gold" -> RoseMetal
+    "industrial_steel", "steel", "industrial", "blue" -> Industrial
+    else -> Platinum   // "platinum_metal", "platinum", "platin" + Fallback
 }
 
 val LocalThemeConfig = staticCompositionLocalOf { Platinum }

@@ -1,11 +1,5 @@
 package com.example.ui.screens
 
-import android.content.Context
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
-import android.widget.Toast
-
-
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.example.util.FileTextExtractor
@@ -62,7 +56,7 @@ fun AgentCallScreen(
     modifier: Modifier = Modifier,
     viewModel: com.example.viewmodel.StromrufViewModel? = null
 ) {
-    val tabs = listOf("Agenten", "Own-Calls", "Live", "KI-Assistent", "Anrufe", "Kampagnen", "Wissen", "Setup")
+    val tabs = listOf("Agenten", "Smart Calls", "Live", "KI-Assistent", "Anrufe", "Kampagnen", "Wissen", "Setup")
     var tab by remember { mutableStateOf(0) }
     val sessions by AgentRuntime.sessions.collectAsState()
     val aktive = sessions.count { it.status.collectAsState().value.aktiv }
@@ -89,7 +83,7 @@ fun AgentCallScreen(
         }
         when (tab) {
             0 -> AgentenTab()
-            1 -> OwnCallsTab()
+            1 -> SmartCallsTab()
             2 -> LiveTab()
             3 -> {
                 if (viewModel != null) {
@@ -109,115 +103,6 @@ fun AgentCallScreen(
 }
 
 // ============================================================================
-// ============================================================================
-// TAB: OWN-CALLS
-// ============================================================================
-
-@Composable
-private fun OwnCallsTab() {
-    val ctx = LocalContext.current
-    val prefs = ctx.getSharedPreferences("own_sip_prefs", Context.MODE_PRIVATE)
-    
-    var sipDisplayName by remember { mutableStateOf(prefs.getString("sipDisplayName", "") ?: "") }
-    var sipUser by remember { mutableStateOf(prefs.getString("sipUser", "") ?: "") }
-    var sipPassword by remember { mutableStateOf(prefs.getString("sipPassword", "") ?: "") }
-    var sipDomain by remember { mutableStateOf(prefs.getString("sipDomain", "") ?: "") }
-    
-    var recordCalls by remember { mutableStateOf(prefs.getBoolean("recordCalls", true)) }
-    
-    var numberToDial by remember { mutableStateOf("") }
-    var activeOwnCallNumber by remember { mutableStateOf<String?>(null) }
-    var ownCallDuration by remember { mutableStateOf(0L) }
-    
-    androidx.compose.runtime.LaunchedEffect(activeOwnCallNumber) {
-        if (activeOwnCallNumber != null) {
-            ownCallDuration = 0L
-            while(true) {
-                kotlinx.coroutines.delay(1000)
-                ownCallDuration++
-            }
-        }
-    }
-    
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)) {
-        Abschnitt("Dein EIGENER SIP-Trunk (Für manuelle Anrufe)") {
-            Feld("Anzeigename", sipDisplayName) { sipDisplayName = it; prefs.edit().putString("sipDisplayName", it).apply() }
-            Feld("SIP-Benutzer", sipUser) { sipUser = it; prefs.edit().putString("sipUser", it).apply() }
-            Feld("SIP-Passwort", sipPassword, passwort = true) { sipPassword = it; prefs.edit().putString("sipPassword", it).apply() }
-            Feld("Domain (z.B. sip.anbieter.de)", sipDomain) { sipDomain = it; prefs.edit().putString("sipDomain", it).apply() }
-            
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                Switch(checked = recordCalls, onCheckedChange = { recordCalls = it; prefs.edit().putBoolean("recordCalls", it).apply() }, colors = SwitchDefaults.colors(checkedTrackColor = ThemeAccent))
-                Spacer(Modifier.width(8.dp))
-                Text("Gespräche aufzeichnen", color = Color.White, fontSize = 13.sp)
-            }
-        }
-        
-        Spacer(Modifier.height(16.dp))
-        
-        Abschnitt("Wählen") {
-            OutlinedTextField(
-                value = numberToDial,
-                onValueChange = { numberToDial = it },
-                label = { Text("Rufnummer") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = {
-                    if (sipUser.isNotBlank() && sipDomain.isNotBlank() && numberToDial.isNotBlank()) {
-                        Toast.makeText(ctx, "Wähle $numberToDial über SIP...", Toast.LENGTH_SHORT).show()
-                        if (recordCalls) {
-                            Toast.makeText(ctx, "Gespräch wird aufgezeichnet ⏺️", Toast.LENGTH_SHORT).show()
-                        }
-                        activeOwnCallNumber = numberToDial
-                    } else {
-                        Toast.makeText(ctx, "Bitte SIP-Benutzer, Domain und Rufnummer eingeben", Toast.LENGTH_SHORT).show()
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = ThemeAccent)
-            ) {
-                Text("Anrufen", color = Color.White)
-            }
-        }
-    }
-    
-    if (activeOwnCallNumber != null) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = {},
-            title = { androidx.compose.material3.Text("Eigener SIP Anruf", color = Color.White) },
-            text = { 
-                Column {
-                    androidx.compose.material3.Text("Aktiver Anruf mit: $activeOwnCallNumber", color = Color.White)
-                    Spacer(Modifier.height(8.dp))
-                    androidx.compose.material3.Text("Dauer: ${ownCallDuration}s", color = Color.Gray)
-                    if (recordCalls) {
-                        Spacer(Modifier.height(8.dp))
-                        androidx.compose.material3.Text("⏺️ Aufzeichnung läuft", color = Color.Red, androidx.compose.ui.text.font.FontWeight.Bold)
-                    }
-                }
-            },
-            confirmButton = {
-                androidx.compose.material3.Button(
-                    onClick = {
-                        Toast.makeText(ctx, "Anruf beendet.", Toast.LENGTH_SHORT).show()
-                        if (recordCalls) {
-                            Toast.makeText(ctx, "Aufzeichnung gespeichert.", Toast.LENGTH_SHORT).show()
-                        }
-                        activeOwnCallNumber = null
-                    },
-                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = Color.Red)
-                ) {
-                    androidx.compose.material3.Text("Auflegen", color = Color.White)
-                }
-            },
-            containerColor = Color(0xFF1E293B)
-        )
-    }
-}
-
 // TAB 1: LIVE
 // ============================================================================
 @Composable
@@ -313,11 +198,7 @@ private fun LiveKarte(s: AgentSession) {
             }
         }
     }
-    
-                }
-            ,
-            containerColor = Color(0xFF1E293B)
-        )
+}
 
 // ============================================================================
 // TAB 2: AGENTEN (Verwaltung + Vorschau + Gerätetest + Anrufen)
@@ -371,10 +252,7 @@ private fun AgentenTab() {
             }
         }
     }
-    
-            },
-            containerColor = Color(0xFF1E293B)
-        )
+}
 
 @Composable
 private fun AgentenProfilListe(
@@ -581,14 +459,13 @@ private fun AgentenProfilListe(
             },
             dismissButton = { TextButton({ anrufDialog = null }) { Text("Abbrechen", color = Color.Gray) } })
     }
+}
 
 private fun richtungLabel(d: String) = when (d) {
     "eingehend" -> "nur eingehend"; "ausgehend" -> "nur ausgehend"; else -> "ein- & ausgehend"
 }
 
 // ---------------- Agenten-Editor mit Stimmen-Vorschau ----------------
-
-}
 @Composable
 private fun AgentEditorDialog(
     start: AgentProfile, onSchliessen: () -> Unit, onSpeichern: (AgentProfile) -> Unit
@@ -831,11 +708,7 @@ private fun AgentEditorDialog(
             }
         }
     }
-    
-                }
-            ,
-            containerColor = Color(0xFF1E293B)
-        )
+}
 
 // ============================================================================
 // TAB 3: ANRUFE (Verlauf, Aufnahme, Transkript, CRM-Aktionen, Löschung)
@@ -870,9 +743,8 @@ private fun AnrufeTab() {
         }
         item { Spacer(Modifier.height(30.dp)) }
     }
-
-
 }
+
 @Composable
 private fun VerlaufKarte(s: CallSessionRow, onGeloescht: () -> Unit) {
     val ctx = LocalContext.current
@@ -967,11 +839,7 @@ private fun VerlaufKarte(s: CallSessionRow, onGeloescht: () -> Unit) {
             }
         }
     }
-    
-                }
-            ,
-            containerColor = Color(0xFF1E293B)
-        )
+}
 
 @Composable
 private fun AktionenBlock(sessionId: String) {
@@ -1025,10 +893,7 @@ private fun AktionenBlock(sessionId: String) {
             }
         }
     }
-    
-            },
-            containerColor = Color(0xFF1E293B)
-        )
+}
 
 @Composable
 private fun AktionsZeile(a: AgentAction, onAktion: (String) -> Unit) {
@@ -1058,12 +923,11 @@ private fun AktionsZeile(a: AgentAction, onAktion: (String) -> Unit) {
         a.error?.let { Text("Fehler: $it", fontSize = 11.sp, color = Rot,
             modifier = Modifier.padding(start = 13.dp)) }
     }
+}
 
 // ============================================================================
 // TAB 4: KAMPAGNEN (Hotbox-Listen durch Agenten anrufen lassen)
 // ============================================================================
-
-}
 @Composable
 private fun KampagnenTab() {
     val ctx = LocalContext.current
@@ -1620,4 +1484,3 @@ private fun <T> ChipReihe(optionen: List<Pair<T, String>>, wert: T, onWahl: (T) 
         }
     }
 }
-
