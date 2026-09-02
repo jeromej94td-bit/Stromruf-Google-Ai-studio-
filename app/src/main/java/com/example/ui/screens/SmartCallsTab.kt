@@ -36,6 +36,8 @@ import androidx.compose.ui.unit.sp
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.example.recording.RecordingStorageManager
+import com.example.agent.AgentBackend
+import com.example.agent.SmartCallNote
 import com.example.sip.NativeSipClient
 import com.example.sip.SipAccountConfig
 import com.example.sip.SipState
@@ -113,6 +115,11 @@ fun SmartCallsTab() {
     var isExportingAll by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
+    // Summary-only Smart Calls memory in the Stromruf Supabase project
+    var smartCallNotes by remember { mutableStateOf<List<SmartCallNote>>(emptyList()) }
+    var isLoadingSmartCallNotes by remember { mutableStateOf(false) }
+    var recordingDurations by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+
     // Gemini Audio Transcription Engine & Cache
     val transcriber = remember { GeminiAudioTranscriber(ctx) }
     val transcriptCache = remember { TranscriptionCache(ctx) }
@@ -121,6 +128,27 @@ fun SmartCallsTab() {
     var activeTranscriptResult by remember { mutableStateOf<TranscriptionResult?>(null) }
     var showApiKeyDialog by remember { mutableStateOf(false) }
     var pendingFileToTranscribe by remember { mutableStateOf<File?>(null) }
+
+    fun reloadSmartCallNotes() {
+        coroutineScope.launch {
+            isLoadingSmartCallNotes = true
+            try {
+                smartCallNotes = AgentBackend.fetchSmartCallNotes(ctx, limit = 50)
+            } finally {
+                isLoadingSmartCallNotes = false
+            }
+        }
+    }
+
+    fun phoneForRecording(file: File): String {
+        val fromName = file.nameWithoutExtension
+            .removePrefix("Call_")
+            .substringBeforeLast("_")
+            .trim()
+        return fromName
+            .takeIf { it.isNotBlank() && !it.equals("Unknown", ignoreCase = true) }
+            ?: targetNumber.trim().ifBlank { "Unbekannt" }
+    }
 
     fun reloadTranscripts() {
         cachedTranscripts = transcriptCache.getAll().associateBy { it.fileName }
@@ -135,7 +163,10 @@ fun SmartCallsTab() {
 
         coroutineScope.launch {
             transcribingFiles = transcribingFiles + file.name
-            val res = transcriber.transcribeAndSummarize(file)
+            val res = transcriber.transcribeAndSummarize(
+                file,
+                fallbackDurationSeconds = recordingDurations[file.name] ?: 0L
+            )
             transcribingFiles = transcribingFiles - file.name
 
             if (res.isSuccess) {
@@ -143,7 +174,37 @@ fun SmartCallsTab() {
                 reloadTranscripts()
                 if (result != null) {
                     activeTranscriptResult = result
-                    Toast.makeText(ctx, "Transkription & Notiz erfolgreich erstellt! ✨", Toast.LENGTH_SHORT).show()
+
+                    val durationSeconds = maxOf(
+                        result.estimatedDurationSeconds,
+                        recordingDurations[file.name] ?: 0L
+                    )
+                    val remoteMessage = if (durationSeconds > 60L) {
+                        val saved = AgentBackend.saveSmartCallNote(
+                            context = ctx,
+                            phone = phoneForRecording(file),
+                            contactId = null,
+                            contactName = null,
+                            callStartedAt = file.lastModified(),
+                            durationSeconds = durationSeconds,
+                            summary = result.summary,
+                            sourceFileName = file.name
+                        )
+                        if (saved) {
+                            reloadSmartCallNotes()
+                            "Zusammenfassung in Supabase gespeichert."
+                        } else {
+                            "Lokal erstellt; Supabase-Speicherung fehlgeschlagen."
+                        }
+                    } else {
+                        "Lokal erstellt; nicht gespeichert (Gespräch höchstens 1 Minute)."
+                    }
+
+                    Toast.makeText(
+                        ctx,
+                        "Transkription & Notiz erfolgreich erstellt! ✨\n$remoteMessage",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             } else {
                 val err = res.exceptionOrNull()?.message ?: "Unbekannter Fehler"
@@ -220,11 +281,19 @@ fun SmartCallsTab() {
     LaunchedEffect(Unit) {
         refreshRecordings()
         reloadTranscripts()
+        reloadSmartCallNotes()
     }
 
     LaunchedEffect(lastRecordingFile) {
         refreshRecordings()
         reloadTranscripts()
+    }
+
+    LaunchedEffect(lastRecordingFile, callDuration) {
+        val file = lastRecordingFile
+        if (file != null && callDuration > 0) {
+            recordingDurations = recordingDurations + (file.name to callDuration.toLong())
+        }
     }
 
     DisposableEffect(Unit) {
@@ -1380,6 +1449,133 @@ fun SmartCallsTab() {
                                                 color = Color.White
                                             )
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // SUPABASE SMART CALL NOTES (summary only)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = SurfaceColor),
+            shape = RoundedCornerShape(16.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, CardBorder)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Gespeicherte Smart-Call-Notizen (${smartCallNotes.size})",
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            text = "Nur Zusammenfassungen über 1 Minute · kein Audio und kein Transkript in Supabase",
+                            fontSize = 11.sp,
+                            color = TextMuted
+                        )
+                    }
+                    IconButton(onClick = { reloadSmartCallNotes() }) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Smart-Call-Notizen aktualisieren",
+                            tint = TextMuted
+                        )
+                    }
+                }
+
+                when {
+                    isLoadingSmartCallNotes -> {
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = NeonCyan
+                            )
+                        }
+                    }
+                    smartCallNotes.isEmpty() -> {
+                        Text(
+                            text = "Noch keine passenden Smart-Call-Zusammenfassungen gespeichert.",
+                            fontSize = 12.sp,
+                            color = TextMuted
+                        )
+                    }
+                    else -> {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            smartCallNotes.forEach { note ->
+                                val minutes = note.durationSeconds / 60
+                                val seconds = note.durationSeconds % 60
+                                val duration = String.format(
+                                    Locale.GERMANY,
+                                    "%02d:%02d Min.",
+                                    minutes,
+                                    seconds
+                                )
+                                val date = SimpleDateFormat(
+                                    "dd.MM.yyyy HH:mm",
+                                    Locale.GERMANY
+                                ).format(Date(note.callStartedAt))
+                                val title = note.contactName?.takeIf { it.isNotBlank() }
+                                    ?: note.phone
+
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = Bg,
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        CardBorder
+                                    )
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = title,
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Medium,
+                                                fontSize = 13.sp,
+                                                maxLines = 1,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                text = duration,
+                                                color = NeonCyan,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                        Text(
+                                            text = "${note.phone} · $date",
+                                            color = TextMuted,
+                                            fontSize = 11.sp
+                                        )
+                                        Text(
+                                            text = note.summary,
+                                            color = Color.White.copy(alpha = 0.9f),
+                                            fontSize = 12.sp,
+                                            maxLines = 8
+                                        )
                                     }
                                 }
                             }
