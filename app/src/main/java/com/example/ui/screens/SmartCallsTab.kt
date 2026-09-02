@@ -45,8 +45,10 @@ import com.example.sip.SipTransportProtocol
 import com.example.transcription.GeminiAudioTranscriber
 import com.example.transcription.TranscriptionCache
 import com.example.transcription.TranscriptionResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -148,6 +150,40 @@ fun SmartCallsTab() {
         return fromName
             .takeIf { it.isNotBlank() && !it.equals("Unknown", ignoreCase = true) }
             ?: targetNumber.trim().ifBlank { "Unbekannt" }
+    }
+
+    fun syncCachedNotesToSupabase() {
+        val filesByName = recordingsList.associateBy { it.name }
+        val cached = cachedTranscripts.values.toList()
+        if (cached.isEmpty()) return
+
+        coroutineScope.launch {
+            withContext(Dispatchers.IO) {
+                cached.forEach { result ->
+                    val file = filesByName[result.fileName] ?: return@forEach
+                    val durationSeconds = maxOf(
+                        result.estimatedDurationSeconds,
+                        transcriber.estimateDurationSeconds(
+                            file,
+                            recordingDurations[file.name] ?: 0L
+                        )
+                    )
+                    if (durationSeconds > 60L) {
+                        AgentBackend.saveSmartCallNote(
+                            context = ctx,
+                            phone = phoneForRecording(file),
+                            contactId = null,
+                            contactName = null,
+                            callStartedAt = file.lastModified(),
+                            durationSeconds = durationSeconds,
+                            summary = result.summary,
+                            sourceFileName = file.name
+                        )
+                    }
+                }
+            }
+            reloadSmartCallNotes()
+        }
     }
 
     fun reloadTranscripts() {
@@ -281,6 +317,7 @@ fun SmartCallsTab() {
     LaunchedEffect(Unit) {
         refreshRecordings()
         reloadTranscripts()
+        syncCachedNotesToSupabase()
         reloadSmartCallNotes()
     }
 
