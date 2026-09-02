@@ -263,59 +263,16 @@ class NativeSipClient(private val context: Context) {
     }
 
     private fun startSipKeepAlive(config: SipAccountConfig) {
-        sipKeepAliveJob?.cancel()
-        sipKeepAliveJob = scope.launch(Dispatchers.IO) {
-            while (isActive &&
-                _state.value != SipState.DISCONNECTED &&
-                _state.value != SipState.ERROR
-            ) {
-                delay(SIP_KEEPALIVE_INTERVAL_MS)
-                if (!isActive ||
-                    _state.value == SipState.DISCONNECTED ||
-                    _state.value == SipState.ERROR
-                ) break
-                if (_state.value == SipState.CONNECTING) continue
-                runCatching {
-                    // Keep the TLS/TCP signaling transport alive with a valid SIP
-                    // request. Sending bare CRLF bytes made Easybell abort the
-                    // connection and surfaced as "Software caused connection abort".
-                    if (config.protocol != SipTransportProtocol.UDP) {
-                        sendSipOptionsKeepAlive(config)
-                    }
-                }.onFailure { error ->
-                    Log.w(tag, "SIP OPTIONS keepalive failed", error)
-                }
-            }
-        }
-    }
-
-    private fun sendSipOptionsKeepAlive(config: SipAccountConfig) {
-        if (config.protocol == SipTransportProtocol.UDP) return
-
-        val transport = config.protocol.name
-        val user = config.sipUser
-        val domain = config.sipRegistrar
-        val optionsCseq = sipKeepAliveCseq++
-        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
-
-        val sb = StringBuilder()
-        sb.append("OPTIONS sip:$domain SIP/2.0\r\n")
-        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
-        sb.append("Max-Forwards: 70\r\n")
-        sb.append("From: <sip:$user@$domain>;tag=$fromTag\r\n")
-        sb.append("To: <sip:$domain>\r\n")
-        sb.append("Call-ID: $sipKeepAliveCallId@$localIp\r\n")
-        sb.append("CSeq: $optionsCseq OPTIONS\r\n")
-        sb.append("User-Agent: SmartCalls/1.2.0 Android\r\n")
-        sb.append("Accept: application/sdp\r\n")
-        sb.append("Content-Length: 0\r\n\r\n")
-        sendSipMessage(sb.toString(), config)
-    }
-    private fun stopSipKeepAlive() {
+        // Do not inject bare CRLF or out-of-dialog OPTIONS into Easybell's
+        // active TLS dialog. The media path is kept alive by RTP packets.
         sipKeepAliveJob?.cancel()
         sipKeepAliveJob = null
     }
 
+    private fun stopSipKeepAlive() {
+        sipKeepAliveJob?.cancel()
+        sipKeepAliveJob = null
+    }
     private fun listenForMessages(config: SipAccountConfig) {
         val buffer = ByteArray(8192)
         while (scope.isActive && _state.value != SipState.DISCONNECTED) {
@@ -449,8 +406,6 @@ class NativeSipClient(private val context: Context) {
                                 Log.e(tag, "200 OK contained no supported RTP audio SDP")
                             }
 
-                            updateSessionTimer(message)
-                            startSessionRefresh(config)
                             startInCallTimer()
                             startCallRecording()
                         }
@@ -459,10 +414,8 @@ class NativeSipClient(private val context: Context) {
                         // Answer it and ACK our own refresh responses so the call stays up.
                         method == "INVITE" && _state.value == SipState.IN_CALL -> {
                             extractDialogInfo(message)
-                            updateSessionTimer(message)
                             val responseCseq = extractCSeqNumber(message) ?: cseq
                             sendAck(config, responseCseq)
-                            startSessionRefresh(config)
                         }
                     }
                 }
@@ -714,8 +667,8 @@ class NativeSipClient(private val context: Context) {
         sb.append("CSeq: $refreshCseq INVITE\r\n")
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         routeSet.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("Supported: timer\r\n")
-        sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
+
+
         sb.append("Content-Type: application/sdp\r\n")
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
         if (authHeader != null) {
@@ -755,8 +708,8 @@ class NativeSipClient(private val context: Context) {
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         sb.append("Content-Type: application/sdp\r\n")
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
-        sb.append("Supported: timer\r\n")
-        sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
+
+
         if (authHeader != null) {
             sb.append("$authHeaderName: $authHeader\r\n")
         }
@@ -1042,10 +995,8 @@ class NativeSipClient(private val context: Context) {
         }
         sb.append("Contact: <sip:${config.sipUser}@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         sb.append("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, UPDATE\r\n")
-        sb.append("Supported: timer\r\n")
-        val requestSession = parseSessionExpiresSeconds(request)
-            ?: sessionExpiresSeconds
-        sb.append("Session-Expires: $requestSession;refresher=uac\r\n")
+
+
         sb.append("Content-Type: application/sdp\r\n")
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)

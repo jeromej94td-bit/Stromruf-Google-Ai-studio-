@@ -395,6 +395,17 @@ fun SmartCallsTab() {
         sipClient.register(config)
     }
 
+    // Automatically connect when the Smart Calls 2 tab is opened.
+    // Credentials are already stored locally by saveConfig().
+    LaunchedEffect(Unit) {
+        if (sipUser.isNotBlank() &&
+            sipPassword.isNotBlank() &&
+            sipRegistrar.isNotBlank()
+        ) {
+            connect()
+        }
+    }
+
     fun playRecording(file: File) {
         try {
             if (currentlyPlayingPath == file.absolutePath && mediaPlayer?.isPlaying == true) {
