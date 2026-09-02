@@ -777,8 +777,8 @@ class NativeSipClient(private val context: Context) {
         sb.append("CSeq: $refreshCseq INVITE\r\n")
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         routeSet.forEach { route -> sb.append("Route: $route\r\n") }
-
-
+        sb.append("Supported: timer\r\n")
+        sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
         if (authHeader != null) {
@@ -816,6 +816,8 @@ class NativeSipClient(private val context: Context) {
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq INVITE\r\n")
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
+        sb.append("Supported: timer\r\n")
+        sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
 
@@ -1137,8 +1139,9 @@ class NativeSipClient(private val context: Context) {
         }
         sb.append("Contact: <sip:${config.sipUser}@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         sb.append("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, UPDATE\r\n")
-
-
+        sb.append("Supported: timer\r\n")
+        val requestSession = parseSessionExpiresSeconds(request) ?: sessionExpiresSeconds
+        sb.append("Session-Expires: $requestSession;refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
         sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
