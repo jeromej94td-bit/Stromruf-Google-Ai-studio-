@@ -98,6 +98,8 @@ class NativeSipClient(private val context: Context) {
     private var remoteToHeader: String? = null
     private var routeSet: List<String> = emptyList()
     @Volatile private var lastUdpSender: InetSocketAddress? = null
+    private var sipKeepAliveCallId = UUID.randomUUID().toString()
+    private var sipKeepAliveCseq = 1
 
     // RTP media state. SIP only establishes the call; these sockets carry the audio.
     private enum class G711Codec { PCMA, PCMU }
@@ -178,6 +180,8 @@ class NativeSipClient(private val context: Context) {
     fun register(config: SipAccountConfig) {
         disconnect()
         currentConfig = config
+        sipKeepAliveCallId = UUID.randomUUID().toString()
+        sipKeepAliveCseq = 1
         _state.value = SipState.CONNECTING
         _statusText.value = "Verbinde über ${config.protocol.name} zu ${config.sipRegistrar}:${config.port}..."
 
@@ -270,19 +274,43 @@ class NativeSipClient(private val context: Context) {
                     _state.value == SipState.DISCONNECTED ||
                     _state.value == SipState.ERROR
                 ) break
+                if (_state.value == SipState.CONNECTING) continue
                 runCatching {
-                    // Double CRLF is the SIP outbound keepalive. It keeps the
-                    // TLS/TCP flow and the NAT binding alive without a new call.
+                    // Keep the TLS/TCP signaling transport alive with a valid SIP
+                    // request. Sending bare CRLF bytes made Easybell abort the
+                    // connection and surfaced as "Software caused connection abort".
                     if (config.protocol != SipTransportProtocol.UDP) {
-                        sendSipMessage("\r\n\r\n", config)
+                        sendSipOptionsKeepAlive(config)
                     }
                 }.onFailure { error ->
-                    Log.w(tag, "SIP keepalive failed", error)
+                    Log.w(tag, "SIP OPTIONS keepalive failed", error)
                 }
             }
         }
     }
 
+    private fun sendSipOptionsKeepAlive(config: SipAccountConfig) {
+        if (config.protocol == SipTransportProtocol.UDP) return
+
+        val transport = config.protocol.name
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+        val optionsCseq = sipKeepAliveCseq++
+        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
+
+        val sb = StringBuilder()
+        sb.append("OPTIONS sip:$domain SIP/2.0\r\n")
+        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append("To: <sip:$domain>\r\n")
+        sb.append("Call-ID: $sipKeepAliveCallId@$localIp\r\n")
+        sb.append("CSeq: $optionsCseq OPTIONS\r\n")
+        sb.append("User-Agent: SmartCalls/1.2.0 Android\r\n")
+        sb.append("Accept: application/sdp\r\n")
+        sb.append("Content-Length: 0\r\n\r\n")
+        sendSipMessage(sb.toString(), config)
+    }
     private fun stopSipKeepAlive() {
         sipKeepAliveJob?.cancel()
         sipKeepAliveJob = null
@@ -368,6 +396,13 @@ class NativeSipClient(private val context: Context) {
         if (firstLine.startsWith("SIP/2.0", ignoreCase = true)) {
             val statusCode = firstLine.split(Regex("\\s+")).getOrNull(1)?.toIntOrNull() ?: return
             val method = extractCSeqMethod(message)
+
+            // OPTIONS keepalive responses must never terminate an active call,
+            // even when the provider answers with 4xx/5xx.
+            if (method == "OPTIONS") {
+                Log.d(tag, "SIP OPTIONS keepalive response: $statusCode")
+                return
+            }
 
             when (statusCode) {
                 100 -> {
