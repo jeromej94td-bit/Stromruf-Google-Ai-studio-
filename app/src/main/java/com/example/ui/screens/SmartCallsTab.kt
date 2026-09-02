@@ -296,6 +296,20 @@ fun SmartCallsTab() {
         }
     }
 
+    LaunchedEffect(isRecording) {
+        if (!isRecording) {
+            val finishedFile = lastRecordingFile
+            if (
+                finishedFile != null &&
+                callDuration > 60 &&
+                cachedTranscripts[finishedFile.name] == null &&
+                !transcribingFiles.contains(finishedFile.name)
+            ) {
+                startTranscription(finishedFile)
+            }
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             sipClient.disconnect()
@@ -1188,7 +1202,7 @@ fun SmartCallsTab() {
                             fontSize = 15.sp
                         )
                         Text(
-                            text = "Mit 1 Klick transkribieren & Zusammenfassung erstellen",
+                            text = "Ab 1 Minute automatisch mit Gemini zusammenfassen & speichern",
                             fontSize = 11.sp,
                             color = TextMuted
                         )
