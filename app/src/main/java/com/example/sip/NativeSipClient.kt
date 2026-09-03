@@ -248,11 +248,16 @@ class NativeSipClient(private val context: Context) {
         }
 
         private fun buildPacketIv(ssrc: Long, packetIndex: Long): ByteArray {
+            // RFC 3711 §4.1.1:
             // IV = (k_s * 2^16) XOR (SSRC * 2^64) XOR (i * 2^16)
+            //
+            // The session salt is already the 112-bit k_s value. The SSRC and
+            // packet index must be XORed into that value; overwriting those
+            // bytes drops the salt bits and produces invalid SRTP packets.
             val iv = ByteArray(16)
             saltingKey.copyInto(iv, 0)
-            putUInt32(iv, 4, ssrc)
-            putUInt48(iv, 8, packetIndex)
+            xorUInt32(iv, 4, ssrc)
+            xorUInt48(iv, 8, packetIndex)
             return iv
         }
 
@@ -305,17 +310,23 @@ class NativeSipClient(private val context: Context) {
                     ((packet[offset + 2].toLong() and 0xffL) shl 8) or
                     (packet[offset + 3].toLong() and 0xffL)
 
-            private fun putUInt32(packet: ByteArray, offset: Int, value: Long) {
-                packet[offset] = ((value ushr 24) and 0xffL).toByte()
-                packet[offset + 1] = ((value ushr 16) and 0xffL).toByte()
-                packet[offset + 2] = ((value ushr 8) and 0xffL).toByte()
-                packet[offset + 3] = (value and 0xffL).toByte()
+            private fun xorUInt32(packet: ByteArray, offset: Int, value: Long) {
+                for (i in 0 until 4) {
+                    val shift = 24 - i * 8
+                    packet[offset + i] = (
+                        packet[offset + i].toInt() xor
+                            (((value ushr shift) and 0xffL).toInt())
+                        ).toByte()
+                }
             }
 
-            private fun putUInt48(packet: ByteArray, offset: Int, value: Long) {
+            private fun xorUInt48(packet: ByteArray, offset: Int, value: Long) {
                 for (i in 0 until 6) {
-                    packet[offset + i] =
-                        ((value ushr (40 - i * 8)) and 0xffL).toByte()
+                    val shift = 40 - i * 8
+                    packet[offset + i] = (
+                        packet[offset + i].toInt() xor
+                            (((value ushr shift) and 0xffL).toInt())
+                        ).toByte()
                 }
             }
         }
