@@ -13,11 +13,91 @@ import kotlinx.coroutines.delay
 class DialerInCallService : InCallService() {
     private var windowManager: android.view.WindowManager? = null
     private var floatingView: android.view.View? = null
+    private var proximityWakeLock: android.os.PowerManager.WakeLock? = null
+    private var callWakeLock: android.os.PowerManager.WakeLock? = null
+
+    private fun acquireProximityWakeLock() {
+        try {
+            if (proximityWakeLock == null) {
+                val pm = getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+                if (pm != null && pm.isWakeLockLevelSupported(android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
+                    proximityWakeLock = pm.newWakeLock(
+                        android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
+                        "Stromruf:InCallProximity"
+                    )
+                }
+            }
+            if (proximityWakeLock?.isHeld == false) {
+                proximityWakeLock?.acquire()
+                Log.d("DialerInCallService", "Proximity screen-off wake lock acquired")
+            }
+        } catch (e: Exception) {
+            Log.e("DialerInCallService", "Error acquiring proximity wake lock: ${e.localizedMessage}")
+        }
+    }
+
+    private fun releaseProximityWakeLock() {
+        try {
+            if (proximityWakeLock?.isHeld == true) {
+                proximityWakeLock?.release()
+                Log.d("DialerInCallService", "Proximity screen-off wake lock released")
+            }
+        } catch (e: Exception) {
+            Log.e("DialerInCallService", "Error releasing proximity wake lock: ${e.localizedMessage}")
+        }
+    }
+
+    private fun updateProximitySensorState() {
+        val state = activeCallState.value
+        val isCallActive = (state == Call.STATE_ACTIVE || state == Call.STATE_DIALING || state == Call.STATE_CONNECTING || state == Call.STATE_RINGING)
+        
+        val currentRoute = try {
+            getCallAudioState()?.route
+        } catch (e: Exception) {
+            null
+        } ?: currentAudioState.value?.route
+        
+        val isEarpiece = (currentRoute == null || currentRoute == android.telecom.CallAudioState.ROUTE_EARPIECE)
+        
+        if (isCallActive && isEarpiece) {
+            acquireProximityWakeLock()
+        } else {
+            releaseProximityWakeLock()
+        }
+    }
+
+    private fun acquireCallWakeLock() {
+        try {
+            if (callWakeLock == null) {
+                val pm = getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+                callWakeLock = pm?.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                    "Stromruf:InCallCpuLock"
+                )
+            }
+            if (callWakeLock?.isHeld == false) {
+                callWakeLock?.acquire(2 * 60 * 60 * 1000L) // 2 hours max
+                Log.d("DialerInCallService", "Call CPU wake lock acquired")
+            }
+        } catch (e: Exception) {
+            Log.e("DialerInCallService", "Error acquiring call wake lock: ${e.localizedMessage}")
+        }
+    }
+
+    private fun releaseCallWakeLock() {
+        try {
+            if (callWakeLock?.isHeld == true) {
+                callWakeLock?.release()
+                Log.d("DialerInCallService", "Call CPU wake lock released")
+            }
+        } catch (e: Exception) {}
+    }
 
     override fun onCallAudioStateChanged(audioState: android.telecom.CallAudioState?) {
         super.onCallAudioStateChanged(audioState)
         Log.d("DialerInCallService", "Audio state changed: $audioState")
         currentAudioState.value = audioState
+        updateProximitySensorState()
     }
 
     private val callCallback = object : Call.Callback() {
@@ -33,14 +113,19 @@ class DialerInCallService : InCallService() {
             }
             if (state == Call.STATE_ACTIVE) {
                 wasRinging = false
+                acquireCallWakeLock()
                 optimizeAudioForCall(true)
                 startSpeechToText()
                 // Apply the preferred audio route once on transition to active state.
                 // Avoid delayed looped overrides to prevent audio routing fight loops with PC Smartphone-Link or Bluetooth.
                 applyPreferredAudioRoute()
             }
+            updateProximitySensorState()
             if (state == Call.STATE_DISCONNECTED) {
-                Log.d("DialerInCallService", "Call disconnected")
+                val cause = call?.details?.disconnectCause
+                Log.d("DialerInCallService", "Call disconnected: reason=${cause?.reason}, description=${cause?.description}, code=${cause?.code}")
+                releaseProximityWakeLock()
+                releaseCallWakeLock()
                 cancelOngoingCallNotification()
                 if (wasRinging && !userDeclined) {
                     showMissedCallNotification(activeCallNumber.value, activeCallName.value)
@@ -323,6 +408,9 @@ class DialerInCallService : InCallService() {
             showOngoingCallNotification(activeCallNumber.value, activeCallName.value, state)
         }
 
+        acquireCallWakeLock()
+        updateProximitySensorState()
+
         // Start duration timer
         startTimer()
     }
@@ -330,6 +418,8 @@ class DialerInCallService : InCallService() {
     override fun onCallRemoved(call: Call?) {
         super.onCallRemoved(call)
         Log.d("DialerInCallService", "Call removed")
+        releaseProximityWakeLock()
+        releaseCallWakeLock()
         cancelOngoingCallNotification()
         if (wasRinging && !userDeclined) {
             showMissedCallNotification(activeCallNumber.value, activeCallName.value)
@@ -339,6 +429,8 @@ class DialerInCallService : InCallService() {
     }
 
     private fun resetCallState() {
+        releaseProximityWakeLock()
+        releaseCallWakeLock()
         saveTranscriptToDb(this)
         stopSpeechToText()
         activeCall.value = null
@@ -499,6 +591,8 @@ class DialerInCallService : InCallService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        releaseProximityWakeLock()
+        releaseCallWakeLock()
         instance = null
         removeBubble()
     }

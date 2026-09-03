@@ -781,18 +781,14 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         if (phone.isBlank()) return
         val normalized = normalizePhone(phone)
         
-        val shouldTrackActiveCall = isSimulationModeEnabled.value || isDefaultDialer.value
-
-        if (shouldTrackActiveCall) {
-            _activeCall.value = ActiveCall(
-                name = name ?: "",
-                phone = normalized,
-                contactId = contactId,
-                startTime = System.currentTimeMillis(),
-                callType = callType
-            )
-            initializeWrapUpForActiveCall(normalized, name)
-        }
+        _activeCall.value = ActiveCall(
+            name = name ?: "",
+            phone = normalized,
+            contactId = contactId,
+            startTime = System.currentTimeMillis(),
+            callType = callType
+        )
+        initializeWrapUpForActiveCall(normalized, name)
 
         // Clipboard copy when customer number is found or when in HotBox / Auto-Call / Dialer
         val matchingContact = if (contactId != null) {
@@ -883,17 +879,39 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             }
             
             val durationText = if (durationSeconds > 0) "Dauer: ${formatDuration(durationSeconds)}" else "Nicht erreicht"
-            val finalContactName = existing?.name ?: call.name?.takeIf { it.isNotBlank() } ?: "Anonym"
+            val currentWrap = _wrapUpData.value
+            val enteredCustNo = currentWrap.customerNumber.trim().takeIf { it.isNotBlank() }
+            val enteredName = currentWrap.name.trim().takeIf { it.isNotBlank() }
+            val enteredCompany = currentWrap.company.trim().takeIf { it.isNotBlank() } ?: (if (!enteredCustNo.isNullOrBlank()) "Kd.-Nr: $enteredCustNo" else null)
+            val finalContactName = enteredName ?: existing?.name ?: call.name?.takeIf { it.isNotBlank() && !it.all { c -> c.isDigit() || c == '+' || c == ' ' } } ?: (if (enteredCustNo != null) "Kunde $enteredCustNo" else "Kunde (${call.phone})")
             
-            // 1. Update existing contact's last call status
+            // 1. Update existing contact's last call status or save new contact
             if (existing != null) {
                 val updatedContact = existing.copy(
+                    name = enteredName ?: existing.name,
+                    company = enteredCompany ?: existing.company,
+                    email = if (currentWrap.email.isNotBlank()) currentWrap.email else existing.email,
                     lastCallAt = now,
-                    lastOutcome = finalOutcome
+                    lastOutcome = finalOutcome,
+                    isHotBox = true,
+                    hotBoxListName = existing.hotBoxListName ?: _selectedHotBoxListName.value.ifBlank { "Hotbox" }
                 )
                 repository.insertContact(updatedContact)
             } else {
-                showSaveNumberBubble(call.phone)
+                val newId = UUID.randomUUID().toString()
+                val newContact = ContactEntity(
+                    id = newId,
+                    name = finalContactName,
+                    phone = call.phone,
+                    company = enteredCompany,
+                    email = currentWrap.email.takeIf { it.isNotBlank() },
+                    lastCallAt = now,
+                    lastOutcome = finalOutcome,
+                    isHotBox = true,
+                    hotBoxListName = _selectedHotBoxListName.value.ifBlank { "Hotbox" },
+                    callReason = currentWrap.callReason
+                )
+                repository.insertContact(newContact)
             }
             
             // 2. Insert call log
@@ -1129,6 +1147,8 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                     company = enteredCompany ?: existing.company,
                     email = if (current.email.isNotBlank()) current.email else existing.email,
                     lastOutcome = userOutcome ?: existing.lastOutcome,
+                    isHotBox = true,
+                    hotBoxListName = existing.hotBoxListName ?: _selectedHotBoxListName.value.ifBlank { "Hotbox" },
                     callReason = userReason ?: existing.callReason
                 )
                 repository.insertContact(updated)
@@ -1141,6 +1161,8 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                     email = current.email.takeIf { it.isNotBlank() },
                     lastCallAt = System.currentTimeMillis(),
                     lastOutcome = userOutcome,
+                    isHotBox = true,
+                    hotBoxListName = _selectedHotBoxListName.value.ifBlank { "Hotbox" },
                     callReason = userReason
                 )
                 repository.insertContact(newContact)
@@ -1156,7 +1178,8 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         val currentWrapData = _wrapUpData.value
 
         viewModelScope.launch {
-            val normalized = normalizePhone(phone)
+            val rawPhone = if (phone.isNotBlank()) phone else currentWrapData.phone
+            val normalized = normalizePhone(rawPhone)
             val recentLogs = callLogs.value.filter { phoneNumbersMatch(it.phone, normalized) }
             val latestLog = recentLogs.maxByOrNull { it.timestamp }
             val effectiveDuration = if (durationSeconds > 0) {
@@ -1203,6 +1226,8 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                     email = if (currentWrapData.email.isNotBlank()) currentWrapData.email else existing.email,
                     lastCallAt = now,
                     lastOutcome = userOutcome,
+                    isHotBox = true,
+                    hotBoxListName = existing.hotBoxListName ?: _selectedHotBoxListName.value.ifBlank { "Hotbox" },
                     callReason = userReason ?: existing.callReason
                 )
                 repository.insertContact(updatedContact)
@@ -1217,7 +1242,8 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                     email = currentWrapData.email.takeIf { it.isNotBlank() },
                     lastCallAt = now,
                     lastOutcome = userOutcome,
-                    isHotBox = false,
+                    isHotBox = true,
+                    hotBoxListName = _selectedHotBoxListName.value.ifBlank { "Hotbox" },
                     callReason = userReason
                 )
                 repository.insertContact(newContact)
@@ -1400,8 +1426,10 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             data.name
         } else if (data.existingContact != null && data.existingContact.name.isNotBlank()) {
             data.existingContact.name
+        } else if (enteredCustNo != null) {
+            "Kunde $enteredCustNo"
         } else {
-            "Anonym (${data.phone})"
+            "Kunde (${data.phone})"
         }
 
         viewModelScope.launch {
@@ -1415,30 +1443,30 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                         email = if (data.email.isNotBlank()) data.email else data.existingContact.email,
                         lastCallAt = now,
                         lastOutcome = data.outcome,
-                        isHotBox = data.isHotBox,
-                        hotBoxListName = if (data.isHotBox) (data.existingContact.hotBoxListName ?: _selectedHotBoxListName.value) else null,
-                        hotBoxStartHour = if (data.isHotBox) data.hotBoxStartHour else null,
-                        hotBoxEndHour = if (data.isHotBox) data.hotBoxEndHour else null,
-                        hotBoxWeekdays = if (data.isHotBox) data.hotBoxWeekdays else null,
+                        isHotBox = true,
+                        hotBoxListName = data.existingContact.hotBoxListName ?: _selectedHotBoxListName.value.ifBlank { "Hotbox" },
+                        hotBoxStartHour = data.hotBoxStartHour,
+                        hotBoxEndHour = data.hotBoxEndHour,
+                        hotBoxWeekdays = data.hotBoxWeekdays,
                         callReason = data.callReason
                     )
                     repository.insertContact(updatedContact)
                     data.existingContact.id
-                } else if (data.saveContact && data.name.isNotBlank()) {
+                } else if (data.saveContact || data.name.isNotBlank() || data.customerNumber.isNotBlank()) {
                     val newId = UUID.randomUUID().toString()
                     val newContact = ContactEntity(
                         id = newId,
-                        name = data.name,
+                        name = finalContactName,
                         phone = data.phone,
                         company = finalCompany,
                         email = data.email.takeIf { it.isNotBlank() },
                         lastCallAt = now,
                         lastOutcome = data.outcome,
-                        isHotBox = data.isHotBox,
-                        hotBoxListName = if (data.isHotBox) _selectedHotBoxListName.value else null,
-                        hotBoxStartHour = if (data.isHotBox) data.hotBoxStartHour else null,
-                        hotBoxEndHour = if (data.isHotBox) data.hotBoxEndHour else null,
-                        hotBoxWeekdays = if (data.isHotBox) data.hotBoxWeekdays else null,
+                        isHotBox = true,
+                        hotBoxListName = _selectedHotBoxListName.value.ifBlank { "Hotbox" },
+                        hotBoxStartHour = data.hotBoxStartHour,
+                        hotBoxEndHour = data.hotBoxEndHour,
+                        hotBoxWeekdays = data.hotBoxWeekdays,
                         callReason = data.callReason
                     )
                     repository.insertContact(newContact)
@@ -1829,8 +1857,43 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         }
     }
 
+    fun isAnyCallActive(): Boolean {
+        if (_activeCall.value != null) return true
+        if (com.example.service.DialerInCallService.activeCall.value != null) return true
+        val activeState = com.example.service.DialerInCallService.activeCallState.value
+        if (activeState == android.telecom.Call.STATE_ACTIVE ||
+            activeState == android.telecom.Call.STATE_DIALING ||
+            activeState == android.telecom.Call.STATE_CONNECTING ||
+            activeState == android.telecom.Call.STATE_RINGING ||
+            activeState == android.telecom.Call.STATE_HOLDING) {
+            return true
+        }
+        try {
+            val ctx = repository.getContext()
+            val telecomManager = ctx.getSystemService(android.content.Context.TELECOM_SERVICE) as? android.telecom.TelecomManager
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                if (ctx.checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    if (telecomManager?.isInCall() == true || telecomManager?.isInManagedCall() == true) {
+                        return true
+                    }
+                }
+            }
+            val telephonyManager = ctx.getSystemService(android.content.Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
+            if (telephonyManager != null && telephonyManager.callState != android.telephony.TelephonyManager.CALL_STATE_IDLE) {
+                return true
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+        return false
+    }
+
     fun triggerNextAutoCall() {
         if (!isAutoCallActiveGlobal.value) return
+        if (isAnyCallActive()) {
+            android.util.Log.w("StromrufViewModel", "triggerNextAutoCall blocked: Call is currently active!")
+            return
+        }
         callRandomHotContact(
             onNoHotContacts = {
                 isAutoCallActiveGlobal.value = false
@@ -1858,24 +1921,33 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
 
     fun startAutoCallCountdown() {
         if (!isAutoCallActiveGlobal.value || isAutoCallPausedGlobal.value) return
-        if (com.example.service.DialerInCallService.activeCall.value != null) return
+        if (isAnyCallActive()) {
+            android.util.Log.d("StromrufViewModel", "startAutoCallCountdown blocked: Call is still active!")
+            return
+        }
         countdownJob?.cancel()
         countdownJob = viewModelScope.launch {
             val delaySecs = _autoCallDelaySeconds.value
             for (i in delaySecs downTo 1) {
-                _autoCallCountdown.value = i
-                delay(1000)
-                if (!isAutoCallActiveGlobal.value || isAutoCallPausedGlobal.value) {
+                if (isAnyCallActive() || !isAutoCallActiveGlobal.value || isAutoCallPausedGlobal.value) {
                     _autoCallCountdown.value = null
                     return@launch
                 }
+                _autoCallCountdown.value = i
+                delay(1000)
             }
             _autoCallCountdown.value = null
-            triggerNextAutoCall()
+            if (!isAnyCallActive() && isAutoCallActiveGlobal.value && !isAutoCallPausedGlobal.value) {
+                triggerNextAutoCall()
+            }
         }
     }
 
     fun skipCountdownAndCallNow() {
+        if (isAnyCallActive()) {
+            android.util.Log.w("StromrufViewModel", "skipCountdownAndCallNow blocked: Call is still active!")
+            return
+        }
         countdownJob?.cancel()
         _autoCallCountdown.value = null
         triggerNextAutoCall()
@@ -2361,23 +2433,33 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
 
     fun startPromisedThroughCallCountdown() {
         if (!isPromisedThroughCallActive.value) return
+        if (isAnyCallActive()) {
+            android.util.Log.d("StromrufViewModel", "startPromisedThroughCallCountdown blocked: Call is still active!")
+            return
+        }
         promisedCountdownJob?.cancel()
         promisedCountdownJob = viewModelScope.launch {
             for (i in 3 downTo 1) {
-                promisedThroughCallCountdown.value = i
-                kotlinx.coroutines.delay(1000)
-                if (!isPromisedThroughCallActive.value) {
+                if (isAnyCallActive() || !isPromisedThroughCallActive.value) {
                     promisedThroughCallCountdown.value = null
                     return@launch
                 }
+                promisedThroughCallCountdown.value = i
+                kotlinx.coroutines.delay(1000)
             }
             promisedThroughCallCountdown.value = null
-            triggerNextPromisedCall()
+            if (!isAnyCallActive() && isPromisedThroughCallActive.value) {
+                triggerNextPromisedCall()
+            }
         }
     }
 
     fun triggerNextPromisedCall() {
         if (!isPromisedThroughCallActive.value) return
+        if (isAnyCallActive()) {
+            android.util.Log.w("StromrufViewModel", "triggerNextPromisedCall blocked: Call is currently active!")
+            return
+        }
         viewModelScope.launch {
             val list = repository.getPromisedAnnahmenList().sortedBy { it.timestamp }
             val next = list.find { !it.isCalled }

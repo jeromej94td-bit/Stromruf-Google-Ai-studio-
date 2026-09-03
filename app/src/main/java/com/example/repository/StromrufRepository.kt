@@ -63,6 +63,12 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
 
     suspend fun insertContact(contact: ContactEntity) {
         dao.insertContact(contact)
+        // Also save directly to Android system phone contacts if permission is granted
+        if (com.example.util.ContactsUtil.hasWriteContactsPermission(context) && contact.name.isNotBlank() && contact.phone.isNotBlank()) {
+            runCatching {
+                com.example.util.ContactsUtil.saveContactToSystemDirectly(context, contact.name, contact.phone)
+            }
+        }
         // Replicate to Supabase
         SupabaseDbClient.upsertContact(context, contact)
     }

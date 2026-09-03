@@ -761,7 +761,12 @@ object SupabaseDbClient {
                 Log.d("SupabaseDbClient", "Once-off data migration completed successfully.")
             }
 
-            // 2. Fetch from Supabase
+            // 2. Upload any local contacts before downloading from Supabase
+            runCatching {
+                localDao.getAllContactsList().forEach { contact -> upsertContact(context, contact) }
+            }
+
+            // 3. Fetch from Supabase
             Log.d("SupabaseDbClient", "Downloading latest from Supabase...")
             val remoteContacts = fetchContacts(context)
             val remoteFollowups = fetchFollowUps(context)
@@ -773,9 +778,9 @@ object SupabaseDbClient {
             val remoteHeisse = fetchHeisseAngebote(context)
             val remoteMessages = fetchCustomerMessages(context)
 
-            // 3. Insert into Local Database (acts as local cache)
+            // 4. Insert into Local Database (acts as local cache)
             remoteContacts.forEach { localDao.insertContact(it) }
-            if (remoteContacts.isNotEmpty()) localDao.deleteContactsNotIn(remoteContacts.map { it.id })
+            // Note: We do NOT delete local contacts that are not yet on remote to prevent data loss.
             
             remoteFollowups.forEach { localDao.insertFollowUp(it) }
             if (remoteFollowups.isNotEmpty()) localDao.deleteFollowUpsNotIn(remoteFollowups.map { it.id })
@@ -830,9 +835,11 @@ object SupabaseDbClient {
         }
 
         try {
+            runCatching {
+                localDao.getAllContactsList().forEach { contact -> upsertContact(context, contact) }
+            }
             val remoteContacts = fetchContacts(context)
             remoteContacts.forEach { localDao.insertContact(it) }
-            if (remoteContacts.isNotEmpty()) localDao.deleteContactsNotIn(remoteContacts.map { it.id })
 
             val remoteFollowups = fetchFollowUps(context)
             remoteFollowups.forEach { localDao.insertFollowUp(it) }

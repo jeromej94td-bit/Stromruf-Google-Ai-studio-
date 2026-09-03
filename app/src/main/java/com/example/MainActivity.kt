@@ -1078,6 +1078,7 @@ class MainActivity : ComponentActivity() {
         // Automatically check and record call duration on return
         checkAndAutoRecordCall()
         viewModel.syncSystemCallLogs(this)
+        viewModel.isDefaultDialer.value = com.example.util.ContactsUtil.isDefaultDialer(this)
 
         // Clipboard observer setup
         val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
@@ -1106,6 +1107,40 @@ class MainActivity : ComponentActivity() {
         clipboardListener = null
     }
 
+    private fun isDeviceInActiveCall(): Boolean {
+        try {
+            // 1. InCallService
+            if (com.example.service.DialerInCallService.activeCall.value != null) return true
+            val activeState = com.example.service.DialerInCallService.activeCallState.value
+            if (activeState == android.telecom.Call.STATE_ACTIVE ||
+                activeState == android.telecom.Call.STATE_DIALING ||
+                activeState == android.telecom.Call.STATE_CONNECTING ||
+                activeState == android.telecom.Call.STATE_RINGING ||
+                activeState == android.telecom.Call.STATE_HOLDING) {
+                return true
+            }
+
+            // 2. TelecomManager
+            val telecomManager = getSystemService(android.content.Context.TELECOM_SERVICE) as? android.telecom.TelecomManager
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                if (checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    if (telecomManager?.isInCall() == true || telecomManager?.isInManagedCall() == true) {
+                        return true
+                    }
+                }
+            }
+
+            // 3. TelephonyManager
+            val telephonyManager = getSystemService(android.content.Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
+            if (telephonyManager != null && telephonyManager.callState != android.telephony.TelephonyManager.CALL_STATE_IDLE) {
+                return true
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error checking active call state: ${e.localizedMessage}")
+        }
+        return false
+    }
+
     private fun checkAndAutoRecordCall() {
         val activeCall = viewModel.activeCall.value ?: return
         
@@ -1114,8 +1149,9 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // If DialerInCallService has an active call, the call is still ongoing! Do not record it yet.
-        if (com.example.service.DialerInCallService.activeCall.value != null) {
+        // If device is in call, do NOT record it yet!
+        if (isDeviceInActiveCall()) {
+            android.util.Log.d("MainActivity", "checkAndAutoRecordCall: Device is still in an active call. Skipping auto-record.")
             return
         }
 
@@ -1168,6 +1204,21 @@ class MainActivity : ComponentActivity() {
                     val text = clipData.getItemAt(0).text?.toString() ?: ""
                     val cleaned = text.trim()
                     if (cleaned.isNotEmpty()) {
+                        // 1. Check if call mask (OngoingCallDialog) or active call is open/active
+                        val isCallActive = (viewModel.activeCall.value != null) ||
+                                           (com.example.service.DialerInCallService.activeCall.value != null) ||
+                                           (com.example.service.DialerInCallService.activeCallNumber.value.isNotBlank())
+                        val custNoSixDigits = Regex("""(?<!\d)([79]\d{5})(?!\d)""").find(cleaned)?.value
+                        if (isCallActive && custNoSixDigits != null) {
+                            if (viewModel.wrapUpData.value.customerNumber != custNoSixDigits) {
+                                viewModel.setWrapUpCustomerNumber(custNoSixDigits)
+                                runOnUiThread {
+                                    Toast.makeText(this, "Kundennummer $custNoSixDigits automatisch übernommen 📋", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            return
+                        }
+
                         // Check if local copying is disabled and it wasn't a programmatic copy
                         val prefs = getSharedPreferences("stromruf_prefs", android.content.Context.MODE_PRIVATE)
                         val onLocalCopy = prefs.getBoolean("clipboard_bubble_on_local_copy", false)
@@ -1696,22 +1747,26 @@ fun StromrufMainDashboard(
                 contactName = contactName,
                 contactPhone = contactPhone,
                 onHangUp = { finalDuration ->
+                    val savePhone = if (contactPhone.isNotBlank()) contactPhone else (wrapUpData.phone.ifBlank { lastCallNumber })
+                    val saveName = if (contactName.isNotBlank()) contactName else (wrapUpData.name.ifBlank { lastCallName })
                     lastCallActive = false
                     lastCallNumber = ""
                     lastCallName = ""
                     com.example.service.DialerInCallService.hangUp()
                     viewModel.clearActiveCall()
-                    viewModel.startWrapUpForDirectCall(contactPhone, contactName, finalDuration)
+                    viewModel.startWrapUpForDirectCall(savePhone, saveName, finalDuration)
                 },
                 isAutoCallActive = isAutoCallActive,
                 onHangUpAndPause = { finalDuration ->
+                    val savePhone = if (contactPhone.isNotBlank()) contactPhone else (wrapUpData.phone.ifBlank { lastCallNumber })
+                    val saveName = if (contactName.isNotBlank()) contactName else (wrapUpData.name.ifBlank { lastCallName })
                     lastCallActive = false
                     lastCallNumber = ""
                     lastCallName = ""
                     viewModel.pauseAutoCall()
                     com.example.service.DialerInCallService.hangUp()
                     viewModel.clearActiveCall()
-                    viewModel.startWrapUpForDirectCall(contactPhone, contactName, finalDuration)
+                    viewModel.startWrapUpForDirectCall(savePhone, saveName, finalDuration)
                 },
                 wrapUpData = wrapUpData,
                 onNameChange = { viewModel.setWrapUpName(it) },
@@ -1753,7 +1808,7 @@ fun StromrufMainDashboard(
             WrapUpDialog(
                 viewModel = viewModel,
                 data = wrapUpData,
-                onValueChange = { viewModel.updateWrapUpFields(it.name, it.company, it.email) },
+                onValueChange = { viewModel.updateWrapUpFields(it.name, it.company, it.email, it.customerNumber) },
                 onOutcomeChange = { viewModel.setWrapUpOutcome(it) },
                 onSaveContactChange = { viewModel.setWrapUpSaveContact(it) },
                 onNoteChange = { viewModel.setWrapUpNote(it) },
@@ -1763,16 +1818,14 @@ fun StromrufMainDashboard(
                 onRemoveCustomDate = { viewModel.removeCustomFollowUpDate(it) },
                 onCancel = { viewModel.cancelWrapUp() },
                 onSave = {
-                    if (wrapUpData.saveContact && wrapUpData.name.isNotBlank()) {
-                        if (com.example.util.ContactsUtil.hasWriteContactsPermission(context)) {
-                            val success = com.example.util.ContactsUtil.saveContactToSystemDirectly(context, wrapUpData.name, wrapUpData.phone)
+                    val custNo = wrapUpData.customerNumber.trim().takeIf { it.isNotBlank() }
+                    val contactName = if (wrapUpData.name.isNotBlank()) wrapUpData.name else (if (custNo != null) "Kunde $custNo" else "Kunde (${wrapUpData.phone})")
+                    if (wrapUpData.saveContact || wrapUpData.name.isNotBlank() || custNo != null) {
+                        if (com.example.util.ContactsUtil.hasWriteContactsPermission(context) && wrapUpData.phone.isNotBlank()) {
+                            val success = com.example.util.ContactsUtil.saveContactToSystemDirectly(context, contactName, wrapUpData.phone)
                             if (success) {
                                 android.widget.Toast.makeText(context, "Kontakt im Telefonbuch gespeichert! 💾", android.widget.Toast.LENGTH_SHORT).show()
-                            } else {
-                                com.example.util.ContactsUtil.saveContactViaIntent(context, wrapUpData.name, wrapUpData.phone)
                             }
-                        } else {
-                            com.example.util.ContactsUtil.saveContactViaIntent(context, wrapUpData.name, wrapUpData.phone)
                         }
                     }
                     viewModel.saveWrapUp()
@@ -6126,6 +6179,47 @@ fun WrapUpDialog(
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
+    val clipboardManager = remember {
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+    }
+    var lastCopiedCustomerNumber by remember { mutableStateOf("") }
+
+    val checkClipboard = {
+        try {
+            if (clipboardManager != null && clipboardManager.hasPrimaryClip()) {
+                val clipData = clipboardManager.primaryClip
+                if (clipData != null && clipData.itemCount > 0) {
+                    val text = clipData.getItemAt(0)?.text?.toString()?.trim() ?: ""
+                    val custNoMatch = Regex("""(?<!\d)([79]\d{5})(?!\d)""").find(text)?.value
+                    if (custNoMatch != null && custNoMatch != data.customerNumber && custNoMatch != lastCopiedCustomerNumber) {
+                        lastCopiedCustomerNumber = custNoMatch
+                        onValueChange(data.copy(customerNumber = custNoMatch, saveContact = true))
+                        Toast.makeText(context, "Kundennummer $custNoMatch automatisch übernommen 📋", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    DisposableEffect(clipboardManager) {
+        val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
+            checkClipboard()
+        }
+        clipboardManager?.addPrimaryClipChangedListener(listener)
+        onDispose {
+            clipboardManager?.removePrimaryClipChangedListener(listener)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            checkClipboard()
+            kotlinx.coroutines.delay(800)
+        }
+    }
+
     Dialog(onDismissRequest = onCancel) {
         Surface(
             modifier = Modifier
@@ -10455,6 +10549,94 @@ fun OngoingCallDialog(
     val context = LocalContext.current
     var localElapsedSeconds by remember { mutableStateOf(0L) }
 
+    val powerManager = remember {
+        context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+    }
+    val sensorManager = remember {
+        context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager
+    }
+    var isNearCheek by remember { mutableStateOf(false) }
+
+    DisposableEffect(isSpeakerOn) {
+        var proximityWakeLock: android.os.PowerManager.WakeLock? = null
+        try {
+            if (!isSpeakerOn && powerManager?.isWakeLockLevelSupported(android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK) == true) {
+                proximityWakeLock = powerManager.newWakeLock(
+                    android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
+                    "Stromruf:OngoingCallProximity"
+                )
+                proximityWakeLock.acquire()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("OngoingCallDialog", "Failed to acquire proximity wakelock: ${e.localizedMessage}")
+        }
+
+        val proximitySensor = sensorManager?.getDefaultSensor(android.hardware.Sensor.TYPE_PROXIMITY)
+        val sensorListener = object : android.hardware.SensorEventListener {
+            override fun onSensorChanged(event: android.hardware.SensorEvent?) {
+                val distance = event?.values?.getOrNull(0) ?: Float.MAX_VALUE
+                val maxRange = proximitySensor?.maximumRange ?: 5f
+                isNearCheek = distance < maxRange
+            }
+            override fun onAccuracyChanged(sensor: android.hardware.Sensor?, accuracy: Int) {}
+        }
+        if (proximitySensor != null) {
+            sensorManager?.registerListener(sensorListener, proximitySensor, android.hardware.SensorManager.SENSOR_DELAY_NORMAL)
+        }
+
+        onDispose {
+            try {
+                if (proximityWakeLock?.isHeld == true) {
+                    proximityWakeLock?.release()
+                }
+            } catch (e: Exception) {}
+            try {
+                sensorManager?.unregisterListener(sensorListener)
+            } catch (e: Exception) {}
+        }
+    }
+
+    val clipboardManager = remember {
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+    }
+    var lastCopiedCustomerNumber by remember { mutableStateOf("") }
+
+    val checkClipboard = {
+        try {
+            if (clipboardManager != null && clipboardManager.hasPrimaryClip()) {
+                val clipData = clipboardManager.primaryClip
+                if (clipData != null && clipData.itemCount > 0) {
+                    val text = clipData.getItemAt(0)?.text?.toString()?.trim() ?: ""
+                    val custNoMatch = Regex("""(?<!\d)([79]\d{5})(?!\d)""").find(text)?.value
+                    if (custNoMatch != null && custNoMatch != wrapUpData.customerNumber && custNoMatch != lastCopiedCustomerNumber) {
+                        lastCopiedCustomerNumber = custNoMatch
+                        onCustomerNumberChange(custNoMatch)
+                        Toast.makeText(context, "Kundennummer $custNoMatch automatisch übernommen 📋", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    DisposableEffect(clipboardManager) {
+        val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
+            checkClipboard()
+        }
+        clipboardManager?.addPrimaryClipChangedListener(listener)
+        onDispose {
+            clipboardManager?.removePrimaryClipChangedListener(listener)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            checkClipboard()
+            kotlinx.coroutines.delay(800)
+        }
+    }
+
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(1000)
@@ -10596,7 +10778,13 @@ fun OngoingCallDialog(
 
                     // PRIMARY HANGUP BUTTON - MOVED TO THE VERY TOP AS REQUESTED
                     Button(
-                        onClick = { onHangUp(currentDuration) },
+                        onClick = {
+                            if (isNearCheek && !isSpeakerOn) {
+                                android.util.Log.w("OngoingCallDialog", "Cheek touch ignored on hangup button")
+                                return@Button
+                            }
+                            onHangUp(currentDuration)
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
@@ -10622,7 +10810,13 @@ fun OngoingCallDialog(
                     // Auto-Call Pause Button (if in auto mode)
                     if (isAutoCallActive) {
                         Button(
-                            onClick = { onHangUpAndPause(currentDuration) },
+                            onClick = {
+                                if (isNearCheek && !isSpeakerOn) {
+                                    android.util.Log.w("OngoingCallDialog", "Cheek touch ignored on pause button")
+                                    return@Button
+                                }
+                                onHangUpAndPause(currentDuration)
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(40.dp),
