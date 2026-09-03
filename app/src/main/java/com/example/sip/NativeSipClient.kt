@@ -10,6 +10,7 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.PowerManager
+import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +19,10 @@ import java.io.*
 import java.net.*
 import java.security.MessageDigest
 import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.Mac
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import java.text.SimpleDateFormat
 import java.util.*
 import javax.net.ssl.SSLContext
@@ -106,11 +111,223 @@ class NativeSipClient(private val context: Context) {
 
     // RTP media state. SIP only establishes the call; these sockets carry the audio.
     private enum class G711Codec { PCMA, PCMU }
+
+    private data class SrtpCryptoParameters(
+        val masterKey: ByteArray,
+        val masterSalt: ByteArray,
+        val authTagLength: Int = 10
+    )
+
+    /**
+     * Minimaler SRTP-Kontext für AES_CM_128_HMAC_SHA1_80 nach RFC 3711.
+     * Der Master-Key kommt bei TLS geschützt über SDP a=crypto (RFC 4568).
+     */
+    private class SrtpContext(parameters: SrtpCryptoParameters) {
+        private val encryptionKey: ByteArray
+        private val authenticationKey: ByteArray
+        private val saltingKey: ByteArray
+        private val authTagLength = parameters.authTagLength
+
+        private var sendRolloverCounter = 0L
+        private var lastSentSequence: Int? = null
+        private var receiveRolloverCounter = 0L
+        private var lastReceivedSequence: Int? = null
+        private var highestReceivedIndex = -1L
+
+        init {
+            require(parameters.masterKey.size == 16)
+            require(parameters.masterSalt.size == 14)
+            require(authTagLength == 10)
+            encryptionKey = deriveSessionKey(parameters.masterKey, parameters.masterSalt, 0x00, 16)
+            authenticationKey = deriveSessionKey(parameters.masterKey, parameters.masterSalt, 0x01, 20)
+            saltingKey = deriveSessionKey(parameters.masterKey, parameters.masterSalt, 0x02, 14)
+        }
+
+        @Synchronized
+        fun protect(rtpPacket: ByteArray): ByteArray {
+            if (rtpPacket.size < 12) return rtpPacket
+            val sequence = readUInt16(rtpPacket, 2)
+            val ssrc = readUInt32(rtpPacket, 8)
+            if (lastSentSequence != null &&
+                lastSentSequence!! > 0x8000 &&
+                sequence < 0x8000 &&
+                lastSentSequence!! - sequence > 0x8000
+            ) {
+                sendRolloverCounter = (sendRolloverCounter + 1) and 0xffffffffL
+            }
+            lastSentSequence = sequence
+            val packetIndex = (sendRolloverCounter shl 16) or sequence.toLong()
+
+            val encrypted = rtpPacket.copyOf()
+            val payloadStart = payloadOffset(encrypted) ?: return encrypted
+            cryptPayload(encrypted, payloadStart, encrypted.size, ssrc, packetIndex)
+
+            val protectedPacket = ByteArray(encrypted.size + authTagLength)
+            encrypted.copyInto(protectedPacket)
+            authenticationTag(encrypted, sendRolloverCounter)
+                .copyInto(protectedPacket, encrypted.size)
+            return protectedPacket
+        }
+
+        @Synchronized
+        fun unprotect(srtpPacket: ByteArray): ByteArray? {
+            if (srtpPacket.size < 12 + authTagLength) return null
+            val bodyLength = srtpPacket.size - authTagLength
+            val encrypted = srtpPacket.copyOfRange(0, bodyLength)
+            val sequence = readUInt16(encrypted, 2)
+            val ssrc = readUInt32(encrypted, 8)
+            val estimatedRoc = estimateReceiveRolloverCounter(sequence)
+            val packetIndex = (estimatedRoc shl 16) or sequence.toLong()
+
+            val expectedTag = authenticationTag(encrypted, estimatedRoc)
+            val actualTag = srtpPacket.copyOfRange(bodyLength, srtpPacket.size)
+            if (!MessageDigest.isEqual(expectedTag, actualTag)) return null
+
+            val payloadStart = payloadOffset(encrypted) ?: return null
+            cryptPayload(encrypted, payloadStart, encrypted.size, ssrc, packetIndex)
+
+            if (packetIndex > highestReceivedIndex) {
+                highestReceivedIndex = packetIndex
+                receiveRolloverCounter = estimatedRoc
+                lastReceivedSequence = sequence
+            }
+            return encrypted
+        }
+
+        private fun estimateReceiveRolloverCounter(sequence: Int): Long {
+            val last = lastReceivedSequence ?: return receiveRolloverCounter
+            return when {
+                last < 0x8000 &&
+                    sequence > 0x8000 &&
+                    sequence - last > 0x8000 ->
+                    (receiveRolloverCounter - 1).coerceAtLeast(0L)
+
+                last > 0x8000 &&
+                    sequence < 0x8000 &&
+                    last - sequence > 0x8000 ->
+                    (receiveRolloverCounter + 1) and 0xffffffffL
+
+                else -> receiveRolloverCounter
+            }
+        }
+
+        private fun authenticationTag(packet: ByteArray, rolloverCounter: Long): ByteArray {
+            val mac = Mac.getInstance("HmacSHA1")
+            mac.init(SecretKeySpec(authenticationKey, "HmacSHA1"))
+            mac.update(packet)
+            mac.update(
+                byteArrayOf(
+                    ((rolloverCounter ushr 24) and 0xff).toByte(),
+                    ((rolloverCounter ushr 16) and 0xff).toByte(),
+                    ((rolloverCounter ushr 8) and 0xff).toByte(),
+                    (rolloverCounter and 0xff).toByte()
+                )
+            )
+            return mac.doFinal().copyOf(authTagLength)
+        }
+
+        private fun cryptPayload(
+            packet: ByteArray,
+            payloadStart: Int,
+            payloadEnd: Int,
+            ssrc: Long,
+            packetIndex: Long
+        ) {
+            if (payloadStart >= payloadEnd) return
+            val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+            cipher.init(
+                Cipher.ENCRYPT_MODE,
+                SecretKeySpec(encryptionKey, "AES"),
+                IvParameterSpec(buildPacketIv(ssrc, packetIndex))
+            )
+            val keystream = cipher.doFinal(ByteArray(payloadEnd - payloadStart))
+            for (i in keystream.indices) {
+                packet[payloadStart + i] =
+                    (packet[payloadStart + i].toInt() xor keystream[i].toInt()).toByte()
+            }
+        }
+
+        private fun buildPacketIv(ssrc: Long, packetIndex: Long): ByteArray {
+            // IV = (k_s * 2^16) XOR (SSRC * 2^64) XOR (i * 2^16)
+            val iv = ByteArray(16)
+            saltingKey.copyInto(iv, 0)
+            putUInt32(iv, 4, ssrc)
+            putUInt48(iv, 8, packetIndex)
+            return iv
+        }
+
+        companion object {
+            private fun deriveSessionKey(
+                masterKey: ByteArray,
+                masterSalt: ByteArray,
+                label: Int,
+                length: Int
+            ): ByteArray {
+                // key_id = label || (index DIV kdr), right-aligned in the 112-bit salt.
+                val keyId = ByteArray(14)
+                keyId[7] = label.toByte()
+                val iv = ByteArray(16)
+                for (i in masterSalt.indices) {
+                    iv[i] = (masterSalt[i].toInt() xor keyId[i].toInt()).toByte()
+                }
+                val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+                cipher.init(
+                    Cipher.ENCRYPT_MODE,
+                    SecretKeySpec(masterKey, "AES"),
+                    IvParameterSpec(iv)
+                )
+                return cipher.doFinal(ByteArray(length))
+            }
+
+            private fun payloadOffset(packet: ByteArray): Int? {
+                if (packet.size < 12) return null
+                val first = packet[0].toInt() and 0xff
+                if ((first ushr 6) != 2) return null
+
+                var offset = 12 + (first and 0x0f) * 4
+                if ((first and 0x10) != 0) {
+                    if (packet.size < offset + 4) return null
+                    val extensionWords =
+                        ((packet[offset + 2].toInt() and 0xff) shl 8) or
+                            (packet[offset + 3].toInt() and 0xff)
+                    offset += 4 + extensionWords * 4
+                }
+                return offset.takeIf { it <= packet.size }
+            }
+
+            private fun readUInt16(packet: ByteArray, offset: Int): Int =
+                ((packet[offset].toInt() and 0xff) shl 8) or
+                    (packet[offset + 1].toInt() and 0xff)
+
+            private fun readUInt32(packet: ByteArray, offset: Int): Long =
+                ((packet[offset].toLong() and 0xffL) shl 24) or
+                    ((packet[offset + 1].toLong() and 0xffL) shl 16) or
+                    ((packet[offset + 2].toLong() and 0xffL) shl 8) or
+                    (packet[offset + 3].toLong() and 0xffL)
+
+            private fun putUInt32(packet: ByteArray, offset: Int, value: Long) {
+                packet[offset] = ((value ushr 24) and 0xffL).toByte()
+                packet[offset + 1] = ((value ushr 16) and 0xffL).toByte()
+                packet[offset + 2] = ((value ushr 8) and 0xffL).toByte()
+                packet[offset + 3] = (value and 0xffL).toByte()
+            }
+
+            private fun putUInt48(packet: ByteArray, offset: Int, value: Long) {
+                for (i in 0 until 6) {
+                    packet[offset + i] =
+                        ((value ushr (40 - i * 8)) and 0xffL).toByte()
+                }
+            }
+        }
+    }
+
     private data class RemoteRtpDescription(
         val address: InetAddress,
         val port: Int,
         val payloadType: Int,
-        val codecs: Map<Int, G711Codec>
+        val codecs: Map<Int, G711Codec>,
+        val usesSrtp: Boolean,
+        val srtpCrypto: SrtpCryptoParameters?
     )
 
     private var rtpSocket: DatagramSocket? = null
@@ -123,6 +340,10 @@ class NativeSipClient(private val context: Context) {
     @Volatile private var negotiatedPayloadType = 8
     @Volatile private var negotiatedCodecs: Map<Int, G711Codec> =
         mapOf(8 to G711Codec.PCMA, 0 to G711Codec.PCMU)
+    @Volatile private var localSrtpContext: SrtpContext? = null
+    @Volatile private var remoteSrtpContext: SrtpContext? = null
+    @Volatile private var remoteUsesSrtp = false
+    private var localSrtpMasterKeySalt: ByteArray? = null
     private var rtpSequence = SecureRandom().nextInt(65536)
     private var rtpTimestamp = SecureRandom().nextInt().toLong() and 0xffffffffL
     private val rtpSsrc = SecureRandom().nextInt()
@@ -508,6 +729,9 @@ class NativeSipClient(private val context: Context) {
                         method == "INVITE" && _state.value == SipState.IN_CALL -> {
                             extractDialogInfo(message)
                             updateSessionTimer(message)
+                            parseRemoteSdp(message)?.let { remote ->
+                                applyRemoteMedia(remote)
+                            }
                             val responseCseq = extractCSeqNumber(message) ?: cseq
                             lastInviteResponseUdpSender = lastUdpSender
                             sendAck(config, responseCseq, lastInviteResponseUdpSender)
@@ -623,9 +847,7 @@ class NativeSipClient(private val context: Context) {
             "INVITE" -> {
                 if (_state.value == SipState.IN_CALL) {
                     parseRemoteSdp(message)?.let { remote ->
-                        remoteRtpAddress = InetSocketAddress(remote.address, remote.port)
-                        negotiatedPayloadType = remote.payloadType
-                        negotiatedCodecs = remote.codecs
+                        applyRemoteMedia(remote)
                     }
                     sendInviteResponseForRequest(message, config)
                 } else {
@@ -730,16 +952,40 @@ class NativeSipClient(private val context: Context) {
             }
         }
     }
-    private fun buildLocalSdp(): String {
+    private fun buildLocalSdp(config: SipAccountConfig): String {
         val rtpPort = rtpSocket?.localPort
             ?: throw IllegalStateException("RTP-Socket wurde vor dem SDP nicht geöffnet")
+        val useSrtp = config.protocol == SipTransportProtocol.TLS
+        val mediaTransport = if (useSrtp) "RTP/SAVP" else "RTP/AVP"
+
+        val cryptoLine = if (useSrtp) {
+            val keySalt = localSrtpMasterKeySalt ?: ByteArray(30).also {
+                SecureRandom().nextBytes(it)
+                localSrtpMasterKeySalt = it
+            }
+            if (localSrtpContext == null) {
+                localSrtpContext = SrtpContext(
+                    SrtpCryptoParameters(
+                        masterKey = keySalt.copyOfRange(0, 16),
+                        masterSalt = keySalt.copyOfRange(16, 30)
+                    )
+                )
+            }
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:\${Base64.encodeToString(keySalt, Base64.NO_WRAP)}|2^20"
+        } else {
+            localSrtpMasterKeySalt = null
+            localSrtpContext = null
+            null
+        }
+
         return StringBuilder()
             .append("v=0\r\n")
             .append("o=SmartCalls 1000 1000 IN IP4 $localIp\r\n")
             .append("s=SmartCall\r\n")
             .append("c=IN IP4 $localIp\r\n")
             .append("t=0 0\r\n")
-            .append("m=audio $rtpPort RTP/AVP 8 0 101\r\n")
+            .append("m=audio $rtpPort $mediaTransport 8 0 101\r\n")
+            .apply { cryptoLine?.let { append("$it\r\n") } }
             .append("a=rtpmap:8 PCMA/8000\r\n")
             .append("a=rtpmap:0 PCMU/8000\r\n")
             .append("a=rtpmap:101 telephone-event/8000\r\n")
@@ -764,7 +1010,7 @@ class NativeSipClient(private val context: Context) {
         val transport = config.protocol.name
         val user = config.sipUser
         val domain = config.sipRegistrar
-        val sdp = buildLocalSdp()
+        val sdp = buildLocalSdp(config)
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
 
         val sb = StringBuilder()
@@ -803,7 +1049,7 @@ class NativeSipClient(private val context: Context) {
         inviteRequestUri = requestUri
         inviteViaBranch = viaBranch
 
-        val sdp = buildLocalSdp()
+        val sdp = buildLocalSdp(config)
 
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
 
@@ -994,6 +1240,10 @@ class NativeSipClient(private val context: Context) {
         stopAckRetry()
         stopSessionRefresh()
         lastInviteResponseUdpSender = null
+        localSrtpMasterKeySalt = null
+        localSrtpContext = null
+        remoteSrtpContext = null
+        remoteUsesSrtp = false
         activeCallTarget = null
         inviteRequestUri = null
         inviteViaBranch = null
@@ -1061,6 +1311,40 @@ class NativeSipClient(private val context: Context) {
         return if (lf >= 0) message.substring(lf + 2) else ""
     }
 
+    private fun parseSrtpCrypto(body: String): SrtpCryptoParameters? {
+        var inAudio = false
+        for (line in body.lineSequence().map { it.trim() }) {
+            when {
+                line.startsWith("m=", ignoreCase = true) -> {
+                    val parts = line.substringAfter("m=").split(Regex("\\s+"))
+                    inAudio = parts.firstOrNull()?.equals("audio", ignoreCase = true) == true
+                }
+
+                line.startsWith("a=crypto:", ignoreCase = true) && inAudio -> {
+                    val parts = line.substringAfter(":").trim().split(Regex("\\s+"), limit = 3)
+                    val suite = parts.getOrNull(1) ?: continue
+                    if (!suite.equals("AES_CM_128_HMAC_SHA1_80", ignoreCase = true)) continue
+
+                    val keyInfo = parts.getOrNull(2)
+                        ?.substringBefore("|")
+                        ?.takeIf { it.startsWith("inline:", ignoreCase = true) }
+                        ?: continue
+                    val encoded = keyInfo.substringAfter(":")
+                    val decoded = runCatching {
+                        Base64.decode(encoded, Base64.DEFAULT)
+                    }.getOrNull() ?: continue
+                    if (decoded.size != 30) continue
+
+                    return SrtpCryptoParameters(
+                        masterKey = decoded.copyOfRange(0, 16),
+                        masterSalt = decoded.copyOfRange(16, 30)
+                    )
+                }
+            }
+        }
+        return null
+    }
+
     private fun parseRemoteSdp(message: String): RemoteRtpDescription? {
         val body = extractMessageBody(message)
         if (body.isBlank()) return null
@@ -1068,6 +1352,7 @@ class NativeSipClient(private val context: Context) {
         var sessionAddress: String? = null
         var audioAddress: String? = null
         var audioPort: Int? = null
+        var audioTransport: String? = null
         var audioPayloadTypes: List<Int> = emptyList()
         var inAudio = false
         val codecs = mutableMapOf<Int, G711Codec>()
@@ -1079,6 +1364,7 @@ class NativeSipClient(private val context: Context) {
                     inAudio = parts.firstOrNull()?.equals("audio", ignoreCase = true) == true
                     if (inAudio && parts.size >= 4) {
                         audioPort = parts[1].toIntOrNull()
+                        audioTransport = parts.getOrNull(2)
                         audioPayloadTypes = parts.drop(3).mapNotNull { it.toIntOrNull() }
                     }
                 }
@@ -1107,7 +1393,7 @@ class NativeSipClient(private val context: Context) {
             }
         }
 
-        // PCMA/PCMU have static RTP payload types, even if the answer omits rtpmap.
+        // PCMA/PCMU haben feste RTP-Payload-Typen, falls rtpmap fehlt.
         if (!codecs.containsKey(8)) codecs[8] = G711Codec.PCMA
         if (!codecs.containsKey(0)) codecs[0] = G711Codec.PCMU
 
@@ -1118,16 +1404,39 @@ class NativeSipClient(private val context: Context) {
         if (port <= 0 || port > 65535 || addressText == "0.0.0.0") return null
         val address = runCatching { InetAddress.getByName(addressText) }.getOrNull() ?: return null
 
+        val usesSrtp = audioTransport?.startsWith("RTP/SAVP", ignoreCase = true) == true
+        val srtpCrypto = if (usesSrtp) parseSrtpCrypto(body) else null
+        if (usesSrtp && srtpCrypto == null) {
+            Log.e(tag, "SRTP-Antwort ohne gültige a=crypto-Aushandlung")
+        }
+
         return RemoteRtpDescription(
             address = address,
             port = port,
             payloadType = selectedPayloadType,
-            codecs = codecs
+            codecs = codecs,
+            usesSrtp = usesSrtp,
+            srtpCrypto = srtpCrypto
+        )
+    }
+
+    private fun applyRemoteMedia(remote: RemoteRtpDescription) {
+        remoteRtpAddress = InetSocketAddress(remote.address, remote.port)
+        negotiatedPayloadType = remote.payloadType
+        negotiatedCodecs = remote.codecs
+        remoteUsesSrtp = remote.usesSrtp
+        remoteSrtpContext = remote.srtpCrypto?.let { SrtpContext(it) }
+
+        Log.d(
+            tag,
+            "RTP media negotiated: \${remote.address.hostAddress}:\${remote.port}, " +
+                "transport=\${if (remote.usesSrtp) "SRTP" else "RTP"}, " +
+                "payload=\${remote.payloadType}"
         )
     }
 
     private fun sendInviteResponseForRequest(request: String, config: SipAccountConfig) {
-        val sdp = runCatching { buildLocalSdp() }.getOrElse {
+        val sdp = runCatching { buildLocalSdp(config) }.getOrElse {
             sendSipResponseForRequest(request, 488, "Not Acceptable Here", config)
             return
         }
@@ -1318,6 +1627,10 @@ class NativeSipClient(private val context: Context) {
         remoteRtpAddress = null
         negotiatedPayloadType = 8
         negotiatedCodecs = mapOf(8 to G711Codec.PCMA, 0 to G711Codec.PCMU)
+        localSrtpMasterKeySalt = null
+        localSrtpContext = null
+        remoteSrtpContext = null
+        remoteUsesSrtp = false
         rtpSequence = SecureRandom().nextInt(65536)
         rtpTimestamp = SecureRandom().nextInt().toLong() and 0xffffffffL
         lastRtpSentAt = 0L
@@ -1541,7 +1854,13 @@ class NativeSipClient(private val context: Context) {
             packet[11] = (rtpSsrc and 0xff).toByte()
             payload.copyInto(packet, destinationOffset = 12)
 
-            socket.send(DatagramPacket(packet, packet.size, destination))
+            val srtpContext = if (remoteUsesSrtp) localSrtpContext else null
+            if (remoteUsesSrtp && srtpContext == null) {
+                Log.w(tag, "SRTP ist ausgehandelt, aber kein lokaler SRTP-Kontext verfügbar")
+                return
+            }
+            val wirePacket = srtpContext?.protect(packet) ?: packet
+            socket.send(DatagramPacket(wirePacket, wirePacket.size, destination))
             rtpSequence = (rtpSequence + 1) and 0xffff
             rtpTimestamp = (rtpTimestamp + RTP_FRAME_SAMPLES) and 0xffffffffL
             lastRtpSentAt = System.currentTimeMillis()
@@ -1571,26 +1890,36 @@ class NativeSipClient(private val context: Context) {
                 }
 
                 if (packet.length < 12) continue
-                val first = buffer[0].toInt() and 0xff
-                val second = buffer[1].toInt() and 0xff
+                val wirePacket = buffer.copyOf(packet.length)
+                val srtpContext = remoteSrtpContext
+                val rtpPacket = if (remoteUsesSrtp) {
+                    if (srtpContext == null) continue
+                    srtpContext.unprotect(wirePacket) ?: continue
+                } else {
+                    wirePacket
+                }
+                if (rtpPacket.size < 12) continue
+
+                val first = rtpPacket[0].toInt() and 0xff
+                val second = rtpPacket[1].toInt() and 0xff
                 if ((first ushr 6) != 2) continue
 
                 val csrcCount = first and 0x0f
                 var payloadOffset = 12 + csrcCount * 4
-                if (packet.length < payloadOffset) continue
+                if (rtpPacket.size < payloadOffset) continue
 
                 if ((first and 0x10) != 0) {
-                    if (packet.length < payloadOffset + 4) continue
+                    if (rtpPacket.size < payloadOffset + 4) continue
                     val extensionWords =
-                        ((buffer[payloadOffset + 2].toInt() and 0xff) shl 8) or
-                            (buffer[payloadOffset + 3].toInt() and 0xff)
+                        ((rtpPacket[payloadOffset + 2].toInt() and 0xff) shl 8) or
+                            (rtpPacket[payloadOffset + 3].toInt() and 0xff)
                     payloadOffset += 4 + extensionWords * 4
                 }
-                if (packet.length <= payloadOffset) continue
+                if (rtpPacket.size <= payloadOffset) continue
 
-                var payloadEnd = packet.length
+                var payloadEnd = rtpPacket.size
                 if ((first and 0x20) != 0) {
-                    val padding = buffer[packet.length - 1].toInt() and 0xff
+                    val padding = rtpPacket[rtpPacket.size - 1].toInt() and 0xff
                     if (padding <= payloadEnd - payloadOffset) payloadEnd -= padding
                 }
 
@@ -1609,7 +1938,10 @@ class NativeSipClient(private val context: Context) {
                 remoteRtpAddress = InetSocketAddress(packet.address, packet.port)
                 val pcm = ShortArray(payloadLength)
                 for (i in 0 until payloadLength) {
-                    pcm[i] = decodeG711Sample(buffer[payloadOffset + i].toInt() and 0xff, codec)
+                    pcm[i] = decodeG711Sample(
+                        rtpPacket[payloadOffset + i].toInt() and 0xff,
+                        codec
+                    )
                 }
 
                 callWavRecorder?.writeRemote(pcm)
