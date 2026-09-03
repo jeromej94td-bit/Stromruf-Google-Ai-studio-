@@ -248,11 +248,16 @@ class NativeSipClient(private val context: Context) {
         }
 
         private fun buildPacketIv(ssrc: Long, packetIndex: Long): ByteArray {
+            // RFC 3711 §4.1.1:
             // IV = (k_s * 2^16) XOR (SSRC * 2^64) XOR (i * 2^16)
+            //
+            // The session salt is already the 112-bit k_s value. The SSRC and
+            // packet index must be XORed into that value; overwriting those
+            // bytes drops the salt bits and produces invalid SRTP packets.
             val iv = ByteArray(16)
             saltingKey.copyInto(iv, 0)
-            putUInt32(iv, 4, ssrc)
-            putUInt48(iv, 8, packetIndex)
+            xorUInt32(iv, 4, ssrc)
+            xorUInt48(iv, 8, packetIndex)
             return iv
         }
 
@@ -305,17 +310,23 @@ class NativeSipClient(private val context: Context) {
                     ((packet[offset + 2].toLong() and 0xffL) shl 8) or
                     (packet[offset + 3].toLong() and 0xffL)
 
-            private fun putUInt32(packet: ByteArray, offset: Int, value: Long) {
-                packet[offset] = ((value ushr 24) and 0xffL).toByte()
-                packet[offset + 1] = ((value ushr 16) and 0xffL).toByte()
-                packet[offset + 2] = ((value ushr 8) and 0xffL).toByte()
-                packet[offset + 3] = (value and 0xffL).toByte()
+            private fun xorUInt32(packet: ByteArray, offset: Int, value: Long) {
+                for (i in 0 until 4) {
+                    val shift = 24 - i * 8
+                    packet[offset + i] = (
+                        packet[offset + i].toInt() xor
+                            (((value ushr shift) and 0xffL).toInt())
+                        ).toByte()
+                }
             }
 
-            private fun putUInt48(packet: ByteArray, offset: Int, value: Long) {
+            private fun xorUInt48(packet: ByteArray, offset: Int, value: Long) {
                 for (i in 0 until 6) {
-                    packet[offset + i] =
-                        ((value ushr (40 - i * 8)) and 0xffL).toByte()
+                    val shift = 40 - i * 8
+                    packet[offset + i] = (
+                        packet[offset + i].toInt() xor
+                            (((value ushr shift) and 0xffL).toInt())
+                        ).toByte()
                 }
             }
         }
@@ -452,6 +463,9 @@ class NativeSipClient(private val context: Context) {
                 tcpSocket = socket
                 socketWriter = socket.getOutputStream()
                 socketReader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                socket.localAddress?.hostAddress
+                    ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
+                    ?.let { localIp = it }
                 localPort = socket.localPort
             }
             SipTransportProtocol.TLS -> {
@@ -467,6 +481,9 @@ class NativeSipClient(private val context: Context) {
                 sslSocket = socket
                 socketWriter = socket.getOutputStream()
                 socketReader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                socket.localAddress?.hostAddress
+                    ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
+                    ?.let { localIp = it }
                 localPort = socket.localPort
             }
         }
@@ -547,7 +564,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("To: <sip:$domain>\r\n")
         sb.append("Call-ID: $sipKeepAliveCallId@$localIp\r\n")
         sb.append("CSeq: $optionsCseq OPTIONS\r\n")
-        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
         sb.append("Accept: application/sdp\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
@@ -607,7 +624,19 @@ class NativeSipClient(private val context: Context) {
         val headerBuilder = StringBuilder()
         var line: String?
 
-        // Read SIP headers
+        // SIP over TCP/TLS peers may use an empty line (double-CRLF) as a
+        // keep-alive. Ignore leading empty lines instead of treating them as
+        // an EOF/transport failure.
+        do {
+            line = reader.readLine()
+            if (line == null) {
+                throw EOFException("SIP-Verbindung wurde geschlossen")
+            }
+        } while (line.isNullOrEmpty())
+
+        headerBuilder.append(line).append("\r\n")
+
+        // Read the remaining SIP headers.
         while (reader.readLine().also { line = it } != null) {
             if (line.isNullOrEmpty()) {
                 break
@@ -905,7 +934,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("CSeq: $cseq REGISTER\r\n")
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         sb.append("Expires: 3600\r\n")
-        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
         if (authHeader != null) {
             sb.append("Authorization: $authHeader\r\n")
         }
@@ -960,9 +989,17 @@ class NativeSipClient(private val context: Context) {
             }
         }
     }
+    private fun localMediaIp(): String {
+        val socketIp = rtpSocket?.localAddress?.hostAddress
+        return socketIp?.takeIf {
+            it.isNotBlank() && it != "0.0.0.0" && it != "::"
+        } ?: localIp
+    }
+
     private fun buildLocalSdp(config: SipAccountConfig): String {
         val rtpPort = rtpSocket?.localPort
             ?: throw IllegalStateException("RTP-Socket wurde vor dem SDP nicht geöffnet")
+        val advertisedIp = localMediaIp()
         val useSrtp = config.protocol == SipTransportProtocol.TLS
         val mediaTransport = if (useSrtp) "RTP/SAVP" else "RTP/AVP"
 
@@ -988,9 +1025,9 @@ class NativeSipClient(private val context: Context) {
 
         return StringBuilder()
             .append("v=0\r\n")
-            .append("o=SmartCalls 1000 1000 IN IP4 $localIp\r\n")
+            .append("o=SmartCalls 1000 1000 IN IP4 $advertisedIp\r\n")
             .append("s=SmartCall\r\n")
-            .append("c=IN IP4 $localIp\r\n")
+            .append("c=IN IP4 $advertisedIp\r\n")
             .append("t=0 0\r\n")
             .append("m=audio $rtpPort $mediaTransport 8 0 101\r\n")
             .apply { cryptoLine?.let { append("$it\r\n") } }
@@ -1034,7 +1071,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Supported: timer\r\n")
         sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
         if (authHeader != null) {
             sb.append("$authHeaderName: $authHeader\r\n")
         }
@@ -1073,7 +1110,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Supported: timer\r\n")
         sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
 
 
         if (authHeader != null) {
@@ -1111,7 +1148,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $inviteCseq ACK\r\n")
         routeSet.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
 
         Log.i(
@@ -1213,7 +1250,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq BYE\r\n")
         routes.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
     }
@@ -1236,7 +1273,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("To: <sip:$target@$domain>\r\n")
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq CANCEL\r\n")
-        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
     }
@@ -1467,7 +1504,7 @@ class NativeSipClient(private val context: Context) {
         val requestSession = parseSessionExpiresSeconds(request) ?: sessionExpiresSeconds
         sb.append("Session-Expires: $requestSession;refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
         sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
         sb.append(sdp)
@@ -1622,7 +1659,18 @@ class NativeSipClient(private val context: Context) {
             try {
                 candidate.reuseAddress = true
                 val port = RTP_PORT_MIN + random.nextInt(RTP_PORT_MAX - RTP_PORT_MIN + 1)
-                candidate.bind(InetSocketAddress(port))
+                val bindAddress = localIp
+                    .takeIf {
+                        it.isNotBlank() && it != "127.0.0.1" && it != "0.0.0.0"
+                    }
+                    ?.let { ip -> runCatching { InetAddress.getByName(ip) }.getOrNull() }
+                candidate.bind(
+                    if (bindAddress != null) {
+                        InetSocketAddress(bindAddress, port)
+                    } else {
+                        InetSocketAddress(port)
+                    }
+                )
                 socket = candidate
             } catch (_: BindException) {
                 candidate.close()
