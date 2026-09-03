@@ -1117,7 +1117,7 @@ class NativeSipClient(private val context: Context) {
         ackRetryJob?.cancel()
         ackRetryJob = scope.launch(Dispatchers.IO) {
             // Cover a lost first ACK and the provider's 200 OK retransmissions.
-            for (waitMs in listOf(500L, 1_000L, 2_000L, 4_000L)) {
+            for (waitMs in listOf(500L, 1_000L, 2_000L, 4_000L, 8_000L, 16_000L)) {
                 delay(waitMs)
                 if (!isActive || _state.value != SipState.IN_CALL) return@launch
                 runCatching {
