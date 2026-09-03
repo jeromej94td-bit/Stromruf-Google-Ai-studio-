@@ -354,6 +354,9 @@ class NativeSipClient(private val context: Context) {
     @Volatile private var muted = false
     @Volatile private var speakerphoneOn = true
     @Volatile private var lastRtpSentAt = 0L
+    @Volatile private var rtpPacketsSent = 0L
+    @Volatile private var rtpPacketsReceived = 0L
+    @Volatile private var srtpPacketsRejected = 0L
     private var callWakeLock: PowerManager.WakeLock? = null
     private val sipSendLock = Any()
     private val rtpSendLock = Any()
@@ -544,7 +547,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("To: <sip:$domain>\r\n")
         sb.append("Call-ID: $sipKeepAliveCallId@$localIp\r\n")
         sb.append("CSeq: $optionsCseq OPTIONS\r\n")
-        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
         sb.append("Accept: application/sdp\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
@@ -591,7 +594,7 @@ class NativeSipClient(private val context: Context) {
                         stopRtpAudio()
                         stopCallRecording()
                         _state.value = SipState.ERROR
-                        _statusText.value = "Verbindung unterbrochen: \${e.message}"
+                        _statusText.value = "Verbindung unterbrochen: ${e.message}"
                     }
                 }
                 break
@@ -699,6 +702,11 @@ class NativeSipClient(private val context: Context) {
                             (_state.value == SipState.DIALING || _state.value == SipState.RINGING) -> {
                             extractDialogInfo(message)
                             val remoteMedia = parseRemoteSdp(message)
+                            if (remoteMedia != null) {
+                                // The initial 200 OK carries the answer for the
+                                // media offer. Activate SRTP before starting RTP.
+                                applyRemoteMedia(remoteMedia)
+                            }
 
                             _state.value = SipState.IN_CALL
                             _statusText.value = if (remoteMedia == null) {
@@ -897,7 +905,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("CSeq: $cseq REGISTER\r\n")
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         sb.append("Expires: 3600\r\n")
-        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
         if (authHeader != null) {
             sb.append("Authorization: $authHeader\r\n")
         }
@@ -971,7 +979,7 @@ class NativeSipClient(private val context: Context) {
                     )
                 )
             }
-            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:\${Base64.encodeToString(keySalt, Base64.NO_WRAP)}|2^20"
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${Base64.encodeToString(keySalt, Base64.NO_WRAP)}|2^20"
         } else {
             localSrtpMasterKeySalt = null
             localSrtpContext = null
@@ -1026,7 +1034,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Supported: timer\r\n")
         sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
         if (authHeader != null) {
             sb.append("$authHeaderName: $authHeader\r\n")
         }
@@ -1065,7 +1073,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Supported: timer\r\n")
         sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
 
 
         if (authHeader != null) {
@@ -1103,9 +1111,15 @@ class NativeSipClient(private val context: Context) {
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $inviteCseq ACK\r\n")
         routeSet.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
 
+        Log.i(
+            tag,
+            "Sending 2xx ACK: cseq=${inviteCseq}, requestUri=${requestUri}, " +
+                "toTag=${toTag}, routeCount=${routeSet.size}, " +
+                "sameTlsSocket=${config.protocol == SipTransportProtocol.TLS && socketWriter != null && sslSocket?.isClosed == false}"
+        )
         sendSipMessage(sb.toString(), config, udpDestination)
     }
 
@@ -1199,7 +1213,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq BYE\r\n")
         routes.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
     }
@@ -1222,7 +1236,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("To: <sip:$target@$domain>\r\n")
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq CANCEL\r\n")
-        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
     }
@@ -1429,9 +1443,9 @@ class NativeSipClient(private val context: Context) {
 
         Log.d(
             tag,
-            "RTP media negotiated: \${remote.address.hostAddress}:\${remote.port}, " +
-                "transport=\${if (remote.usesSrtp) "SRTP" else "RTP"}, " +
-                "payload=\${remote.payloadType}"
+            "RTP media negotiated: ${remote.address.hostAddress}:${remote.port}, " +
+                "transport=${if (remote.usesSrtp) "SRTP" else "RTP"}, " +
+                "payload=${remote.payloadType}"
         )
     }
 
@@ -1453,7 +1467,7 @@ class NativeSipClient(private val context: Context) {
         val requestSession = parseSessionExpiresSeconds(request) ?: sessionExpiresSeconds
         sb.append("Session-Expires: $requestSession;refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.5.0 Android\r\n")
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
         sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
         sb.append(sdp)
@@ -1634,6 +1648,9 @@ class NativeSipClient(private val context: Context) {
         rtpSequence = SecureRandom().nextInt(65536)
         rtpTimestamp = SecureRandom().nextInt().toLong() and 0xffffffffL
         lastRtpSentAt = 0L
+        rtpPacketsSent = 0L
+        rtpPacketsReceived = 0L
+        srtpPacketsRejected = 0L
     }
 
     private fun startRtpAudio(remote: RemoteRtpDescription) {
@@ -1861,6 +1878,14 @@ class NativeSipClient(private val context: Context) {
             }
             val wirePacket = srtpContext?.protect(packet) ?: packet
             socket.send(DatagramPacket(wirePacket, wirePacket.size, destination))
+            rtpPacketsSent += 1
+            if (rtpPacketsSent <= 5 || rtpPacketsSent % 250L == 0L) {
+                Log.i(
+                    tag,
+                    "RTP TX #${rtpPacketsSent}: protected=${srtpContext != null}, " +
+                        "remote=${destination}, seq=${rtpSequence}, bytes=${wirePacket.size}"
+                )
+            }
             rtpSequence = (rtpSequence + 1) and 0xffff
             rtpTimestamp = (rtpTimestamp + RTP_FRAME_SAMPLES) and 0xffffffffL
             lastRtpSentAt = System.currentTimeMillis()
@@ -1894,11 +1919,30 @@ class NativeSipClient(private val context: Context) {
                 val srtpContext = remoteSrtpContext
                 val rtpPacket = if (remoteUsesSrtp) {
                     if (srtpContext == null) continue
-                    srtpContext.unprotect(wirePacket) ?: continue
+                    val plainPacket = srtpContext.unprotect(wirePacket)
+                    if (plainPacket == null) {
+                        srtpPacketsRejected += 1
+                        if (srtpPacketsRejected <= 5 || srtpPacketsRejected % 250L == 0L) {
+                            Log.w(
+                                tag,
+                                "SRTP RX rejected #${srtpPacketsRejected}: bytes=${wirePacket.size}"
+                            )
+                        }
+                        continue
+                    }
+                    plainPacket
                 } else {
                     wirePacket
                 }
                 if (rtpPacket.size < 12) continue
+                rtpPacketsReceived += 1
+                if (rtpPacketsReceived <= 5 || rtpPacketsReceived % 250L == 0L) {
+                    Log.i(
+                        tag,
+                        "RTP RX #${rtpPacketsReceived}: protected=${remoteUsesSrtp}, " +
+                            "from=${packet.address}:${packet.port}, bytes=${rtpPacket.size}"
+                    )
+                }
 
                 val first = rtpPacket[0].toInt() and 0xff
                 val second = rtpPacket[1].toInt() and 0xff
