@@ -369,7 +369,7 @@ class NativeSipClient(private val context: Context) {
         // fills any gap with real RTP silence instead of going silent.
         const val RTP_KEEPALIVE_INTERVAL_MS = 20L
         const val RTP_KEEPALIVE_GAP_MS = 60L
-        const val DEFAULT_SESSION_EXPIRES_SECONDS = 1800
+        const val DEFAULT_SESSION_EXPIRES_SECONDS = 3600
         const val MIN_SESSION_EXPIRES_SECONDS = 20
     }
 
@@ -544,7 +544,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("To: <sip:$domain>\r\n")
         sb.append("Call-ID: $sipKeepAliveCallId@$localIp\r\n")
         sb.append("CSeq: $optionsCseq OPTIONS\r\n")
-        sb.append("User-Agent: SmartCalls/1.2.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
         sb.append("Accept: application/sdp\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
@@ -897,7 +897,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("CSeq: $cseq REGISTER\r\n")
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         sb.append("Expires: 3600\r\n")
-        sb.append("User-Agent: SmartCalls/1.0.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
         if (authHeader != null) {
             sb.append("Authorization: $authHeader\r\n")
         }
@@ -1026,7 +1026,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Supported: timer\r\n")
         sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
         if (authHeader != null) {
             sb.append("$authHeaderName: $authHeader\r\n")
         }
@@ -1065,7 +1065,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Supported: timer\r\n")
         sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
 
 
         if (authHeader != null) {
@@ -1103,7 +1103,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $inviteCseq ACK\r\n")
         routeSet.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
 
         sendSipMessage(sb.toString(), config, udpDestination)
@@ -1199,7 +1199,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq BYE\r\n")
         routes.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
     }
@@ -1222,7 +1222,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("To: <sip:$target@$domain>\r\n")
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq CANCEL\r\n")
-        sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
     }
@@ -1453,7 +1453,7 @@ class NativeSipClient(private val context: Context) {
         val requestSession = parseSessionExpiresSeconds(request) ?: sessionExpiresSeconds
         sb.append("Session-Expires: $requestSession;refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.1.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.4.0 Android\r\n")
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
         sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
         sb.append(sdp)
