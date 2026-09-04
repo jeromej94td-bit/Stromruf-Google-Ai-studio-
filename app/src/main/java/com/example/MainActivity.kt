@@ -10548,6 +10548,7 @@ fun OngoingCallDialog(
 ) {
     val context = LocalContext.current
     var localElapsedSeconds by remember { mutableStateOf(0L) }
+    var showCustomerTimeline by remember { mutableStateOf(false) }
 
     val powerManager = remember {
         context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
@@ -11297,6 +11298,26 @@ fun OngoingCallDialog(
                                 unfocusedContainerColor = Color(0xFF0F172A)
                             )
                         )
+
+                        OutlinedButton(
+                            onClick = { showCustomerTimeline = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            border = BorderStroke(1.dp, Color(0xFF00F0FF))
+                        ) {
+                            Icon(
+                                Icons.Default.History,
+                                contentDescription = null,
+                                tint = Color(0xFF00F0FF),
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                "Kundenverlauf ansehen / weitere Notiz",
+                                color = Color(0xFF00F0FF),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
 
@@ -11350,6 +11371,17 @@ fun OngoingCallDialog(
                 }
             }
         }
+    }
+
+    if (showCustomerTimeline) {
+        com.example.ui.screens.CustomerTimelineDialog(
+            contactId = contact?.id,
+            contactName = contact?.name ?: contactName,
+            phone = contact?.phone?.takeIf { it.isNotBlank() } ?: contactPhone,
+            callLogs = recentCallLogs,
+            source = "call_mask",
+            onDismiss = { showCustomerTimeline = false }
+        )
     }
 }
 
