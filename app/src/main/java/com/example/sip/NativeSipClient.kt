@@ -914,7 +914,7 @@ class NativeSipClient(private val context: Context) {
                                 dialogAuthChallenge = inviteTransaction.authChallenge
                             }
                             updateSessionTimer(message)
-                            parseRemoteSdp(message)?.let(::applyRemoteMedia)
+                            parseRemoteSdp(message)?.let { remote -> applyRemoteMedia(remote) }
                             sendAck(
                                 response = message,
                                 config = config,
@@ -935,7 +935,7 @@ class NativeSipClient(private val context: Context) {
                             it.startsWith("Proxy-Authenticate:", ignoreCase = true)
                         }
                     }
-                    val challenge = authHeader?.let(::parseAuthHeader)
+                    val challenge = authHeader?.let { parseAuthHeader(it) }
                     if (challenge == null) {
                         finishCallWithState(
                             SipState.ERROR,
@@ -1060,7 +1060,7 @@ class NativeSipClient(private val context: Context) {
         when (requestMethod) {
             "INVITE" -> {
                 if (_state.value == SipState.IN_CALL) {
-                    parseRemoteSdp(message)?.let(::applyRemoteMedia)
+                    parseRemoteSdp(message)?.let { remote -> applyRemoteMedia(remote) }
                     sendInviteResponseForRequest(message, config)
                 } else {
                     sendSipResponseForRequest(message, 491, "Request Pending", config)
