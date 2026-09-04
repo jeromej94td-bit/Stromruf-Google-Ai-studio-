@@ -106,8 +106,46 @@ class NativeSipClient(private val context: Context) {
     @Volatile private var lastUdpSender: InetSocketAddress? = null
     private var sipKeepAliveCallId = UUID.randomUUID().toString()
     private var sipKeepAliveCseq = 1
-    private var ackRetryJob: Job? = null
     @Volatile private var lastInviteResponseUdpSender: InetSocketAddress? = null
+
+    /**
+     * INVITE is stateful even on TLS. In particular, every 3xx-6xx final
+     * response (including 401/407) needs a transaction ACK with the exact
+     * original Via branch, Request-URI, From and Call-ID.
+     */
+    private data class DigestChallenge(
+        val realm: String,
+        val nonce: String,
+        val qop: String?,
+        val opaque: String?
+    )
+
+    private enum class InvitePurpose { INITIAL, SESSION_REFRESH }
+
+    private data class InviteClientTransaction(
+        val cseq: Int,
+        val purpose: InvitePurpose,
+        val requestUri: String,
+        val viaHeader: String,
+        val fromHeader: String,
+        val callIdHeader: String,
+        val routeHeaders: List<String>,
+        val authHeaderName: String?,
+        val authHeaderValue: String?,
+        val authChallenge: DigestChallenge?
+    )
+
+    private data class DialogRouting(
+        val requestUri: String,
+        val routeHeaders: List<String>
+    )
+
+    private val inviteTransactionLock = Any()
+    private val inviteTransactions = LinkedHashMap<Int, InviteClientTransaction>()
+    private val handledInviteAuthChallenges = mutableSetOf<String>()
+    private val successfulAckBranches = mutableMapOf<Int, String>()
+    private var dialogAuthHeaderName: String? = null
+    private var dialogAuthChallenge: DigestChallenge? = null
 
     // RTP media state. SIP only establishes the call; these sockets carry the audio.
     private enum class G711Codec { PCMA, PCMU }
@@ -387,12 +425,6 @@ class NativeSipClient(private val context: Context) {
         const val MIN_SESSION_EXPIRES_SECONDS = 20
     }
 
-    // Digest Authentication
-    private var lastRealm = ""
-    private var lastNonce = ""
-    private var lastQop: String? = null
-    private var lastOpaque: String? = null
-
     // Audio & Recording. The call audio is recorded locally as WAV only.
     private var callWavRecorder: PcmCallRecorder? = null
     private var currentRecordFile: File? = null
@@ -498,22 +530,28 @@ class NativeSipClient(private val context: Context) {
         synchronized(sipSendLock) {
             when (config.protocol) {
                 SipTransportProtocol.UDP -> {
-                val destination = udpDestination
-                    ?: lastUdpSender
-                    ?: InetSocketAddress(config.sipRegistrar, config.port)
-                val packet = DatagramPacket(
-                    bytes,
-                    bytes.size,
-                    destination.address,
-                    destination.port
-                )
-                udpSocket?.send(packet)
-            }
-            SipTransportProtocol.TCP, SipTransportProtocol.TLS -> {
-                socketWriter?.apply {
-                    write(bytes)
-                    flush()
+                    val socket = udpSocket
+                        ?: throw SocketException("SIP UDP socket is not connected")
+                    val destination = udpDestination
+                        ?: lastUdpSender
+                        ?: InetSocketAddress(config.sipRegistrar, config.port)
+                    val address = destination.address
+                        ?: InetAddress.getByName(destination.hostString)
+                    socket.send(
+                        DatagramPacket(
+                            bytes,
+                            bytes.size,
+                            address,
+                            destination.port
+                        )
+                    )
                 }
+
+                SipTransportProtocol.TCP, SipTransportProtocol.TLS -> {
+                    val writer = socketWriter
+                        ?: throw SocketException("SIP signaling socket is not connected")
+                    writer.write(bytes)
+                    writer.flush()
                 }
             }
         }
@@ -564,7 +602,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("To: <sip:$domain>\r\n")
         sb.append("Call-ID: $sipKeepAliveCallId@$localIp\r\n")
         sb.append("CSeq: $optionsCseq OPTIONS\r\n")
-        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
         sb.append("Accept: application/sdp\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
@@ -671,6 +709,50 @@ class NativeSipClient(private val context: Context) {
         return headers + "\r\n" + bodyBuilder.toString()
     }
 
+    private fun rememberInviteTransaction(transaction: InviteClientTransaction) {
+        synchronized(inviteTransactionLock) {
+            inviteTransactions[transaction.cseq] = transaction
+            while (inviteTransactions.size > 12) {
+                val oldestCseq = inviteTransactions.keys.firstOrNull() ?: break
+                inviteTransactions.remove(oldestCseq)
+            }
+        }
+    }
+
+    private fun findInviteTransaction(inviteCseq: Int?): InviteClientTransaction? {
+        if (inviteCseq == null) return null
+        return synchronized(inviteTransactionLock) {
+            inviteTransactions[inviteCseq]
+        }
+    }
+
+    private fun markInviteChallengeHandled(
+        transaction: InviteClientTransaction,
+        statusCode: Int,
+        challenge: DigestChallenge
+    ): Boolean = synchronized(inviteTransactionLock) {
+        handledInviteAuthChallenges.add(
+            "${transaction.cseq}:$statusCode:${challenge.realm}:${challenge.nonce}"
+        )
+    }
+
+    private fun successfulAckBranch(inviteCseq: Int): String =
+        synchronized(inviteTransactionLock) {
+            successfulAckBranches.getOrPut(inviteCseq) {
+                "z9hG4bK-${generateRandomHex(10)}"
+            }
+        }
+
+    private fun clearInviteTransactionState() {
+        synchronized(inviteTransactionLock) {
+            inviteTransactions.clear()
+            handledInviteAuthChallenges.clear()
+            successfulAckBranches.clear()
+        }
+        dialogAuthHeaderName = null
+        dialogAuthChallenge = null
+    }
+
     private fun handleSipMessage(message: String, config: SipAccountConfig) {
         val firstLine = message.lines().firstOrNull()?.trim().orEmpty()
         if (firstLine.isBlank()) return
@@ -678,29 +760,73 @@ class NativeSipClient(private val context: Context) {
         if (firstLine.startsWith("SIP/2.0", ignoreCase = true)) {
             val statusCode = firstLine.split(Regex("\\s+")).getOrNull(1)?.toIntOrNull() ?: return
             val method = extractCSeqMethod(message)
+            val responseCseq = extractCSeqNumber(message)
             val responseCallId = extractHeaderValue(message, "Call-ID")?.trim()
-            val currentCallId = "$callId@$localIp"
+            val inviteTransaction = if (method == "INVITE") {
+                findInviteTransaction(responseCseq)
+            } else {
+                null
+            }
 
-            // OPTIONS keepalive responses must never terminate an active call,
-            // even when the provider answers with 4xx/5xx.
+            // OPTIONS keepalive responses are independent of the active call.
             if (method == "OPTIONS") {
                 Log.d(tag, "SIP OPTIONS keepalive response: $statusCode")
                 return
             }
 
-            // A delayed response from REGISTER, a previous INVITE, or another
-            // transaction must not tear down the currently established dialog.
             val relevantResponse = when (method) {
                 "REGISTER" -> _state.value == SipState.CONNECTING
-                "INVITE" -> responseCallId == currentCallId &&
+                "INVITE" -> inviteTransaction != null &&
+                    responseCallId == inviteTransaction.callIdHeader &&
                     (_state.value == SipState.DIALING ||
                         _state.value == SipState.RINGING ||
                         _state.value == SipState.IN_CALL)
                 else -> false
             }
             if (!relevantResponse) {
-                Log.d(tag, "Ignoring SIP response for another transaction: $method/$statusCode")
+                Log.d(
+                    tag,
+                    "Ignoring SIP response for another transaction: " +
+                        "$method/$statusCode cseq=$responseCseq callId=$responseCallId"
+                )
                 return
+            }
+
+            // RFC 3261 section 17.1.1.3: every non-2xx final response to
+            // INVITE, including an authentication challenge, is completed by
+            // an ACK that exactly matches the original INVITE transaction.
+            if (method == "INVITE" && statusCode in 300..699) {
+                inviteTransaction?.let { transaction ->
+                    sendInviteFailureAck(
+                        response = message,
+                        config = config,
+                        transaction = transaction,
+                        udpDestination = lastUdpSender
+                    )
+                }
+
+                // A late final response for the pre-authentication INVITE must
+                // never be mistaken for a challenge to the established dialog.
+                if (_state.value == SipState.IN_CALL &&
+                    inviteTransaction?.purpose == InvitePurpose.INITIAL
+                ) {
+                    Log.i(
+                        tag,
+                        "ACKed delayed initial INVITE response $statusCode/$responseCseq"
+                    )
+                    return
+                }
+
+                // A rejected optional refresh does not destroy an otherwise
+                // established dialog. Authentication and dialog-loss errors
+                // are handled below.
+                if (_state.value == SipState.IN_CALL &&
+                    inviteTransaction?.purpose == InvitePurpose.SESSION_REFRESH &&
+                    statusCode !in listOf(401, 407, 408, 481)
+                ) {
+                    Log.w(tag, "Session refresh rejected with $statusCode; keeping call active")
+                    return
+                }
             }
 
             when (statusCode) {
@@ -712,6 +838,7 @@ class NativeSipClient(private val context: Context) {
 
                 180, 183 -> {
                     if (method == "INVITE" &&
+                        inviteTransaction?.purpose == InvitePurpose.INITIAL &&
                         (_state.value == SipState.DIALING || _state.value == SipState.RINGING)
                     ) {
                         _state.value = SipState.RINGING
@@ -728,12 +855,14 @@ class NativeSipClient(private val context: Context) {
                         }
 
                         method == "INVITE" &&
+                            inviteTransaction?.purpose == InvitePurpose.INITIAL &&
                             (_state.value == SipState.DIALING || _state.value == SipState.RINGING) -> {
                             extractDialogInfo(message)
+                            dialogAuthHeaderName = inviteTransaction.authHeaderName
+                            dialogAuthChallenge = inviteTransaction.authChallenge
+
                             val remoteMedia = parseRemoteSdp(message)
                             if (remoteMedia != null) {
-                                // The initial 200 OK carries the answer for the
-                                // media offer. Activate SRTP before starting RTP.
                                 applyRemoteMedia(remoteMedia)
                             }
 
@@ -744,11 +873,13 @@ class NativeSipClient(private val context: Context) {
                                 "Im Gespräch"
                             }
 
-                            // The 200 response completes the SIP dialog only after ACK.
-                            val responseCseq = extractCSeqNumber(message) ?: cseq
                             lastInviteResponseUdpSender = lastUdpSender
-                            sendAck(config, responseCseq, lastInviteResponseUdpSender)
-                            startAckRetry(config, responseCseq, lastInviteResponseUdpSender)
+                            sendAck(
+                                response = message,
+                                config = config,
+                                inviteCseq = inviteTransaction.cseq,
+                                udpDestination = lastInviteResponseUdpSender
+                            )
                             if (remoteMedia != null) {
                                 startRtpAudio(remoteMedia)
                             } else {
@@ -761,77 +892,113 @@ class NativeSipClient(private val context: Context) {
                             startCallRecording()
                         }
 
-                        // A provider may refresh the established dialog with a re-INVITE.
-                        // Answer it and ACK our own refresh responses so the call stays up.
-                        method == "INVITE" && _state.value == SipState.IN_CALL -> {
+                        // RFC 3261 requires another ACK for every retransmitted
+                        // 2xx. Do this in response to the packet, not on a blind timer.
+                        method == "INVITE" &&
+                            inviteTransaction?.purpose == InvitePurpose.INITIAL &&
+                            _state.value == SipState.IN_CALL -> {
+                            sendAck(
+                                response = message,
+                                config = config,
+                                inviteCseq = inviteTransaction.cseq,
+                                udpDestination = lastUdpSender
+                            )
+                        }
+
+                        method == "INVITE" &&
+                            inviteTransaction?.purpose == InvitePurpose.SESSION_REFRESH &&
+                            _state.value == SipState.IN_CALL -> {
                             extractDialogInfo(message)
-                            updateSessionTimer(message)
-                            parseRemoteSdp(message)?.let { remote ->
-                                applyRemoteMedia(remote)
+                            if (inviteTransaction.authChallenge != null) {
+                                dialogAuthHeaderName = inviteTransaction.authHeaderName
+                                dialogAuthChallenge = inviteTransaction.authChallenge
                             }
-                            val responseCseq = extractCSeqNumber(message) ?: cseq
-                            lastInviteResponseUdpSender = lastUdpSender
-                            sendAck(config, responseCseq, lastInviteResponseUdpSender)
-                            startAckRetry(config, responseCseq, lastInviteResponseUdpSender)
+                            updateSessionTimer(message)
+                            parseRemoteSdp(message)?.let(::applyRemoteMedia)
+                            sendAck(
+                                response = message,
+                                config = config,
+                                inviteCseq = inviteTransaction.cseq,
+                                udpDestination = lastUdpSender
+                            )
                             startSessionRefresh(config)
                         }
                     }
                 }
 
                 401, 407 -> {
-                    val authHeader = message.lines().firstOrNull {
-                        it.startsWith("WWW-Authenticate:", ignoreCase = true) ||
-                            it.startsWith("Proxy-Authenticate:", ignoreCase = true)
-                    }
-                    if (authHeader != null) {
-                        parseAuthHeader(authHeader)
-                        cseq++
-                        when {
-                            method == "REGISTER" && _state.value == SipState.CONNECTING -> {
-                                val auth = buildDigestAuth(
-                                    "REGISTER",
-                                    "sip:${config.sipRegistrar}",
-                                    config
-                                )
-                                sendRegister(config, auth)
-                            }
-
-                            method == "INVITE" &&
-                                (_state.value == SipState.DIALING ||
-                                    _state.value == SipState.RINGING) &&
-                                activeCallTarget != null -> {
-                                val auth = buildDigestAuth(
-                                    "INVITE",
-                                    inviteRequestUri
-                                        ?: "sip:${activeCallTarget}@${config.sipRegistrar}",
-                                    config
-                                )
-                                val headerName = if (statusCode == 407) {
-                                    "Proxy-Authorization"
-                                } else {
-                                    "Authorization"
-                                }
-                                sendInvite(activeCallTarget!!, config, auth, headerName)
-                            }
-
-                            method == "INVITE" && _state.value == SipState.IN_CALL -> {
-                                val requestUri = remoteContactUri
-                                    ?: inviteRequestUri
-                                    ?: "sip:${activeCallTarget ?: ""}@${config.sipRegistrar}"
-                                val auth = buildDigestAuth("INVITE", requestUri, config)
-                                val headerName = if (statusCode == 407) {
-                                    "Proxy-Authorization"
-                                } else {
-                                    "Authorization"
-                                }
-                                sendSessionRefresh(config, auth, headerName)
-                            }
+                    val authHeader = when (statusCode) {
+                        401 -> message.lineSequence().firstOrNull {
+                            it.startsWith("WWW-Authenticate:", ignoreCase = true)
                         }
-                    } else {
+                        else -> message.lineSequence().firstOrNull {
+                            it.startsWith("Proxy-Authenticate:", ignoreCase = true)
+                        }
+                    }
+                    val challenge = authHeader?.let(::parseAuthHeader)
+                    if (challenge == null) {
                         finishCallWithState(
                             SipState.ERROR,
-                            "Fehler: ${statusCode} Unauthorized (Kein Auth-Header)"
+                            "Fehler: $statusCode Unauthorized (Kein gültiger Auth-Header)"
                         )
+                        return
+                    }
+
+                    val headerName = if (statusCode == 407) {
+                        "Proxy-Authorization"
+                    } else {
+                        "Authorization"
+                    }
+
+                    when {
+                        method == "REGISTER" && _state.value == SipState.CONNECTING -> {
+                            cseq++
+                            val auth = buildDigestAuth(
+                                method = "REGISTER",
+                                uri = "sip:${config.sipRegistrar}",
+                                config = config,
+                                challenge = challenge
+                            )
+                            sendRegister(config, auth)
+                        }
+
+                        method == "INVITE" && inviteTransaction != null -> {
+                            if (!markInviteChallengeHandled(
+                                    inviteTransaction,
+                                    statusCode,
+                                    challenge
+                                )
+                            ) {
+                                Log.d(
+                                    tag,
+                                    "Ignoring repeated INVITE auth challenge " +
+                                        "$statusCode/$responseCseq"
+                                )
+                                return
+                            }
+
+                            when (inviteTransaction.purpose) {
+                                InvitePurpose.INITIAL -> {
+                                    cseq = maxOf(cseq, inviteTransaction.cseq) + 1
+                                    val target = activeCallTarget ?: return
+                                    sendInvite(
+                                        targetNumber = target,
+                                        config = config,
+                                        authChallenge = challenge,
+                                        authHeaderName = headerName
+                                    )
+                                }
+
+                                InvitePurpose.SESSION_REFRESH -> {
+                                    cseq = maxOf(cseq, inviteTransaction.cseq)
+                                    sendSessionRefresh(
+                                        config = config,
+                                        authChallenge = challenge,
+                                        authHeaderName = headerName
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -845,6 +1012,16 @@ class NativeSipClient(private val context: Context) {
                     "Fehler 404: Rufnummer nicht gefunden"
                 )
 
+                408 -> finishCallWithState(
+                    SipState.ERROR,
+                    "SIP-Dialog abgelaufen (408 Request Timeout)"
+                )
+
+                481 -> finishCallWithState(
+                    SipState.ERROR,
+                    "SIP-Dialog nicht mehr vorhanden (481)"
+                )
+
                 486 -> finishCallWithState(
                     SipState.ERROR,
                     "Besetzt (486 Busy Here)"
@@ -856,10 +1033,10 @@ class NativeSipClient(private val context: Context) {
                 )
 
                 else -> {
-                    if (statusCode >= 400) {
+                    if (statusCode >= 300) {
                         finishCallWithState(
                             SipState.ERROR,
-                            "SIP Fehler ${statusCode}: ${firstLine.substringAfter(statusCode.toString()).trim()}"
+                            "SIP Fehler $statusCode: ${firstLine.substringAfter(statusCode.toString()).trim()}"
                         )
                     }
                 }
@@ -883,9 +1060,7 @@ class NativeSipClient(private val context: Context) {
         when (requestMethod) {
             "INVITE" -> {
                 if (_state.value == SipState.IN_CALL) {
-                    parseRemoteSdp(message)?.let { remote ->
-                        applyRemoteMedia(remote)
-                    }
+                    parseRemoteSdp(message)?.let(::applyRemoteMedia)
                     sendInviteResponseForRequest(message, config)
                 } else {
                     sendSipResponseForRequest(message, 491, "Request Pending", config)
@@ -901,10 +1076,14 @@ class NativeSipClient(private val context: Context) {
             }
 
             "BYE" -> {
+                val remoteReason = extractHeaderValue(message, "Reason")
+                    ?: extractHeaderValue(message, "Warning")
+                Log.w(tag, "Remote BYE received${remoteReason?.let { ": $it" }.orEmpty()}")
                 sendSipResponseForRequest(message, 200, "OK", config)
                 finishCallWithState(
                     SipState.REGISTERED,
-                    "Gespräch vom Gesprächspartner beendet"
+                    remoteReason?.let { "Gespräch beendet: $it" }
+                        ?: "Gespräch vom Gesprächspartner beendet"
                 )
             }
 
@@ -934,7 +1113,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("CSeq: $cseq REGISTER\r\n")
         sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
         sb.append("Expires: 3600\r\n")
-        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
         if (authHeader != null) {
             sb.append("Authorization: $authHeader\r\n")
         }
@@ -971,7 +1150,7 @@ class NativeSipClient(private val context: Context) {
         remoteContactUri = null
         remoteToHeader = null
         routeSet = emptyList()
-        stopAckRetry()
+        clearInviteTransactionState()
         lastInviteResponseUdpSender = null
         stopSessionRefresh()
         sessionExpiresSeconds = DEFAULT_SESSION_EXPIRES_SECONDS
@@ -1041,39 +1220,73 @@ class NativeSipClient(private val context: Context) {
 
     private fun sendSessionRefresh(
         config: SipAccountConfig,
-        authHeader: String? = null,
-        authHeaderName: String = "Authorization"
+        authChallenge: DigestChallenge? = dialogAuthChallenge,
+        authHeaderName: String? = dialogAuthHeaderName
     ) {
         if (_state.value != SipState.IN_CALL) return
         val target = activeCallTarget ?: return
-        val requestUri = remoteContactUri
+        val remoteTarget = remoteContactUri
             ?: inviteRequestUri
             ?: "sip:$target@${config.sipRegistrar}"
         if (rtpSocket == null) return
+
+        val routing = dialogRouting(remoteTarget, routeSet)
         val refreshCseq = ++cseq
-        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
         val transport = config.protocol.name
         val user = config.sipUser
         val domain = config.sipRegistrar
+        val viaHeader =
+            "SIP/2.0/$transport $localIp:$localPort;branch=z9hG4bK-${generateRandomHex(10)};rport"
+        val fromHeader =
+            "\"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag"
+        val callIdHeader = "$callId@$localIp"
+        val authHeaderValue = if (authChallenge != null && authHeaderName != null) {
+            buildDigestAuth(
+                method = "INVITE",
+                uri = routing.requestUri,
+                config = config,
+                challenge = authChallenge
+            )
+        } else {
+            null
+        }
         val sdp = buildLocalSdp(config)
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
 
+        rememberInviteTransaction(
+            InviteClientTransaction(
+                cseq = refreshCseq,
+                purpose = InvitePurpose.SESSION_REFRESH,
+                requestUri = routing.requestUri,
+                viaHeader = viaHeader,
+                fromHeader = fromHeader,
+                callIdHeader = callIdHeader,
+                routeHeaders = routing.routeHeaders,
+                authHeaderName = authHeaderName,
+                authHeaderValue = authHeaderValue,
+                authChallenge = authChallenge
+            )
+        )
+
         val sb = StringBuilder()
-        sb.append("INVITE $requestUri SIP/2.0\r\n")
-        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("INVITE ${routing.requestUri} SIP/2.0\r\n")
+        sb.append("Via: $viaHeader\r\n")
         sb.append("Max-Forwards: 70\r\n")
-        sb.append("From: \"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append("From: $fromHeader\r\n")
         sb.append("To: ${remoteToHeader ?: "<sip:$target@$domain>"}\r\n")
-        sb.append("Call-ID: $callId@$localIp\r\n")
+        sb.append("Call-ID: $callIdHeader\r\n")
         sb.append("CSeq: $refreshCseq INVITE\r\n")
-        sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
-        routeSet.forEach { route -> sb.append("Route: $route\r\n") }
+        sb.append(
+            "Contact: <sip:$user@$localIp:$localPort;transport=" +
+                "${transport.lowercase(Locale.ROOT)}>\r\n"
+        )
+        routing.routeHeaders.forEach { route -> sb.append("Route: $route\r\n") }
         sb.append("Supported: timer\r\n")
         sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
-        if (authHeader != null) {
-            sb.append("$authHeaderName: $authHeader\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        if (authHeaderName != null && authHeaderValue != null) {
+            sb.append("$authHeaderName: $authHeaderValue\r\n")
         }
         sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
         sb.append(sdp)
@@ -1083,106 +1296,179 @@ class NativeSipClient(private val context: Context) {
     private fun sendInvite(
         targetNumber: String,
         config: SipAccountConfig,
-        authHeader: String?,
-        authHeaderName: String = "Proxy-Authorization"
+        authChallenge: DigestChallenge? = null,
+        authHeaderName: String? = null
     ) {
         val transport = config.protocol.name
         val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
         val user = config.sipUser
         val domain = config.sipRegistrar
         val requestUri = "sip:$targetNumber@$domain"
+        val viaHeader =
+            "SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport"
+        val fromHeader =
+            "\"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag"
+        val callIdHeader = "$callId@$localIp"
+        val requestCseq = cseq
+        val authHeaderValue = if (authChallenge != null && authHeaderName != null) {
+            buildDigestAuth(
+                method = "INVITE",
+                uri = requestUri,
+                config = config,
+                challenge = authChallenge
+            )
+        } else {
+            null
+        }
+
         inviteRequestUri = requestUri
         inviteViaBranch = viaBranch
 
         val sdp = buildLocalSdp(config)
-
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
+
+        rememberInviteTransaction(
+            InviteClientTransaction(
+                cseq = requestCseq,
+                purpose = InvitePurpose.INITIAL,
+                requestUri = requestUri,
+                viaHeader = viaHeader,
+                fromHeader = fromHeader,
+                callIdHeader = callIdHeader,
+                routeHeaders = emptyList(),
+                authHeaderName = authHeaderName,
+                authHeaderValue = authHeaderValue,
+                authChallenge = authChallenge
+            )
+        )
 
         val sb = StringBuilder()
         sb.append("INVITE $requestUri SIP/2.0\r\n")
-        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("Via: $viaHeader\r\n")
         sb.append("Max-Forwards: 70\r\n")
-        sb.append("From: \"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append("From: $fromHeader\r\n")
         sb.append("To: <sip:$targetNumber@$domain>\r\n")
-        sb.append("Call-ID: $callId@$localIp\r\n")
-        sb.append("CSeq: $cseq INVITE\r\n")
-        sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
+        sb.append("Call-ID: $callIdHeader\r\n")
+        sb.append("CSeq: $requestCseq INVITE\r\n")
+        sb.append(
+            "Contact: <sip:$user@$localIp:$localPort;transport=" +
+                "${transport.lowercase(Locale.ROOT)}>\r\n"
+        )
         sb.append("Supported: timer\r\n")
         sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
-
-
-        if (authHeader != null) {
-            sb.append("$authHeaderName: $authHeader\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        if (authHeaderName != null && authHeaderValue != null) {
+            sb.append("$authHeaderName: $authHeaderValue\r\n")
         }
         sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
         sb.append(sdp)
 
         sendSipMessage(sb.toString(), config)
     }
+
+    /**
+     * ACK for a successful INVITE response is a dialog request. It uses the
+     * Contact/Record-Route information from that exact 2xx response and carries
+     * the same authorization credentials as the acknowledged INVITE.
+     */
     private fun sendAck(
+        response: String,
         config: SipAccountConfig,
-        inviteCseq: Int = cseq,
+        inviteCseq: Int,
         udpDestination: InetSocketAddress? = null
     ) {
-        val target = activeCallTarget ?: return
-        val transport = config.protocol.name
-        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
-        val user = config.sipUser
-        val domain = config.sipRegistrar
-        val requestUri = remoteContactUri ?: inviteRequestUri ?: "sip:$target@$domain"
-        val fallbackToHeader = if (toTag != null) {
-            "<sip:$target@$domain>;tag=$toTag"
-        } else {
-            "<sip:$target@$domain>"
+        val transaction = findInviteTransaction(inviteCseq)
+        if (transaction == null) {
+            Log.e(tag, "Cannot ACK 2xx: INVITE transaction $inviteCseq is unknown")
+            return
         }
-        val toHeader = remoteToHeader ?: fallbackToHeader
+
+        val target = activeCallTarget ?: return
+        val domain = config.sipRegistrar
+        val remoteTarget = parseSipUri(extractHeaderValue(response, "Contact"))
+            ?: remoteContactUri
+            ?: transaction.requestUri
+        val responseRoutes = splitSipHeaderList(headerValues(response, "Record-Route"))
+        val effectiveRouteSet = if (responseRoutes.isNotEmpty()) {
+            responseRoutes.asReversed()
+        } else {
+            routeSet
+        }
+        val routing = dialogRouting(remoteTarget, effectiveRouteSet)
+        val toHeader = extractHeaderValue(response, "To")
+            ?: remoteToHeader
+            ?: "<sip:$target@$domain>${toTag?.let { ";tag=$it" }.orEmpty()}"
+        val viaHeader =
+            "SIP/2.0/${config.protocol.name} $localIp:$localPort;" +
+                "branch=${successfulAckBranch(inviteCseq)};rport"
 
         val sb = StringBuilder()
-        sb.append("ACK $requestUri SIP/2.0\r\n")
-        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("ACK ${routing.requestUri} SIP/2.0\r\n")
+        sb.append("Via: $viaHeader\r\n")
         sb.append("Max-Forwards: 70\r\n")
-        sb.append("From: \"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append("From: ${transaction.fromHeader}\r\n")
         sb.append("To: $toHeader\r\n")
-        sb.append("Call-ID: $callId@$localIp\r\n")
+        sb.append("Call-ID: ${transaction.callIdHeader}\r\n")
         sb.append("CSeq: $inviteCseq ACK\r\n")
-        routeSet.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
+        routing.routeHeaders.forEach { route -> sb.append("Route: $route\r\n") }
+        if (transaction.authHeaderName != null &&
+            transaction.authHeaderValue != null
+        ) {
+            sb.append(
+                "${transaction.authHeaderName}: " +
+                    "${transaction.authHeaderValue}\r\n"
+            )
+        }
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
 
         Log.i(
             tag,
-            "Sending 2xx ACK: cseq=${inviteCseq}, requestUri=${requestUri}, " +
-                "toTag=${toTag}, routeCount=${routeSet.size}, " +
-                "sameTlsSocket=${config.protocol == SipTransportProtocol.TLS && socketWriter != null && sslSocket?.isClosed == false}"
+            "Sending 2xx ACK: cseq=$inviteCseq, requestUri=${routing.requestUri}, " +
+                "to=$toHeader, routeCount=${routing.routeHeaders.size}, " +
+                "auth=${transaction.authHeaderName ?: "none"}, " +
+                "sameTlsSocket=" +
+                "${config.protocol == SipTransportProtocol.TLS &&
+                    socketWriter != null && sslSocket?.isClosed == false}"
         )
         sendSipMessage(sb.toString(), config, udpDestination)
     }
 
-    private fun startAckRetry(
+    /**
+     * ACK for 3xx-6xx stays inside the original INVITE transaction. Its top
+     * Via branch and Request-URI must therefore be byte-for-byte equivalent
+     * to the original request, even on a reliable TLS transport.
+     */
+    private fun sendInviteFailureAck(
+        response: String,
         config: SipAccountConfig,
-        inviteCseq: Int,
-        udpDestination: InetSocketAddress?
+        transaction: InviteClientTransaction,
+        udpDestination: InetSocketAddress? = null
     ) {
-        ackRetryJob?.cancel()
-        ackRetryJob = scope.launch(Dispatchers.IO) {
-            // Cover a lost first ACK and the provider's 200 OK retransmissions.
-            for (waitMs in listOf(500L, 1_000L, 2_000L, 4_000L, 8_000L, 16_000L)) {
-                delay(waitMs)
-                if (!isActive || _state.value != SipState.IN_CALL) return@launch
-                runCatching {
-                    sendAck(config, inviteCseq, udpDestination)
-                }.onFailure { error ->
-                    Log.w(tag, "SIP ACK retry failed", error)
-                }
-            }
-        }
-    }
+        val target = activeCallTarget.orEmpty()
+        val toHeader = extractHeaderValue(response, "To")
+            ?: "<sip:$target@${config.sipRegistrar}>"
 
-    private fun stopAckRetry() {
-        ackRetryJob?.cancel()
-        ackRetryJob = null
+        val sb = StringBuilder()
+        sb.append("ACK ${transaction.requestUri} SIP/2.0\r\n")
+        sb.append("Via: ${transaction.viaHeader}\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: ${transaction.fromHeader}\r\n")
+        sb.append("To: $toHeader\r\n")
+        sb.append("Call-ID: ${transaction.callIdHeader}\r\n")
+        sb.append("CSeq: ${transaction.cseq} ACK\r\n")
+        transaction.routeHeaders.forEach { route -> sb.append("Route: $route\r\n") }
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        sb.append("Content-Length: 0\r\n\r\n")
+
+        Log.i(
+            tag,
+            "Sending non-2xx INVITE ACK: cseq=${transaction.cseq}, " +
+                "sameVia=${transaction.viaHeader}, status=" +
+                "${response.lineSequence().firstOrNull().orEmpty()}"
+        )
+        sendSipMessage(sb.toString(), config, udpDestination)
     }
 
     fun hangUp() {
@@ -1203,7 +1489,6 @@ class NativeSipClient(private val context: Context) {
         val routes = routeSet.toList()
 
         stopInCallTimer()
-        stopAckRetry()
         stopSessionRefresh()
         stopRtpAudio()
         stopCallRecording()
@@ -1238,19 +1523,42 @@ class NativeSipClient(private val context: Context) {
         routes: List<String>
     ) {
         val transport = config.protocol.name
-        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
         val user = config.sipUser
         val domain = config.sipRegistrar
+        val routing = dialogRouting(requestUri, routes)
+        val authHeaderName = dialogAuthHeaderName
+        val authHeaderValue = if (
+            dialogAuthChallenge != null && authHeaderName != null
+        ) {
+            buildDigestAuth(
+                method = "BYE",
+                uri = routing.requestUri,
+                config = config,
+                challenge = dialogAuthChallenge!!
+            )
+        } else {
+            null
+        }
+
         val sb = StringBuilder()
-        sb.append("BYE $requestUri SIP/2.0\r\n")
-        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("BYE ${routing.requestUri} SIP/2.0\r\n")
+        sb.append(
+            "Via: SIP/2.0/$transport $localIp:$localPort;" +
+                "branch=z9hG4bK-${generateRandomHex(10)};rport\r\n"
+        )
         sb.append("Max-Forwards: 70\r\n")
-        sb.append("From: \"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append(
+            "From: \"${config.displayName}\" " +
+                "<sip:$user@$domain>;tag=$fromTag\r\n"
+        )
         sb.append("To: $toHeader\r\n")
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq BYE\r\n")
-        routes.forEach { route -> sb.append("Route: $route\r\n") }
-        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
+        routing.routeHeaders.forEach { route -> sb.append("Route: $route\r\n") }
+        if (authHeaderName != null && authHeaderValue != null) {
+            sb.append("$authHeaderName: $authHeaderValue\r\n")
+        }
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
     }
@@ -1273,7 +1581,7 @@ class NativeSipClient(private val context: Context) {
         sb.append("To: <sip:$target@$domain>\r\n")
         sb.append("Call-ID: $callId@$localIp\r\n")
         sb.append("CSeq: $cseq CANCEL\r\n")
-        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
         sb.append("Content-Length: 0\r\n\r\n")
         sendSipMessage(sb.toString(), config)
     }
@@ -1288,8 +1596,8 @@ class NativeSipClient(private val context: Context) {
     }
 
     private fun clearCallDialog() {
-        stopAckRetry()
         stopSessionRefresh()
+        clearInviteTransactionState()
         lastInviteResponseUdpSender = null
         localSrtpMasterKeySalt = null
         localSrtpContext = null
@@ -1304,15 +1612,23 @@ class NativeSipClient(private val context: Context) {
         toTag = null
     }
     private fun extractDialogInfo(message: String) {
-        val toValue = extractHeaderValue(message, "To")
-        remoteToHeader = toValue
-        toTag = toValue?.let {
-            Regex("(?i)(?:^|;)\\s*tag=([^;\\s]+)")
-                .find(it)?.groupValues?.getOrNull(1)
+        extractHeaderValue(message, "To")?.let { toValue ->
+            remoteToHeader = toValue
+            toTag = Regex("(?i)(?:^|;)\\s*tag=([^;\\s]+)")
+                .find(toValue)
+                ?.groupValues
+                ?.getOrNull(1)
         }
-        remoteContactUri = parseSipUri(extractHeaderValue(message, "Contact"))
-        // RFC 3261: the UAC uses the Record-Route list in reverse order.
-        routeSet = headerValues(message, "Record-Route").asReversed()
+        parseSipUri(extractHeaderValue(message, "Contact"))?.let {
+            remoteContactUri = it
+        }
+
+        // A route set is created by the initial dialog response and is not
+        // erased merely because an in-dialog re-INVITE response omits it.
+        val responseRoutes = splitSipHeaderList(headerValues(message, "Record-Route"))
+        if (responseRoutes.isNotEmpty() || routeSet.isEmpty()) {
+            routeSet = responseRoutes.asReversed()
+        }
     }
 
     private fun extractToTag(message: String) {
@@ -1353,6 +1669,97 @@ class NativeSipClient(private val context: Context) {
             it.startsWith("sip:", ignoreCase = true) ||
                 it.startsWith("sips:", ignoreCase = true)
         }
+    }
+
+    private fun splitSipHeaderList(values: List<String>): List<String> {
+        val result = mutableListOf<String>()
+        values.forEach { value ->
+            val current = StringBuilder()
+            var inQuotes = false
+            var escaped = false
+            var angleDepth = 0
+
+            fun flush() {
+                current.toString().trim()
+                    .takeIf { it.isNotEmpty() }
+                    ?.let(result::add)
+                current.setLength(0)
+            }
+
+            value.forEach { character ->
+                when {
+                    escaped -> {
+                        current.append(character)
+                        escaped = false
+                    }
+
+                    character == '\\' && inQuotes -> {
+                        current.append(character)
+                        escaped = true
+                    }
+
+                    character == '"' -> {
+                        current.append(character)
+                        inQuotes = !inQuotes
+                    }
+
+                    character == '<' && !inQuotes -> {
+                        current.append(character)
+                        angleDepth++
+                    }
+
+                    character == '>' && !inQuotes -> {
+                        current.append(character)
+                        angleDepth = (angleDepth - 1).coerceAtLeast(0)
+                    }
+
+                    character == ',' && !inQuotes && angleDepth == 0 -> flush()
+                    else -> current.append(character)
+                }
+            }
+            flush()
+        }
+        return result
+    }
+
+    private fun parseRouteUri(route: String): String? {
+        val candidate = route.trim().let { value ->
+            if (value.contains("<") && value.contains(">")) {
+                value.substringAfter("<").substringBefore(">").trim()
+            } else {
+                value
+            }
+        }
+        return candidate.takeIf {
+            it.startsWith("sip:", ignoreCase = true) ||
+                it.startsWith("sips:", ignoreCase = true)
+        }
+    }
+
+    /**
+     * RFC 3261 section 12.2.1.1 routing, including legacy strict routers.
+     */
+    private fun dialogRouting(
+        remoteTarget: String,
+        routes: List<String>
+    ): DialogRouting {
+        if (routes.isEmpty()) {
+            return DialogRouting(remoteTarget, emptyList())
+        }
+
+        val firstRoute = routes.first()
+        val isLooseRouter = Regex(
+            "(?i)(?:[;?&])lr(?:[=;?&>]|\\s|$)"
+        ).containsMatchIn(firstRoute)
+        if (isLooseRouter) {
+            return DialogRouting(remoteTarget, routes)
+        }
+
+        val strictRequestUri = parseRouteUri(firstRoute) ?: remoteTarget
+        val strictRoutes = routes.drop(1).toMutableList().apply {
+            add("<$remoteTarget>")
+        }
+        return DialogRouting(strictRequestUri, strictRoutes)
     }
 
     private fun extractMessageBody(message: String): String {
@@ -1504,7 +1911,7 @@ class NativeSipClient(private val context: Context) {
         val requestSession = parseSessionExpiresSeconds(request) ?: sessionExpiresSeconds
         sb.append("Session-Expires: $requestSession;refresher=uac\r\n")
         sb.append("Content-Type: application/sdp\r\n")
-        sb.append("User-Agent: SmartCalls/1.6.0 Android\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
         val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
         sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
         sb.append(sdp)
@@ -1570,52 +1977,83 @@ class NativeSipClient(private val context: Context) {
         sessionRefreshJob = null
     }
 
-    private fun parseAuthHeader(authHeader: String) {
-        val parts = authHeader.substringAfter("Digest ").split(",")
-        for (part in parts) {
-            val key = part.substringBefore("=").trim()
-            val value = part.substringAfter("=").trim().replace("\"", "")
+    private fun parseAuthHeader(authHeader: String): DigestChallenge? {
+        val headerValue = authHeader.substringAfter(":", authHeader).trim()
+        val digestMarker = Regex("(?i)\\bDigest\\s+").find(headerValue) ?: return null
+        val parameterText = headerValue.substring(digestMarker.range.last + 1)
+
+        var realm: String? = null
+        var nonce: String? = null
+        var qop: String? = null
+        var opaque: String? = null
+
+        splitSipHeaderList(listOf(parameterText)).forEach { parameter ->
+            val separator = parameter.indexOf('=')
+            if (separator <= 0) return@forEach
+            val key = parameter.substring(0, separator).trim()
+            val value = parameter.substring(separator + 1)
+                .trim()
+                .removeSurrounding("\"")
             when (key.lowercase(Locale.ROOT)) {
-                "realm" -> lastRealm = value
-                "nonce" -> lastNonce = value
-                "qop" -> lastQop = value
-                "opaque" -> lastOpaque = value
+                "realm" -> realm = value
+                "nonce" -> nonce = value
+                "qop" -> qop = value
+                "opaque" -> opaque = value
             }
         }
+
+        val parsedRealm = realm?.takeIf { it.isNotBlank() } ?: return null
+        val parsedNonce = nonce?.takeIf { it.isNotBlank() } ?: return null
+        return DigestChallenge(
+            realm = parsedRealm,
+            nonce = parsedNonce,
+            qop = qop,
+            opaque = opaque
+        )
     }
 
-    private fun buildDigestAuth(method: String, uri: String, config: SipAccountConfig): String {
+    private fun buildDigestAuth(
+        method: String,
+        uri: String,
+        config: SipAccountConfig,
+        challenge: DigestChallenge
+    ): String {
         val username = if (config.authUser.isNotBlank()) config.authUser else config.sipUser
         val password = config.sipPassword
-        val realm = lastRealm
-        val nonce = lastNonce
-        val cnonce = generateRandomHex(8)
-        val nc = "00000001"
+        val cnonce = generateRandomHex(16)
+        val nonceCount = "00000001"
+        val qopAuth = challenge.qop
+            ?.split(",")
+            ?.any { it.trim().equals("auth", ignoreCase = true) }
+            ?: false
 
-        val ha1 = md5("$username:$realm:$password")
+        if (challenge.qop != null && !qopAuth) {
+            throw IllegalArgumentException(
+                "Unsupported SIP Digest qop: ${challenge.qop}"
+            )
+        }
+
+        val ha1 = md5("$username:${challenge.realm}:$password")
         val ha2 = md5("$method:$uri")
-
-        val response = if (lastQop != null && (lastQop!!.contains("auth") || lastQop!!.contains("auth-int"))) {
-            md5("$ha1:$nonce:$nc:$cnonce:auth:$ha2")
+        val response = if (qopAuth) {
+            md5(
+                "$ha1:${challenge.nonce}:$nonceCount:$cnonce:auth:$ha2"
+            )
         } else {
-            md5("$ha1:$nonce:$ha2")
+            md5("$ha1:${challenge.nonce}:$ha2")
         }
 
         val sb = StringBuilder()
         sb.append("Digest username=\"$username\", ")
-        sb.append("realm=\"$realm\", ")
-        sb.append("nonce=\"$nonce\", ")
+        sb.append("realm=\"${challenge.realm}\", ")
+        sb.append("nonce=\"${challenge.nonce}\", ")
         sb.append("uri=\"$uri\", ")
         sb.append("response=\"$response\", ")
         sb.append("algorithm=MD5")
-
-        if (lastOpaque != null) {
-            sb.append(", opaque=\"$lastOpaque\"")
+        challenge.opaque?.let { sb.append(", opaque=\"$it\"") }
+        if (qopAuth) {
+            sb.append(", qop=auth, nc=$nonceCount, cnonce=\"$cnonce\"")
         }
-        if (lastQop != null) {
-            sb.append(", qop=auth, nc=$nc, cnonce=\"$cnonce\"")
-        }
-
         return sb.toString()
     }
 
