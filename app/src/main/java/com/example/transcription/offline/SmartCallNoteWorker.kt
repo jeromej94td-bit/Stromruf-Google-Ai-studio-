@@ -4,6 +4,11 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.example.agent.AgentBackend
+import com.example.database.AppDatabase
+import com.example.database.FollowUpEntity
+import com.example.receiver.FollowUpAlarmScheduler
+import com.example.repository.StromrufRepository
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -39,6 +44,26 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                 sourceFileName = name
             )
             if (saved) {
+                val plan = GermanFollowUpPlanner.plan(transcript)
+                if (plan != null) {
+                    val db = AppDatabase.getDatabase(context)
+                    val repository = StromrufRepository(context, db.stromrufDao())
+                    val contact = repository.getContactByPhone(phone)
+                    val followUpId = UUID.nameUUIDFromBytes("smart-call-followup:$name".toByteArray()).toString()
+                    val inserted = repository.insertFollowUp(FollowUpEntity(
+                        id = followUpId,
+                        contactId = contact?.id,
+                        contactName = contact?.name ?: phone,
+                        contactPhone = phone,
+                        note = "Smart Call: $summary\n${plan.description}",
+                        dueAt = plan.dueAt,
+                        callReason = "Smart Call"
+                    ))
+                    FollowUpAlarmScheduler.scheduleAlarm(context, inserted.id, inserted.contactName, inserted.contactPhone, inserted.dueAt)
+                    job.put("followUpState", "done").put("followUpMessage", "Termin automatisch angelegt")
+                } else {
+                    job.put("followUpState", "none").put("followUpMessage", "Kein eindeutiger Rückruftermin erkannt")
+                }
                 job.put("syncState", "done").put("syncMessage", "Als Smart-Call-Notiz gespeichert")
                 LocalTranscripts.write(context, name, job)
                 Result.success()

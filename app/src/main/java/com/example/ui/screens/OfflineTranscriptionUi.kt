@@ -67,6 +67,7 @@ fun OfflineRecordingTranscript(file: File) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(localError ?: snapshot.optString("message", "Lokales Deutsch-Transkript"), style = MaterialTheme.typography.bodySmall)
         snapshot.optString("syncMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        snapshot.optString("followUpMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         snapshot.optString("summary").takeIf { it.isNotBlank() }?.let { Text("Notiz: $it", style = MaterialTheme.typography.bodySmall, maxLines = 4) }
         if (state in setOf("", "error")) OutlinedButton(onClick = {
             scope.launch {
