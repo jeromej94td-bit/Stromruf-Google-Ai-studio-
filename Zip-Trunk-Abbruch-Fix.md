@@ -198,3 +198,53 @@ Für einen belastbaren Regressionstest:
 
 SDK-Quellen und Lizenzhinweise stehen in der verlinkten technischen Übergabe.
 Die Lösung wurde für die ausdrücklich gewünschte persönliche Android-Nutzung umgesetzt.
+
+## Wiederherstellung der Anmeldung – Version 2.8 (5. September 2026)
+
+Das neue Video zeigt eine bei „SIP-Anmeldung läuft …“ verbleibende Anmeldung.
+Ein Gespräch wird darin nicht aufgebaut. Der genaue Netzwerkfehler ist ohne
+SDK-Trace nicht bewiesen.
+
+Auch nach PR #33 wich der Adapter noch vom Referenz-Commit ab: `sips:` mit
+Transportparameter, Normalisierung einschließlich Passwort-Trimmen und zusätzliche
+Registrierungswiederholungen. Diese Abweichungen wurden zurückgenommen. Der
+SIP-Adapter entspricht jetzt vollständig `35264e5`, bis auf die beibehaltene
+Einplanung der lokalen Transkription nach abgeschlossener Aufnahme. TLS wird wie
+im Referenzstand über `server.transport` gesetzt; Zertifikatsprüfung und SRTP
+bleiben aktiv. SmartCallService entspricht ebenfalls weiterhin dem Referenzstand.
+
+Build: Version 2.8, versionCode 19. Die Anrufmaske zeigt nun die tatsächliche
+Build-Version statt des fest eingetragenen Textes 2.1. Aus dem alten Bildschirmtext
+konnte die installierte APK-Version deshalb nicht abgeleitet werden.
+
+Prüfung: vollständiger textueller Adaptervergleich mit dem Referenz-Commit unter
+Ausnahme des Transkriptionsaufrufs und `git diff --check`. Kein APK-Build und kein
+realer Easybell-Anruf in dieser Umgebung. Auf dem Gerät zuerst erfolgreiche
+Anmeldung, dann Audio beider Seiten und Gespräch über 30 Sekunden prüfen.
+
+## Gezielte Telefonie-Wiederherstellung – Version 2.9 / Build 21
+
+Die Zeitfolge wurde direkt in Git geprüft: Linphone-Commit `35264e5` vom
+5. September 2026, 14:11:15 Uhr deutscher Zeit; erstmalige Dokumentation
+`ad68977` um 14:53:47 Uhr. Der direkte Main-Vorgänger der Dokumentation
+(`5664d8b`) enthielt noch NativeSipClient. Die Linphone-Implementierung lag
+zu diesem Zeitpunkt auf einem separaten Branch.
+
+Dieser PR baut auf dem aktuellen Main-Stand auf, nicht auf dem vollständigen
+Wiederherstellungsbranch. Der SIP-Adapter entspricht dem 14:11-Stand mit einer
+bewusst erhaltenen Erweiterung: nach finalisierter Aufnahme wird die aktuelle
+lokale Transkription eingeplant. Der gesamte Telefoniedienst, die SIP-Einstellungen
+inklusive Speicherung und automatischer Anmeldung, die Android-Berechtigungen,
+die Dienstdeklaration sowie SDK 5.5.18 und Maven-Repository entsprechen bereits
+dem Referenzstand und wurden verglichen. Eine erneute Änderung dieser identischen
+Teile ist nicht nötig.
+
+Die spätere lokale KI, Whisper, Gemma, Notizen, Termine, Supabase-Verarbeitung,
+Native-Build-Konfiguration und deren Abhängigkeiten bleiben im aktuellen Stand.
+Es werden keine Dateien außerhalb von SIP-Adapter, Versionsanzeige,
+Build-Versionsangaben und dieser Dokumentation geändert.
+
+Version 2.9 / Build 21 ist höher als der komplette Wiederherstellungsbuild 20.
+Die Anrufmaske zeigt die tatsächliche Version aus BuildConfig.
+Quellvergleich und XML-Prüfung erfolgreich; kein APK-/Gerätetest durchgeführt.
+Die Wiederherstellung ist kein Nachweis für erfolgreiche Anmeldung am Gerät.
