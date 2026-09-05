@@ -17,6 +17,10 @@ plugins { id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 dependencyResolutionManagement {
   repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
   repositories {
+    maven {
+      url = uri("https://download.linphone.org/maven_repository/")
+      content { includeGroup("org.linphone") }
+    }
     google()
     mavenCentral()
   }
