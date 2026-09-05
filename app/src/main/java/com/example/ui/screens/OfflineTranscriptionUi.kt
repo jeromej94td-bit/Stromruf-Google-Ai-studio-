@@ -38,12 +38,12 @@ fun OfflineTranscriptionSetup() {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Kostenlos transkribieren · Deutsch", style = MaterialTheme.typography.titleMedium)
             Text(if (ready) "Bereit. Neue Gespräche über eine Minute werden nach dem Auflegen auf dem Handy transkribiert."
-                else "Einmal etwa 190 MB herunterladen. Danach funktioniert die Transkription ohne Internet und ohne API-Gebühren.")
+                else "Einmal etwa 60 MB herunterladen. Danach funktioniert die Transkription ohne Internet und ohne API-Gebühren.")
             Text(status, style = MaterialTheme.typography.bodySmall)
             if (!ready) Button(onClick = {
                 scope.launch(Dispatchers.IO) { LocalTranscripts.download(context) }
-            }) { Text("Deutsch-Modell laden / fortsetzen") }
-            Text("Längere Aufnahmen brauchen Zeit und Akku. Während eines Smart Calls pausiert die Verarbeitung. Zusammenfassungen und Termine sind ein späterer Schritt.",
+            }) { Text("Schnelles Deutsch-Modell laden / fortsetzen") }
+            Text("Die Verarbeitung läuft abschnittsweise und zeigt nach jedem kurzen Abschnitt Fortschritt. Während eines Smart Calls pausiert sie automatisch.",
                 style = MaterialTheme.typography.bodySmall)
         }
     }

@@ -10,9 +10,12 @@ import java.util.concurrent.TimeUnit
 
 /** Separate from Gemini's summary cache: a transcript is not a conversation summary. */
 object LocalTranscripts {
-    const val MODEL_SIZE = 190085487L
-    const val MODEL_SHA = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"
-    const val MODEL_NAME = "ggml-small-q5_1.bin"
+    // Base q5_1 is intentionally used on-device. The previous small q5_1 model was
+    // ~190 MB and could spend a long time in the very first 30 s window, leaving UI at 0 %.
+    const val MODEL_SIZE = 59707625L
+    const val MODEL_SHA = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898"
+    const val MODEL_NAME = "ggml-base-q5_1.bin"
+    private const val LEGACY_MODEL_NAME = "ggml-small-q5_1.bin"
     const val QUEUE = "smartcalls-local-german"
     const val DOWNLOAD = "smartcalls-whisper-model"
     fun directory(context: Context) = File(context.noBackupFilesDir, "local_transcription").apply { mkdirs() }
@@ -40,8 +43,12 @@ object LocalTranscripts {
         catch (e: Exception) { atomic.failWrite(out); throw e }
     }
 
-    @Synchronized fun modelStatus(context: Context): String =
-        readJson(File(directory(context), "model.json")).optString("status", "Modell noch nicht geladen")
+    @Synchronized fun modelStatus(context: Context): String {
+        val saved = readJson(File(directory(context), "model.json")).optString("status", "Modell noch nicht geladen")
+        return if (!ready(context) && saved.startsWith("Bereit"))
+            "Schnelles Deutsch-Modell muss einmal geladen werden"
+        else saved
+    }
 
     @Synchronized fun modelStatus(context: Context, message: String) {
         atomicWrite(File(directory(context), "model.json"), JSONObject().put("status", message).toString())
@@ -81,8 +88,10 @@ object LocalTranscripts {
 
     fun download(context: Context) {
         if (ready(context)) { resume(context); return }
-        modelStatus(context, "Download eingeplant …")
-        WorkManager.getInstance(context).enqueueUniqueWork(DOWNLOAD, ExistingWorkPolicy.KEEP,
+        // Reclaim the obsolete ~190 MB model from PR #22 before downloading the faster model.
+        File(directory(context), LEGACY_MODEL_NAME).delete()
+        modelStatus(context, "Schnelles Deutsch-Modell wird vorbereitet …")
+        WorkManager.getInstance(context).enqueueUniqueWork(DOWNLOAD, ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<WhisperModelWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.SECONDS).build())
