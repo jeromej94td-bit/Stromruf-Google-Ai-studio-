@@ -115,7 +115,7 @@ fun StromrufShell(
                         onOpenContact = { selectedContact = it },
                         onAddNeukunde = onAddNeukunde
                     )
-                    "aktivitaeten" -> AktivitaetenScreen(
+                    "aktivitaeten" -> AktivitaetenCalendarHost(
                         viewModel = viewModel,
                         onAddFollowUp = onAddFollowUp
                     )
