@@ -88,7 +88,7 @@ class NativeSipClient(private val context: Context) {
     private var tcpSocket: Socket? = null
     private var sslSocket: SSLSocket? = null
     private var socketWriter: OutputStream? = null
-    private var socketReader: BufferedReader? = null
+    private var socketReader: SipStreamReader? = null
 
     // SIP Session variables
     private var localIp = "127.0.0.1"
@@ -391,6 +391,7 @@ class NativeSipClient(private val context: Context) {
         mapOf(8 to G711Codec.PCMA, 0 to G711Codec.PCMU)
     @Volatile private var localSrtpContext: SrtpContext? = null
     @Volatile private var remoteSrtpContext: SrtpContext? = null
+    private var remoteSrtpParameters: SrtpCryptoParameters? = null
     @Volatile private var remoteUsesSrtp = false
     private var localSrtpMasterKeySalt: ByteArray? = null
     private var rtpSequence = SecureRandom().nextInt(65536)
@@ -494,7 +495,10 @@ class NativeSipClient(private val context: Context) {
                 socket.soTimeout = 0
                 tcpSocket = socket
                 socketWriter = socket.getOutputStream()
-                socketReader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                socketReader = SipStreamReader(BufferedInputStream(socket.getInputStream())) {
+                    sendSipMessage("\r\n", config)
+                    Log.i(tag, "SIP keepalive ping answered on existing socket")
+                }
                 socket.localAddress?.hostAddress
                     ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
                     ?.let { localIp = it }
@@ -512,7 +516,10 @@ class NativeSipClient(private val context: Context) {
                 socket.startHandshake()
                 sslSocket = socket
                 socketWriter = socket.getOutputStream()
-                socketReader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                socketReader = SipStreamReader(BufferedInputStream(socket.getInputStream())) {
+                    sendSipMessage("\r\n", config)
+                    Log.i(tag, "SIP keepalive ping answered on existing socket")
+                }
                 socket.localAddress?.hostAddress
                     ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
                     ?.let { localIp = it }
@@ -555,7 +562,7 @@ class NativeSipClient(private val context: Context) {
                 }
             }
         }
-        Log.d(tag, "Sent SIP Message:\n$message")
+        Log.d(tag, "SIP TX ${message.lineSequence().firstOrNull().orEmpty()} cseq=${extractCSeqMethod(message)}/${extractCSeqNumber(message)}")
     }
 
     private fun startSipKeepAlive(config: SipAccountConfig) {
@@ -577,9 +584,12 @@ class NativeSipClient(private val context: Context) {
                 if (_state.value == SipState.CONNECTING) continue
 
                 runCatching {
-                    // OPTIONS is a valid SIP transaction and keeps the long-lived
-                    // UDP/TCP/TLS signaling path open without changing the call dialog.
-                    sendSipOptionsKeepAlive(config)
+                    // Stream keepalive stays on the existing TLS/TCP socket.
+                    if (config.protocol == SipTransportProtocol.UDP) {
+                        sendSipOptionsKeepAlive(config)
+                    } else {
+                        sendSipMessage("\r\n\r\n", config)
+                    }
                 }.onFailure { error ->
                     Log.w(tag, "SIP OPTIONS keepalive failed", error)
                 }
@@ -629,85 +639,30 @@ class NativeSipClient(private val context: Context) {
                 }
 
                 if (rawMessage.isNullOrBlank()) continue
-                Log.d(tag, "Received SIP Message:\n$rawMessage")
+                Log.d(tag, "SIP RX ${rawMessage.lineSequence().firstOrNull().orEmpty()} cseq=${extractCSeqMethod(rawMessage)}/${extractCSeqNumber(rawMessage)}")
                 handleSipMessage(rawMessage, config)
             } catch (e: SocketTimeoutException) {
                 // Keepalive check / retry
             } catch (e: Exception) {
                 if (scope.isActive && _state.value != SipState.DISCONNECTED) {
-                    val stateAtFailure = _state.value
                     Log.e(tag, "Error reading SIP stream", e)
                     stopSipKeepAlive()
-                    if (stateAtFailure == SipState.IN_CALL) {
-                        // A signaling socket error must not tear down an otherwise
-                        // active RTP stream. RTP continues while the peer/SBC
-                        // recovers its signaling path.
-                        _statusText.value =
-                            "Im Gespräch (SIP-Signalisierung kurz unterbrochen)"
-                    } else {
-                        stopInCallTimer()
-                        stopRtpAudio()
-                        stopCallRecording()
-                        _state.value = SipState.ERROR
-                        _statusText.value = "Verbindung unterbrochen: ${e.message}"
-                    }
+                    val media = "TX=$rtpPacketsSent RX=$rtpPacketsReceived SRTP-verworfen=$srtpPacketsRejected"
+                    finishCallWithState(
+                        SipState.ERROR,
+                        "SIP-Verbindung unterbrochen (${e.javaClass.simpleName}); $media"
+                    )
+                    // A new REGISTER alone cannot restore the peer's old call.
+
                 }
                 break
             }
         }
     }
 
-    private fun readSipMessageFromStream(): String? {
-        val reader = socketReader ?: return null
-        val headerBuilder = StringBuilder()
-        var line: String?
-
-        // SIP over TCP/TLS peers may use an empty line (double-CRLF) as a
-        // keep-alive. Ignore leading empty lines instead of treating them as
-        // an EOF/transport failure.
-        do {
-            line = reader.readLine()
-            if (line == null) {
-                throw EOFException("SIP-Verbindung wurde geschlossen")
-            }
-        } while (line.isNullOrEmpty())
-
-        headerBuilder.append(line).append("\r\n")
-
-        // Read the remaining SIP headers.
-        while (reader.readLine().also { line = it } != null) {
-            if (line.isNullOrEmpty()) {
-                break
-            }
-            headerBuilder.append(line).append("\r\n")
-        }
-
-        if (headerBuilder.isEmpty()) {
-            throw EOFException("SIP-Verbindung wurde geschlossen")
-        }
-
-        val headers = headerBuilder.toString()
-        var contentLength = 0
-        headers.lines().forEach { l ->
-            if (l.startsWith("Content-Length:", ignoreCase = true) || l.startsWith("l:", ignoreCase = true)) {
-                contentLength = l.substringAfter(":").trim().toIntOrNull() ?: 0
-            }
-        }
-
-        val bodyBuilder = StringBuilder()
-        if (contentLength > 0) {
-            val bodyChars = CharArray(contentLength)
-            var read = 0
-            while (read < contentLength) {
-                val r = reader.read(bodyChars, read, contentLength - read)
-                if (r == -1) break
-                read += r
-            }
-            bodyBuilder.append(bodyChars, 0, read)
-        }
-
-        return headers + "\r\n" + bodyBuilder.toString()
-    }
+    private fun readSipMessageFromStream(): String =
+        socketReader?.readMessage()
+            ?: throw EOFException("SIP reader is not connected")
 
     private fun rememberInviteTransaction(transaction: InviteClientTransaction) {
         synchronized(inviteTransactionLock) {
@@ -1083,7 +1038,7 @@ class NativeSipClient(private val context: Context) {
                 finishCallWithState(
                     SipState.REGISTERED,
                     remoteReason?.let { "Gespräch beendet: $it" }
-                        ?: "Gespräch vom Gesprächspartner beendet"
+                        ?: "Gegenstelle beendet; TX=$rtpPacketsSent RX=$rtpPacketsReceived SRTP-verworfen=$srtpPacketsRejected"
                 )
             }
 
@@ -1602,6 +1557,7 @@ class NativeSipClient(private val context: Context) {
         localSrtpMasterKeySalt = null
         localSrtpContext = null
         remoteSrtpContext = null
+        remoteSrtpParameters = null
         remoteUsesSrtp = false
         activeCallTarget = null
         inviteRequestUri = null
@@ -1883,7 +1839,17 @@ class NativeSipClient(private val context: Context) {
         negotiatedPayloadType = remote.payloadType
         negotiatedCodecs = remote.codecs
         remoteUsesSrtp = remote.usesSrtp
-        remoteSrtpContext = remote.srtpCrypto?.let { SrtpContext(it) }
+        val next = remote.srtpCrypto
+        val previous = remoteSrtpParameters
+        // Preserve ROC and sequence state when a refresh repeats the same key.
+        val unchanged = next != null && previous != null &&
+            next.masterKey.contentEquals(previous.masterKey) &&
+            next.masterSalt.contentEquals(previous.masterSalt) &&
+            next.authTagLength == previous.authTagLength
+        if (!unchanged) {
+            remoteSrtpContext = next?.let { SrtpContext(it) }
+            remoteSrtpParameters = next
+        }
 
         Log.d(
             tag,
@@ -2130,6 +2096,7 @@ class NativeSipClient(private val context: Context) {
         localSrtpMasterKeySalt = null
         localSrtpContext = null
         remoteSrtpContext = null
+        remoteSrtpParameters = null
         remoteUsesSrtp = false
         rtpSequence = SecureRandom().nextInt(65536)
         rtpTimestamp = SecureRandom().nextInt().toLong() and 0xffffffffL
