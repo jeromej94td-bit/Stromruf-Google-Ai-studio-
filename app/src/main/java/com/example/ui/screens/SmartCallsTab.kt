@@ -202,60 +202,21 @@ fun SmartCallsTab() {
     }
 
     fun startTranscription(file: File) {
-        if (!transcriber.hasApiKey()) {
-            pendingFileToTranscribe = file
-            showApiKeyDialog = true
-            return
-        }
-
+        // The visible recording button now always uses the free on-device pipeline.
+        // It also schedules the model download on a first tap instead of silently waiting.
         coroutineScope.launch {
-            transcribingFiles = transcribingFiles + file.name
-            val res = transcriber.transcribeAndSummarize(
-                file,
-                fallbackDurationSeconds = recordingDurations[file.name] ?: 0L
-            )
-            transcribingFiles = transcribingFiles - file.name
-
-            if (res.isSuccess) {
-                val result = res.getOrNull()
-                reloadTranscripts()
-                if (result != null) {
-                    activeTranscriptResult = result
-
-                    val durationSeconds = maxOf(
-                        result.estimatedDurationSeconds,
-                        recordingDurations[file.name] ?: 0L
-                    )
-                    val remoteMessage = if (durationSeconds > 60L) {
-                        val saved = AgentBackend.saveSmartCallNote(
-                            context = ctx,
-                            phone = phoneForRecording(file),
-                            contactId = null,
-                            contactName = null,
-                            callStartedAt = file.lastModified(),
-                            durationSeconds = durationSeconds,
-                            summary = result.summary,
-                            sourceFileName = file.name
-                        )
-                        if (saved) {
-                            reloadSmartCallNotes()
-                            "Zusammenfassung in Supabase gespeichert."
-                        } else {
-                            "Lokal erstellt; Supabase-Speicherung fehlgeschlagen."
-                        }
-                    } else {
-                        "Lokal erstellt; nicht gespeichert (Gespräch höchstens 1 Minute)."
-                    }
-
-                    Toast.makeText(
-                        ctx,
-                        "Transkription & Notiz erfolgreich erstellt! ✨\n$remoteMessage",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+            val error = withContext(Dispatchers.IO) {
+                runCatching { com.example.transcription.offline.LocalTranscripts.request(ctx, file) }
+                    .exceptionOrNull()?.message
+            }
+            if (error == null) {
+                Toast.makeText(
+                    ctx,
+                    "Kostenlose deutsche Transkription eingeplant. Der Status steht direkt unter der Aufnahme.",
+                    Toast.LENGTH_LONG
+                ).show()
             } else {
-                val err = res.exceptionOrNull()?.message ?: "Unbekannter Fehler"
-                Toast.makeText(ctx, "Fehler: $err", Toast.LENGTH_LONG).show()
+                Toast.makeText(ctx, "Transkription konnte nicht gestartet werden: $error", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -330,6 +291,13 @@ fun SmartCallsTab() {
         reloadTranscripts()
         syncCachedNotesToSupabase()
         reloadSmartCallNotes()
+    }
+    // A local worker writes the note after transcription; keep the visible list current.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(15_000)
+            reloadSmartCallNotes()
+        }
     }
 
     LaunchedEffect(lastRecordingFile) {
@@ -1229,6 +1197,7 @@ fun SmartCallsTab() {
         }
 
         OfflineTranscriptionSetup()
+        LocalGemmaSetup()
 
         // LOCAL RECORDINGS ARCHIVE CARD
         Card(
@@ -1509,7 +1478,7 @@ fun SmartCallsTab() {
                                             )
                                             Spacer(Modifier.width(8.dp))
                                             Text(
-                                                text = "Optional: Gemini-Analyse (API, ggf. kostenpflichtig)",
+                                                text = "Kostenlos lokal auf Deutsch transkribieren",
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.Medium,
                                                 color = Color.White
