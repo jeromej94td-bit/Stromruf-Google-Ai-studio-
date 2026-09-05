@@ -58,6 +58,8 @@ class LinphoneSipClient private constructor(private val context: Context) {
     private var durationJob: Job? = null
     private var disconnectAfterCall = false
     private var callFailed = false
+    private var registrationRetryJob: Job? = null
+    private var registrationAttempts = 0
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else handler.post { block() }
@@ -70,6 +72,9 @@ class LinphoneSipClient private constructor(private val context: Context) {
             if (account != this@LinphoneSipClient.account || activeCall != null || pendingNumber != null) return
             when (state) {
                 RegistrationState.Ok -> {
+                    registrationRetryJob?.cancel()
+                    registrationRetryJob = null
+                    registrationAttempts = 0
                     _state.value = SipState.REGISTERED
                     _statusText.value = "Registriert – Linphone / ${config?.protocol?.name}"
                 }
@@ -77,7 +82,11 @@ class LinphoneSipClient private constructor(private val context: Context) {
                     _state.value = SipState.CONNECTING
                     _statusText.value = "SIP-Anmeldung läuft …"
                 }
-                RegistrationState.Failed -> fail("SIP-Anmeldung fehlgeschlagen")
+                RegistrationState.Failed -> {
+                    val detail = registrationDetail(message)
+                    fail("SIP-Anmeldung fehlgeschlagen${detail?.let { ": $it" } ?: ""}")
+                    scheduleRegistrationRetry()
+                }
                 RegistrationState.Cleared, RegistrationState.None -> {
                     _state.value = SipState.DISCONNECTED
                     _statusText.value = "Nicht verbunden"
@@ -139,7 +148,13 @@ class LinphoneSipClient private constructor(private val context: Context) {
                     recordingFile?.takeIf { it.exists() && it.length() > 44 }?.let { file ->
                         // Released means the native recorder has closed/finalized the WAV.
                         _lastRecordingFile.value = file
+                        val finishedDuration = _callDurationSeconds.value
                         scope.launch(Dispatchers.IO) {
+                            if (finishedDuration > 60) {
+                                runCatching {
+                                    com.example.transcription.offline.LocalTranscripts.request(context, file)
+                                }.onFailure { Log.w("SmartCalls", "Lokale Transkription konnte nicht eingeplant werden", it) }
+                            }
                             val storage = RecordingStorageManager(context)
                             if (storage.isAutoExportEnabled() && storage.getCustomFolderUri() != null) {
                                 storage.saveFileToCustomFolder(file)
@@ -174,7 +189,7 @@ class LinphoneSipClient private constructor(private val context: Context) {
             engine.setAudioPayloadTypes(engine.audioPayloadTypes.filter {
                 it.mimeType.equals("PCMA", true) || it.mimeType.equals("PCMU", true)
             }.toTypedArray())
-            engine.setUserAgent("Stromruf", "2.0")
+            engine.setUserAgent("Stromruf", "2.2")
             engine.inCallTimeout = 0 // No application-imposed maximum connected duration.
             check(engine.start() == 0) { "Linphone konnte nicht starten" }
         }
@@ -184,24 +199,43 @@ class LinphoneSipClient private constructor(private val context: Context) {
         if (activeCall != null || pendingNumber != null) return@onMain
         try {
             require(settings.port in 1..65535)
+            val normalizedHost = settings.sipRegistrar
+                .trim().removePrefix("sips:").removePrefix("sip:")
+                .substringBefore('/').substringBefore(':').trim()
+            require(normalizedHost.isNotBlank()) { "Registrar fehlt" }
+            val normalized = settings.copy(
+                sipUser = settings.sipUser.trim(),
+                authUser = settings.authUser.trim(),
+                sipPassword = settings.sipPassword.trim(),
+                sipRegistrar = normalizedHost
+            )
             val engine = getCore()
             account = null
             engine.clearAccounts()
             engine.clearAllAuthInfo()
-            config = settings
-            val transport = when (settings.protocol) {
+            config = normalized
+            val transport = when (normalized.protocol) {
                 SipTransportProtocol.TLS -> TransportType.Tls
                 SipTransportProtocol.TCP -> TransportType.Tcp
                 SipTransportProtocol.UDP -> TransportType.Udp
             }
             val factory = Factory.instance()
-            val server = requireNotNull(factory.createAddress("sip:${settings.sipRegistrar}:${settings.port}"))
+            // Explicit TLS URI avoids relying on a default transport after app/process recreation.
+            val scheme = if (normalized.protocol == SipTransportProtocol.TLS) "sips" else "sip"
+            val transportName = when (normalized.protocol) {
+                SipTransportProtocol.TLS -> "tls"
+                SipTransportProtocol.TCP -> "tcp"
+                SipTransportProtocol.UDP -> "udp"
+            }
+            val server = requireNotNull(factory.createAddress(
+                "$scheme:${normalized.sipRegistrar}:${normalized.port};transport=$transportName"
+            ))
             server.transport = transport
-            val identity = requireNotNull(factory.createAddress("sip:${settings.sipUser}@${settings.sipRegistrar}"))
-            identity.displayName = settings.displayName
+            val identity = requireNotNull(factory.createAddress("sip:${normalized.sipUser}@${normalized.sipRegistrar}"))
+            identity.displayName = normalized.displayName
             engine.addAuthInfo(factory.createAuthInfo(
-                settings.sipUser, settings.authUser.ifBlank { settings.sipUser },
-                settings.sipPassword, null, null, settings.sipRegistrar
+                normalized.sipUser, normalized.authUser.ifBlank { normalized.sipUser },
+                normalized.sipPassword, null, null, normalized.sipRegistrar
             ))
             val params = engine.createAccountParams()
             params.identityAddress = identity
@@ -216,6 +250,28 @@ class LinphoneSipClient private constructor(private val context: Context) {
             engine.defaultAccount = newAccount
         } catch (e: Exception) {
             fail("SIP-Einrichtung fehlgeschlagen (${e.javaClass.simpleName})")
+        }
+    }
+
+    private fun registrationDetail(message: String): String? {
+        val text = message.trim().replace(Regex("\\s+"), " ")
+        if (text.isBlank()) return null
+        return when {
+            text.contains("401") || text.contains("403") -> "Zugangsdaten abgelehnt"
+            text.contains("certificate", true) || text.contains("tls", true) -> "TLS-Verbindung fehlgeschlagen"
+            text.contains("timeout", true) || text.contains("unreachable", true) -> "Server nicht erreichbar"
+            else -> "Verbindung abgelehnt"
+        }
+    }
+
+    private fun scheduleRegistrationRetry() {
+        val saved = config ?: return
+        if (registrationAttempts >= 3 || activeCall != null || pendingNumber != null) return
+        registrationRetryJob?.cancel()
+        val delayMs = longArrayOf(2_000L, 6_000L, 15_000L)[registrationAttempts++]
+        registrationRetryJob = scope.launch {
+            delay(delayMs)
+            if (_state.value == SipState.ERROR && activeCall == null && pendingNumber == null) register(saved)
         }
     }
 
@@ -296,6 +352,9 @@ class LinphoneSipClient private constructor(private val context: Context) {
     }
 
     fun disconnect() = onMain {
+        registrationRetryJob?.cancel()
+        registrationRetryJob = null
+        registrationAttempts = 0
         pendingNumber = null
         if (activeCall != null) {
             disconnectAfterCall = true
