@@ -157,10 +157,19 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                         return@withContext Result.success()
                     }
                 }
-                val summary = GermanCallSummary.create(text.toString())
+                val fallbackSummary = GermanCallSummary.create(text.toString())
+                // Gemma is optional. If its locally imported model is unavailable or the
+                // device rejects it, the deterministic offline summary keeps the workflow alive.
+                val gemma = if (text.isBlank()) null else LocalGemma.analyze(context, text.toString()).getOrNull()
+                val nextAction = gemma?.nextAction.orEmpty()
+                val baseSummary = gemma?.summary?.ifBlank { fallbackSummary } ?: fallbackSummary
+                val summary = if (nextAction.isBlank()) baseSummary else "$baseSummary\nNächster Schritt: $nextAction"
                 job.put("state", "done").put("summary", summary)
+                    .put("analysisSource", if (gemma != null) "gemma-3n-e2b" else "regelbasiert")
+                    .put("nextAction", nextAction)
                     .put("syncState", "pending")
-                    .put("message", if (text.isBlank()) "Keine Sprache erkannt" else "Deutsch-Transkript fertig")
+                    .put("message", if (text.isBlank()) "Keine Sprache erkannt" else
+                        if (gemma != null) "Deutsch-Transkript und lokale Gemma-Notiz fertig" else "Deutsch-Transkript fertig")
                     .put("syncMessage", "Zusammenfassung wird vorbereitet")
                 LocalTranscripts.write(context, name, job)
                 LocalTranscripts.enqueueNoteSync(context, name)

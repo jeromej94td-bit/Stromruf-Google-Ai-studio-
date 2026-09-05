@@ -23,7 +23,12 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
         if (job.optString("syncState") == "done") return@withContext Result.success()
         try {
             val durationSeconds = (job.optLong("durationMs") / 1000L).coerceAtLeast(0L)
-            if (durationSeconds <= 60L) return@withContext Result.success()
+            if (durationSeconds <= 60L) {
+                job.put("syncState", "local_only")
+                    .put("syncMessage", "Kurzgespräch: Transkript und Notiz bleiben nur auf diesem Handy")
+                LocalTranscripts.write(context, name, job)
+                return@withContext Result.success()
+            }
             val transcript = job.optString("text").trim()
             val summary = job.optString("summary").ifBlank { GermanCallSummary.create(transcript) }
             job.put("summary", summary).put("syncState", "running")
