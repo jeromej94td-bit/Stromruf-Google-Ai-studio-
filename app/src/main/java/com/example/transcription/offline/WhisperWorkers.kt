@@ -63,7 +63,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
             }
             require(partial.length() == LocalTranscripts.MODEL_SIZE) { "Download unvollständig" }
             LocalTranscripts.modelStatus(context, "Modelldatei wird geprüft …")
-            val digest = MessageDigest.getInstance("SHA-256")
+            val digest = MessageDigest.getInstance("SHA-1")
             partial.inputStream().use { input ->
                 val buffer = ByteArray(65536)
                 while (true) { ensureActive(); val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
@@ -94,7 +94,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
     companion object {
         // Smaller base q5_1 model keeps German transcription local but avoids the long
         // first-window latency of the 190 MB small model used by PR #22.
-        const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/f281eb45af861ab5e5297d23694b7d46e090c02c/ggml-base-q5_1.bin"
+        const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin"
     }
 }
 
@@ -125,7 +125,7 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                 var next = job.optLong("nextMs").coerceIn(0L, wav.durationMs)
                 val text = StringBuilder(job.optString("text"))
                 val deadline = SystemClock.elapsedRealtime() + 7 * 60 * 1000
-                val windowMs = 10_000L
+                val windowMs = 3_000L
                 native = WhisperNative { isStopped || callActive() }
                 handle = native!!.open(LocalTranscripts.model(context).absolutePath)
                 check(handle != 0L) { "Whisper konnte das Modell nicht laden" }
