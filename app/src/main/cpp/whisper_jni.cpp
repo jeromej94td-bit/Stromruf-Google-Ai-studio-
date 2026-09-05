@@ -51,9 +51,9 @@ Java_com_example_transcription_offline_WhisperNative_transcribe(
     p.language = "de";
     p.translate = false;
     p.detect_language = false;
-    // Two threads made 20-30 s phone-audio windows look frozen on current phones.
-    // Four is still conservative for thermals, but materially reduces first-result latency.
-    p.n_threads = 4;
+    // Small q5_1 benefits from more CPU parallelism. Six threads is a quality/speed
+    // profile aimed at current high-end Android devices while chunk time remains bounded.
+    p.n_threads = 6;
     p.greedy.best_of = 1;
     p.no_context = true;
     p.print_realtime = false;
