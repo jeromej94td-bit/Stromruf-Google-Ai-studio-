@@ -131,60 +131,23 @@ fun AktivitaetenScreen(
         }
     }
 
-    // Options Dialog: Choice between follow-up and contact edit
+    // Gemeinsamer Kundenverlauf: Anrufversuche + Supabase-Notizen
     contactForHistoryOptions?.let { contact ->
-        AlertDialog(
-            onDismissRequest = { contactForHistoryOptions = null },
-            title = {
-                Text(
-                    text = "Aktion wählen für ${contact.name}",
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
-                )
+        CustomerTimelineDialog(
+            contactId = contact.id,
+            contactName = contact.name,
+            phone = contact.phone,
+            callLogs = callLogs,
+            source = "activity",
+            onDismiss = { contactForHistoryOptions = null },
+            onEditContact = {
+                contactToEditInAktivitaeten = contact
+                contactForHistoryOptions = null
             },
-            text = {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
-                ) {
-                    Text(
-                        text = "Wähle eine Option für diesen Kontakt aus dem Verlauf:",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    PrimaryButton(
-                        text = "Wiedervorlage einrichten 📅",
-                        icon = Icons.Default.Notifications,
-                        onClick = {
-                            showAddFollowUpForContact = contact
-                            contactForHistoryOptions = null
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    
-                    SecondaryButton(
-                        text = "Kontakt bearbeiten / speichern 👤",
-                        icon = Icons.Default.Add,
-                        onClick = {
-                            contactToEditInAktivitaeten = contact
-                            contactForHistoryOptions = null
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { contactForHistoryOptions = null }) {
-                    Text("Abbrechen", color = TextSecondary)
-                }
-            },
-            containerColor = Graphite,
-            textContentColor = TextPrimary,
-            titleContentColor = TextPrimary
+            onAddFollowUp = {
+                showAddFollowUpForContact = contact
+                contactForHistoryOptions = null
+            }
         )
     }
 
