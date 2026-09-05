@@ -10557,6 +10557,7 @@ fun OngoingCallDialog(
         context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager
     }
     var isNearCheek by remember { mutableStateOf(false) }
+    var isSpeakerOn by remember { mutableStateOf(false) }
 
     DisposableEffect(isSpeakerOn) {
         var proximityWakeLock: android.os.PowerManager.WakeLock? = null
@@ -10653,7 +10654,6 @@ fun OngoingCallDialog(
     val formattedDuration = String.format("%02d:%02d", minutes, seconds)
 
     var isMuted by remember { mutableStateOf(false) }
-    var isSpeakerOn by remember { mutableStateOf(false) }
     var showDtmfPad by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
 
