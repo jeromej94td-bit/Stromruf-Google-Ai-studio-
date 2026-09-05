@@ -38,7 +38,7 @@ import androidx.security.crypto.MasterKey
 import com.example.recording.RecordingStorageManager
 import com.example.agent.AgentBackend
 import com.example.agent.SmartCallNote
-import com.example.sip.NativeSipClient
+import com.example.sip.LinphoneSipClient
 import com.example.sip.SipAccountConfig
 import com.example.sip.SipState
 import com.example.sip.SipTransportProtocol
@@ -93,11 +93,14 @@ fun SmartCallsTab() {
     var showPassword by remember { mutableStateOf(false) }
     var targetNumber by remember { mutableStateOf("") }
     var showDialpad by remember { mutableStateOf(false) }
-    var isMuted by remember { mutableStateOf(false) }
-    var isSpeakerOn by remember { mutableStateOf(true) }
+    val sipClient = remember { LinphoneSipClient.getInstance(ctx) }
+    var isMuted by remember { mutableStateOf(sipClient.muted) }
+    var isSpeakerOn by remember { mutableStateOf(sipClient.speakerOn) }
 
-    // Native SIP Client instance
-    val sipClient = remember { NativeSipClient(ctx) }
+    val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) sipClient.makeCall(targetNumber)
+        else Toast.makeText(ctx, "Zum Telefonieren bitte Mikrofonzugriff erlauben", Toast.LENGTH_LONG).show()
+    }
     val sipState by sipClient.state.collectAsState()
     val statusText by sipClient.statusText.collectAsState()
     val callDuration by sipClient.callDurationSeconds.collectAsState()
@@ -341,23 +344,11 @@ fun SmartCallsTab() {
         }
     }
 
-    LaunchedEffect(isRecording) {
-        if (!isRecording) {
-            val finishedFile = lastRecordingFile
-            if (
-                finishedFile != null &&
-                callDuration > 60 &&
-                cachedTranscripts[finishedFile.name] == null &&
-                !transcribingFiles.contains(finishedFile.name)
-            ) {
-                startTranscription(finishedFile)
-            }
-        }
-    }
+    // Automatic transcription is owned by the persistent local worker, not this tab.
+    // Gemini remains an explicitly selected, optional API action.
 
     DisposableEffect(Unit) {
         onDispose {
-            sipClient.disconnect()
             mediaPlayer?.release()
             mediaPlayer = null
         }
@@ -398,7 +389,8 @@ fun SmartCallsTab() {
     // Automatically connect when the Smart Calls 2 tab is opened.
     // Credentials are already stored locally by saveConfig().
     LaunchedEffect(Unit) {
-        if (sipUser.isNotBlank() &&
+        if (sipClient.state.value in setOf(SipState.DISCONNECTED, SipState.ERROR) &&
+            sipUser.isNotBlank() &&
             sipPassword.isNotBlank() &&
             sipRegistrar.isNotBlank()
         ) {
@@ -468,13 +460,13 @@ fun SmartCallsTab() {
         ) {
             Column {
                 Text(
-                    text = "Smart Calls",
+                    text = "Smart Calls · 2.1",
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
                 Text(
-                    text = "Manuelle SIP-Telefonie (UDP / TCP / TLS)",
+                    text = "Linphone · SIP-Telefonie direkt auf Android",
                     fontSize = 12.sp,
                     color = NeonCyan
                 )
@@ -793,7 +785,7 @@ fun SmartCallsTab() {
                 Button(
                     onClick = {
                         when (sipState) {
-                            SipState.REGISTERED -> sipClient.makeCall(targetNumber)
+                            SipState.REGISTERED -> microphonePermission.launch(android.Manifest.permission.RECORD_AUDIO)
                             SipState.CONNECTING -> Toast.makeText(ctx, "Verbindung wird noch aufgebaut...", Toast.LENGTH_SHORT).show()
                             SipState.ERROR -> Toast.makeText(ctx, "SIP Fehler. Bitte neu verbinden.", Toast.LENGTH_SHORT).show()
                             else -> Toast.makeText(ctx, "Bitte zuerst SIP-Konto verbinden", Toast.LENGTH_SHORT).show()
@@ -1236,6 +1228,8 @@ fun SmartCallsTab() {
             }
         }
 
+        OfflineTranscriptionSetup()
+
         // LOCAL RECORDINGS ARCHIVE CARD
         Card(
             colors = CardDefaults.cardColors(containerColor = SurfaceColor),
@@ -1259,7 +1253,7 @@ fun SmartCallsTab() {
                             fontSize = 15.sp
                         )
                         Text(
-                            text = "Ab 1 Minute automatisch mit Gemini zusammenfassen & speichern",
+                            text = "Über 1 Minute automatisch lokal auf Deutsch transkribieren",
                             fontSize = 11.sp,
                             color = TextMuted
                         )
@@ -1307,6 +1301,7 @@ fun SmartCallsTab() {
                                 )
                             ) {
                                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    OfflineRecordingTranscript(file)
                                     // Row 1: File Info & Audio Actions
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -1514,7 +1509,7 @@ fun SmartCallsTab() {
                                             )
                                             Spacer(Modifier.width(8.dp))
                                             Text(
-                                                text = "Mit Gemini transkribieren & Notiz erstellen",
+                                                text = "Optional: Gemini-Analyse (API, ggf. kostenpflichtig)",
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.Medium,
                                                 color = Color.White
