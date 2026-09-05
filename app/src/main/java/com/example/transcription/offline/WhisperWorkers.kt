@@ -150,13 +150,23 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                     val end = (next + windowMs).coerceAtMost(wav.durationMs)
                     val pcm = wav.read16k(start, end - start)
                     val rms = if (pcm.isEmpty()) 0.0 else sqrt(pcm.sumOf { (it * it).toDouble() } / pcm.size)
+                    native!!.beginChunk(25_000L)
                     val words = if (rms < 0.0001) "" else
                         native!!.transcribe(handle, pcm, (next - start).toInt())
-                            ?: if (isStopped || callActive()) {
-                                job.put("state", "pending").put("message", "Verarbeitung wird fortgesetzt")
-                                LocalTranscripts.write(context, name, job)
-                                return@withContext Result.retry()
-                            } else throw IOException("Whisper-Verarbeitung fehlgeschlagen")
+                            ?: when {
+                                isStopped || callActive() -> {
+                                    job.put("state", "pending").put("message", "Verarbeitung wird fortgesetzt")
+                                    LocalTranscripts.write(context, name, job)
+                                    return@withContext Result.retry()
+                                }
+                                native!!.didTimeOut() -> {
+                                    // Never leave a recording at 0 % forever. Tiny windows normally finish
+                                    // much sooner; an exceptional slow section is skipped with a visible note.
+                                    job.put("warning", "Ein extrem langsamer Audioabschnitt wurde übersprungen")
+                                    ""
+                                }
+                                else -> throw IOException("Whisper-Verarbeitung fehlgeschlagen")
+                            }
                     if (words.isNotBlank()) {
                         val seconds = next / 1000
                         text.append("[%02d:%02d] ".format(seconds / 60, seconds % 60))
