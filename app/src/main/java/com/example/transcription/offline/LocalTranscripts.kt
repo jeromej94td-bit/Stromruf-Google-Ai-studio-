@@ -67,7 +67,9 @@ object LocalTranscripts {
             .put("nextMs", 0L).put("text", "")
         value.put("state", "pending").put("message", if (ready(context)) "Wartet auf Verarbeitung" else "Wartet auf Modelldownload")
         write(context, file.name, value)
-        if (ready(context)) enqueue(context, file.name)
+        // A manual tap must never remain in “waiting for model download”. Start the
+        // one-time download immediately; completed downloads resume this job.
+        if (ready(context)) enqueue(context, file.name) else download(context)
     }
 
     fun enqueue(context: Context, name: String) {
