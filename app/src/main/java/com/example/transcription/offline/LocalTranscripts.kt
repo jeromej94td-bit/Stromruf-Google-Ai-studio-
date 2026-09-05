@@ -10,13 +10,12 @@ import java.util.concurrent.TimeUnit
 
 /** Separate from Gemini's summary cache: a transcript is not a conversation summary. */
 object LocalTranscripts {
-    // Tiny q5_1 is the reliable fallback for the in-app worker: it stays multilingual
-    // (including German) but avoids a first Whisper pass that can appear frozen on a phone.
-    const val MODEL_SIZE = 32152673L
-    // Official whisper.cpp model fingerprint (SHA-1 published with this model).
-    const val MODEL_SHA = "2827a03e495b1ed3048ef28a6a4620537db4ee51"
-    const val MODEL_NAME = "ggml-tiny-q5_1.bin"
-    private val LEGACY_MODEL_NAMES = listOf("ggml-small-q5_1.bin", "ggml-base-q5_1.bin")
+    // Quality-first local model for German phone calls. Small q5_1 is substantially
+    // more accurate than tiny/base while remaining practical on current high-end phones.
+    const val MODEL_SIZE = 190085487L
+    const val MODEL_SHA = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"
+    const val MODEL_NAME = "ggml-small-q5_1.bin"
+    private val LEGACY_MODEL_NAMES = listOf("ggml-tiny-q5_1.bin", "ggml-base-q5_1.bin")
     const val QUEUE = "smartcalls-local-german"
     const val DOWNLOAD = "smartcalls-whisper-model"
     const val NOTE_SYNC_QUEUE = "smartcalls-summary-sync"
@@ -48,7 +47,7 @@ object LocalTranscripts {
     @Synchronized fun modelStatus(context: Context): String {
         val saved = readJson(File(directory(context), "model.json")).optString("status", "Modell noch nicht geladen")
         return if (!ready(context) && saved.startsWith("Bereit"))
-            "Schnelles Deutsch-Modell muss einmal geladen werden"
+            "Qualitätsmodell muss einmal geladen werden"
         else saved
     }
 
@@ -95,9 +94,8 @@ object LocalTranscripts {
 
     fun download(context: Context) {
         if (ready(context)) { resume(context); return }
-        // Reclaim older, slower models before downloading the fast fallback.
         LEGACY_MODEL_NAMES.forEach { File(directory(context), it).delete() }
-        modelStatus(context, "Schnelles Deutsch-Modell wird vorbereitet …")
+        modelStatus(context, "Whisper Qualitätsmodell wird vorbereitet …")
         WorkManager.getInstance(context).enqueueUniqueWork(DOWNLOAD, ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<WhisperModelWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
