@@ -139,13 +139,7 @@ class LinphoneSipClient private constructor(private val context: Context) {
                     recordingFile?.takeIf { it.exists() && it.length() > 44 }?.let { file ->
                         // Released means the native recorder has closed/finalized the WAV.
                         _lastRecordingFile.value = file
-                        val finishedDuration = _callDurationSeconds.value
                         scope.launch(Dispatchers.IO) {
-                            if (finishedDuration > 60) {
-                                runCatching {
-                                    com.example.transcription.offline.LocalTranscripts.request(context, file)
-                                }.onFailure { Log.w("SmartCalls", "Lokale Transkription konnte nicht eingeplant werden", it) }
-                            }
                             val storage = RecordingStorageManager(context)
                             if (storage.isAutoExportEnabled() && storage.getCustomFolderUri() != null) {
                                 storage.saveFileToCustomFolder(file)
