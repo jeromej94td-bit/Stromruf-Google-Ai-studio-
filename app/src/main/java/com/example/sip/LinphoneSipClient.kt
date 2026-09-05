@@ -58,6 +58,7 @@ class LinphoneSipClient private constructor(private val context: Context) {
     private var durationJob: Job? = null
     private var disconnectAfterCall = false
     private var callFailed = false
+    private var easybellFallbackTried = false
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else handler.post { block() }
@@ -71,13 +72,37 @@ class LinphoneSipClient private constructor(private val context: Context) {
             when (state) {
                 RegistrationState.Ok -> {
                     _state.value = SipState.REGISTERED
-                    _statusText.value = "Registriert – Linphone / ${config?.protocol?.name}"
+                    val registrar = config?.sipRegistrar.orEmpty()
+                    _statusText.value = if (registrar.equals("secure.sip.easybell.de", true))
+                        "Registriert – Linphone / TLS (Easybell Classic)"
+                    else
+                        "Registriert – Linphone / ${config?.protocol?.name}"
                 }
                 RegistrationState.Progress, RegistrationState.Refreshing -> {
                     _state.value = SipState.CONNECTING
                     _statusText.value = "SIP-Anmeldung läuft …"
                 }
-                RegistrationState.Failed -> fail("SIP-Anmeldung fehlgeschlagen")
+                RegistrationState.Failed -> {
+                    val settings = config
+                    if (!easybellFallbackTried &&
+                        settings?.protocol == SipTransportProtocol.TLS &&
+                        settings.sipRegistrar.equals("voip.easybell.de", true)
+                    ) {
+                        // Keep the exact documented working path as attempt #1. Only if Easybell/Linphone
+                        // rejects that registration do we retry against Easybell's documented classic
+                        // encrypted registrar, useful when DNS-SRV routing is not working reliably.
+                        easybellFallbackTried = true
+                        _state.value = SipState.CONNECTING
+                        _statusText.value = "Easybell TLS-Fallback wird versucht …"
+                        scope.launch {
+                            delay(250)
+                            registerAccount(settings.copy(sipRegistrar = "secure.sip.easybell.de"))
+                        }
+                    } else {
+                        val detail = message.trim().replace(Regex("\\s+"), " ").take(180)
+                        fail(if (detail.isBlank()) "SIP-Anmeldung fehlgeschlagen" else "SIP-Anmeldung fehlgeschlagen: $detail")
+                    }
+                }
                 RegistrationState.Cleared, RegistrationState.None -> {
                     _state.value = SipState.DISCONNECTED
                     _statusText.value = "Nicht verbunden"
@@ -182,6 +207,11 @@ class LinphoneSipClient private constructor(private val context: Context) {
 
     fun register(settings: SipAccountConfig) = onMain {
         if (activeCall != null || pendingNumber != null) return@onMain
+        easybellFallbackTried = false
+        registerAccount(settings)
+    }
+
+    private fun registerAccount(settings: SipAccountConfig) {
         try {
             require(settings.port in 1..65535)
             val engine = getCore()
@@ -199,10 +229,19 @@ class LinphoneSipClient private constructor(private val context: Context) {
             server.transport = transport
             val identity = requireNotNull(factory.createAddress("sip:${settings.sipUser}@${settings.sipRegistrar}"))
             identity.displayName = settings.displayName
+            val authUser = settings.authUser.ifBlank { settings.sipUser }
             engine.addAuthInfo(factory.createAuthInfo(
-                settings.sipUser, settings.authUser.ifBlank { settings.sipUser },
+                settings.sipUser, authUser,
                 settings.sipPassword, null, null, settings.sipRegistrar
             ))
+            // Easybell commonly challenges TLS trunk registrations with realm sip.easybell.de,
+            // including when the encrypted classic registrar is secure.sip.easybell.de.
+            if (settings.protocol == SipTransportProtocol.TLS) {
+                engine.addAuthInfo(factory.createAuthInfo(
+                    settings.sipUser, authUser,
+                    settings.sipPassword, null, "sip.easybell.de", settings.sipRegistrar
+                ))
+            }
             val params = engine.createAccountParams()
             params.identityAddress = identity
             params.serverAddress = server
@@ -297,6 +336,7 @@ class LinphoneSipClient private constructor(private val context: Context) {
 
     fun disconnect() = onMain {
         pendingNumber = null
+        easybellFallbackTried = false
         if (activeCall != null) {
             disconnectAfterCall = true
             activeCall?.terminate()
