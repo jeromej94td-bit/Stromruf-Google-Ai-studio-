@@ -73,7 +73,9 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
                 partial.delete()
                 throw IllegalArgumentException("Modellprüfung fehlgeschlagen – bitte erneut laden")
             }
-            check(partial.renameTo(LocalTranscripts.model(context))) { "Modell konnte nicht gespeichert werden" }
+            val target = LocalTranscripts.model(context)
+            if (target.exists()) target.delete()
+            check(partial.renameTo(target)) { "Modell konnte nicht gespeichert werden" }
             LocalTranscripts.modelStatus(context, "Bereit · Deutsch · offline")
             LocalTranscripts.resume(context)
             Result.success()
@@ -90,8 +92,9 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
     }
 
     companion object {
-        // Pinned model bytes are additionally verified by SHA-256 before activation.
-        const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin"
+        // Smaller base q5_1 model keeps German transcription local but avoids the long
+        // first-window latency of the 190 MB small model used by PR #22.
+        const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/f281eb45af861ab5e5297d23694b7d46e090c02c/ggml-base-q5_1.bin"
     }
 }
 
@@ -104,7 +107,11 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
         val name = inputData.getString("file") ?: return@withContext Result.success()
         val job = LocalTranscripts.read(context, name)
         if (job.optString("state") == "done") return@withContext Result.success()
-        if (!LocalTranscripts.ready(context)) return@withContext Result.success()
+        if (!LocalTranscripts.ready(context)) {
+            job.put("state", "pending").put("message", "Wartet auf schnelles Deutsch-Modell")
+            LocalTranscripts.write(context, name, job)
+            return@withContext Result.success()
+        }
         if (callActive()) return@withContext Result.retry()
         var native: WhisperNative? = null
         var handle = 0L
@@ -115,9 +122,10 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
             }
             PcmWave(file).use { wav ->
                 job.put("durationMs", wav.durationMs)
-                var next = job.optLong("nextMs")
+                var next = job.optLong("nextMs").coerceIn(0L, wav.durationMs)
                 val text = StringBuilder(job.optString("text"))
                 val deadline = SystemClock.elapsedRealtime() + 7 * 60 * 1000
+                val windowMs = 10_000L
                 native = WhisperNative { isStopped || callActive() }
                 handle = native!!.open(LocalTranscripts.model(context).absolutePath)
                 check(handle != 0L) { "Whisper konnte das Modell nicht laden" }
@@ -129,10 +137,17 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                         LocalTranscripts.write(context, name, job)
                         return@withContext Result.retry()
                     }
-                    job.put("state", "running").put("message", "Transkribiert auf dem Handy: ${next * 100 / wav.durationMs} %")
+                    val percent = (next * 100 / wav.durationMs).toInt()
+                    val section = (next / windowMs + 1).toInt()
+                    val sections = ((wav.durationMs + windowMs - 1) / windowMs).toInt()
+                    job.put("state", "running")
+                        .put("message", "Transkribiert auf dem Handy: $percent % · Abschnitt $section/$sections")
                     LocalTranscripts.write(context, name, job)
-                    val start = (next - 1000).coerceAtLeast(0)
-                    val end = (next + 30000).coerceAtMost(wav.durationMs)
+
+                    // Short windows are deliberate: the old 30 s window blocked inside native
+                    // Whisper before the first checkpoint, so the UI could sit at 0 % for minutes.
+                    val start = (next - 500).coerceAtLeast(0)
+                    val end = (next + windowMs).coerceAtMost(wav.durationMs)
                     val pcm = wav.read16k(start, end - start)
                     val rms = if (pcm.isEmpty()) 0.0 else sqrt(pcm.sumOf { (it * it).toDouble() } / pcm.size)
                     val words = if (rms < 0.0001) "" else
@@ -148,8 +163,10 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                             .append(words.trim()).append("\n\n")
                     }
                     next = end
+                    val completedPercent = (next * 100 / wav.durationMs).toInt().coerceAtMost(100)
                     job.put("nextMs", next).put("text", text.toString())
-                    LocalTranscripts.write(context, name, job) // Checkpoint after each audio window.
+                        .put("message", "Transkribiert auf dem Handy: $completedPercent %")
+                    LocalTranscripts.write(context, name, job)
                     if (SystemClock.elapsedRealtime() >= deadline && next < wav.durationMs) {
                         job.put("state", "pending").put("message", "Fortsetzung eingeplant")
                         LocalTranscripts.write(context, name, job)
