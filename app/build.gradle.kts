@@ -14,7 +14,7 @@ android {
     applicationId = "com.aistudio.stromruf.gkrfws"
     minSdk = 24
     targetSdk = 36
-    versionCode = 11
+    versionCode = 20
     versionName = "2.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
