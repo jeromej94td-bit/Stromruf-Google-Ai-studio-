@@ -18,6 +18,7 @@ object LocalTranscripts {
     private const val LEGACY_MODEL_NAME = "ggml-small-q5_1.bin"
     const val QUEUE = "smartcalls-local-german"
     const val DOWNLOAD = "smartcalls-whisper-model"
+    const val NOTE_SYNC_QUEUE = "smartcalls-summary-sync"
     fun directory(context: Context) = File(context.noBackupFilesDir, "local_transcription").apply { mkdirs() }
     fun model(context: Context) = File(directory(context), MODEL_NAME)
     fun ready(context: Context) = model(context).let { it.isFile && it.length() == MODEL_SIZE }
@@ -73,7 +74,7 @@ object LocalTranscripts {
             .put("nextMs", 0L).put("text", "")
         value.put("state", "pending").put("message", if (ready(context)) "Wartet auf Verarbeitung" else "Wartet auf Modelldownload")
         write(context, file.name, value)
-        if (ready(context)) enqueue(context, file.name)
+        if (ready(context)) enqueue(context, file.name) else download(context)
     }
 
     fun enqueue(context: Context, name: String) {
@@ -84,6 +85,11 @@ object LocalTranscripts {
             .build()
         // One global chain bounds CPU/RAM. Workers also skip already completed files.
         WorkManager.getInstance(context).enqueueUniqueWork(QUEUE, ExistingWorkPolicy.APPEND_OR_REPLACE, request)
+    }
+
+    fun enqueueNoteSync(context: Context, name: String) {
+        val request = OneTimeWorkRequestBuilder<SmartCallNoteWorker>().setInputData(workDataOf("file" to name)).setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
+        WorkManager.getInstance(context).enqueueUniqueWork("$NOTE_SYNC_QUEUE-${id(name)}", ExistingWorkPolicy.KEEP, request)
     }
 
     fun download(context: Context) {
@@ -104,6 +110,7 @@ object LocalTranscripts {
                 val value = readJson(file)
                 val name = value.optString("file")
                 if (name.isNotBlank() && value.optString("state") in setOf("pending", "running")) enqueue(context, name)
+                else if (name.isNotBlank() && value.optString("state") == "done" && value.optString("syncState") != "done") enqueueNoteSync(context, name)
             }
     }
 }

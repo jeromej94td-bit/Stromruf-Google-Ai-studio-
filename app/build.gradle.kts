@@ -79,6 +79,7 @@ secrets {
 dependencies {
   implementation("androidx.work:work-runtime-ktx:2.11.2")
   implementation("org.linphone:linphone-sdk-android:5.5.18")
+  implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)

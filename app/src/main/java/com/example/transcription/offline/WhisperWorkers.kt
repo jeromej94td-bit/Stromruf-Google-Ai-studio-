@@ -174,8 +174,14 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                         return@withContext Result.success()
                     }
                 }
-                job.put("state", "done").put("message", if (text.isBlank()) "Keine Sprache erkannt" else "Deutsch-Transkript fertig")
+                val fallbackSummary = GermanCallSummary.create(text.toString())
+                val gemma = if (text.isBlank()) null else LocalGemma.analyze(context, text.toString()).getOrNull()
+                val nextAction = gemma?.nextAction.orEmpty()
+                val baseSummary = gemma?.summary?.ifBlank { fallbackSummary } ?: fallbackSummary
+                val summary = if (nextAction.isBlank()) baseSummary else "$baseSummary\nNächster Schritt: $nextAction"
+                job.put("state", "done").put("summary", summary).put("analysisSource", if (gemma != null) "gemma-3n-e2b" else "regelbasiert").put("nextAction", nextAction).put("syncState", "pending").put("message", if (text.isBlank()) "Keine Sprache erkannt" else if (gemma != null) "Deutsch-Transkript und lokale Gemma-Notiz fertig" else "Deutsch-Transkript fertig").put("syncMessage", "Zusammenfassung wird vorbereitet")
                 LocalTranscripts.write(context, name, job)
+                LocalTranscripts.enqueueNoteSync(context, name)
             }
             Result.success()
         } catch (e: CancellationException) { throw e }
