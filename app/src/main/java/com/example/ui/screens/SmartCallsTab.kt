@@ -331,6 +331,13 @@ fun SmartCallsTab() {
         syncCachedNotesToSupabase()
         reloadSmartCallNotes()
     }
+    // A local worker writes the note after transcription; keep the visible list current.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(15_000)
+            reloadSmartCallNotes()
+        }
+    }
 
     LaunchedEffect(lastRecordingFile) {
         refreshRecordings()

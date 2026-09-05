@@ -157,8 +157,13 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                         return@withContext Result.success()
                     }
                 }
-                job.put("state", "done").put("message", if (text.isBlank()) "Keine Sprache erkannt" else "Deutsch-Transkript fertig")
+                val summary = GermanCallSummary.create(text.toString())
+                job.put("state", "done").put("summary", summary)
+                    .put("syncState", "pending")
+                    .put("message", if (text.isBlank()) "Keine Sprache erkannt" else "Deutsch-Transkript fertig")
+                    .put("syncMessage", "Zusammenfassung wird vorbereitet")
                 LocalTranscripts.write(context, name, job)
+                LocalTranscripts.enqueueNoteSync(context, name)
             }
             Result.success()
         } catch (e: CancellationException) { throw e }

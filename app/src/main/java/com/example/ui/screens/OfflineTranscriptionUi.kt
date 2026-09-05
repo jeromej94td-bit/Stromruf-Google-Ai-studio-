@@ -43,7 +43,7 @@ fun OfflineTranscriptionSetup() {
             if (!ready) Button(onClick = {
                 scope.launch(Dispatchers.IO) { LocalTranscripts.download(context) }
             }) { Text("Deutsch-Modell laden / fortsetzen") }
-            Text("Längere Aufnahmen brauchen Zeit und Akku. Während eines Smart Calls pausiert die Verarbeitung. Zusammenfassungen und Termine sind ein späterer Schritt.",
+            Text("Längere Aufnahmen brauchen Zeit und Akku. Während eines Smart Calls pausiert die Verarbeitung. Die Zusammenfassung wird danach automatisch als Smart-Call-Notiz in Stromruf gespeichert; Audio und vollständiges Transkript bleiben auf dem Handy.",
                 style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -66,6 +66,8 @@ fun OfflineRecordingTranscript(file: File) {
     val state = snapshot.optString("state")
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(localError ?: snapshot.optString("message", "Lokales Deutsch-Transkript"), style = MaterialTheme.typography.bodySmall)
+        snapshot.optString("syncMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        snapshot.optString("summary").takeIf { it.isNotBlank() }?.let { Text("Notiz: $it", style = MaterialTheme.typography.bodySmall, maxLines = 4) }
         if (state in setOf("", "error")) OutlinedButton(onClick = {
             scope.launch {
                 localError = withContext(Dispatchers.IO) {
