@@ -3,6 +3,7 @@ package com.example.transcription.offline
 import android.content.Context
 import android.net.Uri
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Engine
@@ -71,7 +72,9 @@ object LocalGemma {
                         maxOutputToken = 260
                     )
                 ).use { conversation ->
-                    val raw = conversation.sendMessage(prompt).text
+                    val raw = conversation.sendMessage(prompt).contents.contents
+                        .filterIsInstance<Content.Text>()
+                        .joinToString(separator = "") { it.text }
                     val jsonText = raw.substringAfter('{', "").substringBeforeLast('}', "")
                     require(jsonText.isNotBlank()) { "Gemma hat kein lesbares Ergebnis geliefert" }
                     val json = JSONObject("{$jsonText}")
