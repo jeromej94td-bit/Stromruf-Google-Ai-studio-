@@ -221,3 +221,30 @@ Prüfung: vollständiger textueller Adaptervergleich mit dem Referenz-Commit unt
 Ausnahme des Transkriptionsaufrufs und `git diff --check`. Kein APK-Build und kein
 realer Easybell-Anruf in dieser Umgebung. Auf dem Gerät zuerst erfolgreiche
 Anmeldung, dann Audio beider Seiten und Gespräch über 30 Sekunden prüfen.
+
+## Gezielte Telefonie-Wiederherstellung – Version 2.9 / Build 21
+
+Die Zeitfolge wurde direkt in Git geprüft: Linphone-Commit `35264e5` vom
+5. September 2026, 14:11:15 Uhr deutscher Zeit; erstmalige Dokumentation
+`ad68977` um 14:53:47 Uhr. Der direkte Main-Vorgänger der Dokumentation
+(`5664d8b`) enthielt noch NativeSipClient. Die Linphone-Implementierung lag
+zu diesem Zeitpunkt auf einem separaten Branch.
+
+Dieser PR baut auf dem aktuellen Main-Stand auf, nicht auf dem vollständigen
+Wiederherstellungsbranch. Der SIP-Adapter entspricht dem 14:11-Stand mit einer
+bewusst erhaltenen Erweiterung: nach finalisierter Aufnahme wird die aktuelle
+lokale Transkription eingeplant. Der gesamte Telefoniedienst, die SIP-Einstellungen
+inklusive Speicherung und automatischer Anmeldung, die Android-Berechtigungen,
+die Dienstdeklaration sowie SDK 5.5.18 und Maven-Repository entsprechen bereits
+dem Referenzstand und wurden verglichen. Eine erneute Änderung dieser identischen
+Teile ist nicht nötig.
+
+Die spätere lokale KI, Whisper, Gemma, Notizen, Termine, Supabase-Verarbeitung,
+Native-Build-Konfiguration und deren Abhängigkeiten bleiben im aktuellen Stand.
+Es werden keine Dateien außerhalb von SIP-Adapter, Versionsanzeige,
+Build-Versionsangaben und dieser Dokumentation geändert.
+
+Version 2.9 / Build 21 ist höher als der komplette Wiederherstellungsbuild 20.
+Die Anrufmaske zeigt die tatsächliche Version aus BuildConfig.
+Quellvergleich und XML-Prüfung erfolgreich; kein APK-/Gerätetest durchgeführt.
+Die Wiederherstellung ist kein Nachweis für erfolgreiche Anmeldung am Gerät.
