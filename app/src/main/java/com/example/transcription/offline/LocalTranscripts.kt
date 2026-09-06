@@ -67,12 +67,18 @@ object LocalTranscripts {
         context: Context,
         file: File,
         callDurationSeconds: Int = 0,
-        callStartedAt: Long = 0L
+        callStartedAt: Long = 0L,
+        callEndedAt: Long = file.lastModified(),
+        metadata: JSONObject? = null
     ) {
         val audio = recording(context, file.name)
         val previous = read(context, file.name)
         val unchanged = previous.optLong("size") == audio.length() &&
             previous.optLong("modified") == audio.lastModified()
+        if (unchanged && previous.optString("state") in setOf("pending", "running")) {
+            resumeJob(context, file.name, previous)
+            return
+        }
         if (unchanged && previous.optString("state") == "done") {
             if (callDurationSeconds > 0) previous.put("callDurationSeconds", maxOf(previous.optInt("callDurationSeconds"), callDurationSeconds))
             if (callStartedAt > 0L) previous.put("callStartedAt", callStartedAt)
@@ -88,8 +94,10 @@ object LocalTranscripts {
             .put("text", "")
         if (callDurationSeconds > 0) value.put("callDurationSeconds", callDurationSeconds)
         if (callStartedAt > 0L) value.put("callStartedAt", callStartedAt)
+        metadata?.keys()?.forEach { key -> value.put(key, metadata.get(key)) }
+        value.put("scheduledAt", callEndedAt + 90_000L)
         value.put("state", "pending")
-            .put("message", "Wartet auf Groq Whisper Large v3")
+            .put("message", "Automatischer Start frühestens 90 Sekunden nach dem Auflegen")
             .put("transcriptionSource", "pending")
             .put("syncState", "pending")
         write(context, file.name, value)
@@ -100,7 +108,8 @@ object LocalTranscripts {
     fun scanExisting(context: Context) {
         val root = File(context.filesDir, "smart_calls_recordings")
         root.listFiles()
-            ?.filter { it.isFile && it.extension.equals("wav", ignoreCase = true) && it.length() > 44L }
+            ?.filter { it.isFile && it.extension.equals("wav", ignoreCase = true) && it.length() > 44L &&
+                !com.example.homesip.HomeSipSmartAutomation.isRecording(it) }
             ?.sortedBy { it.lastModified() }
             ?.forEach { audio ->
                 val previous = read(context, audio.name)
@@ -113,21 +122,23 @@ object LocalTranscripts {
                             enqueueNoteSync(context, audio.name)
                         }
                     }
-                    unchanged && state in setOf("pending", "running") -> enqueuePrimary(context, audio.name)
-                    else -> request(context, audio)
+                    unchanged && state in setOf("pending", "running") -> resumeJob(context, audio.name, previous)
+                    state == "error" -> Unit // A failed job needs an explicit retry, not a polling loop.
+                    System.currentTimeMillis() - audio.lastModified() >= 90_000L -> request(context, audio)
                 }
             }
     }
 
     fun enqueuePrimary(context: Context, name: String) {
         val request = OneTimeWorkRequestBuilder<PrimaryTranscriptionWorker>()
+            .setInitialDelay((read(context, name).optLong("scheduledAt") - System.currentTimeMillis()).coerceAtLeast(0L), TimeUnit.MILLISECONDS)
             .setInputData(workDataOf("file" to name))
             .setConstraints(Constraints.Builder().build())
             .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.SECONDS)
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "$PRIMARY_QUEUE-${id(name)}",
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.KEEP,
             request
         )
     }
@@ -138,17 +149,17 @@ object LocalTranscripts {
             .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(true).build())
             .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.SECONDS)
             .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(QUEUE, ExistingWorkPolicy.APPEND_OR_REPLACE, request)
+        WorkManager.getInstance(context).enqueueUniqueWork("$QUEUE-${id(name)}", ExistingWorkPolicy.KEEP, request)
     }
 
     fun enqueueNoteSync(context: Context, name: String) {
         val request = OneTimeWorkRequestBuilder<SmartCallNoteWorker>()
             .setInputData(workDataOf("file" to name))
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            // Local follow-ups must also be created while offline. The worker retries cloud sync.
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "$NOTE_SYNC_QUEUE-${id(name)}",
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.KEEP,
             request
         )
     }
@@ -156,10 +167,9 @@ object LocalTranscripts {
     fun download(context: Context) {
         if (ready(context)) { resume(context); return }
         LEGACY_MODEL_NAMES.forEach { File(directory(context), it).delete() }
-        modelStatus(context, "Schnelles Whisper-Fallback wird vorbereitet …")
         WorkManager.getInstance(context).enqueueUniqueWork(
             DOWNLOAD,
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<WhisperModelWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.SECONDS).build()
@@ -168,15 +178,21 @@ object LocalTranscripts {
 
     fun resume(context: Context) {
         scanExisting(context)
-        directory(context).listFiles()?.filter { it.name.startsWith("job_") && it.extension == "json" }
-            ?.forEach { file ->
-                val value = readJson(file)
-                val name = value.optString("file")
-                if (name.isBlank()) return@forEach
-                when (value.optString("state")) {
-                    "pending", "running" -> enqueuePrimary(context, name)
-                    "done" -> if (value.optString("syncState") !in setOf("done", "local_only")) enqueueNoteSync(context, name)
-                }
-            }
+    }
+
+    private fun resumeJob(context: Context, name: String, value: JSONObject) {
+        if (value.optString("transcriptionSource") == "local-whisper-base-q5_1") {
+            if (ready(context)) enqueue(context, name) else download(context)
+        } else enqueuePrimary(context, name)
+    }
+
+    suspend fun enrich(context: Context, name: String, value: JSONObject) {
+        if (value.optString("phone").isNotBlank()) return
+        val phone = com.example.recording.SmartRecordingMetadata.phone(value, name)
+        val metadata = runCatching {
+            com.example.recording.SmartRecordingMetadata.resolve(context, phone, null)
+        }.getOrElse { JSONObject().put("phone", phone) }
+        metadata.keys().forEach { key -> value.put(key, metadata.get(key)) }
+        write(context, name, value)
     }
 }

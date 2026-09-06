@@ -88,11 +88,11 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
         SupabaseDbClient.deleteContact(context, id)
     }
 
-    suspend fun insertFollowUp(followUp: FollowUpEntity): FollowUpEntity {
+    suspend fun insertFollowUp(followUp: FollowUpEntity, preserveExactTime: Boolean = false, syncImmediately: Boolean = true): FollowUpEntity {
         val activeFollowUps = dao.getActiveFollowUpsList()
         var currentDueAt = followUp.dueAt
 
-        var clashFound = true
+        var clashFound = !preserveExactTime
         while (clashFound) {
             clashFound = false
             for (existing in activeFollowUps) {
@@ -110,8 +110,13 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
             followUp
         }
         dao.insertFollowUp(finalizedFollowUp)
-        SupabaseDbClient.upsertFollowUp(context, finalizedFollowUp)
+        if (syncImmediately) SupabaseDbClient.upsertFollowUp(context, finalizedFollowUp)
         return finalizedFollowUp
+    }
+
+    suspend fun syncFollowUp(id: String): Boolean {
+        val item = dao.getFollowUpById(id) ?: return false
+        return SupabaseDbClient.upsertFollowUp(context, item)
     }
 
     suspend fun getFollowUpById(id: String): FollowUpEntity? {

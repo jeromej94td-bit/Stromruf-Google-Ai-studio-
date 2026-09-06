@@ -37,6 +37,9 @@ object HomeSipSmartAutomation {
     )
 
     @Volatile private var session: Session? = null
+    private val recordingPaths = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    fun isRecording(file: File): Boolean = file.absolutePath in recordingPaths
 
     @Synchronized
     fun arm(number: String, contactName: String?) {
@@ -62,6 +65,7 @@ object HomeSipSmartAutomation {
         val file = File(dir, "Call_${current.number}_$timestamp.wav")
         params.recordFile = file.absolutePath
         current.recordingFile = file
+        recordingPaths.add(file.absolutePath)
     }
 
     fun onCallState(context: Context, call: Call, state: Call.State) {
@@ -114,6 +118,7 @@ object HomeSipSmartAutomation {
         val wasConnected = finished.connectedAt > 0L
         val file = finished.recordingFile
 
+        // Call-log cloud sync must not delay the durable transcription schedule.
         scope.launch {
             runCatching {
                 val repository = StromrufRepository(
@@ -139,7 +144,9 @@ object HomeSipSmartAutomation {
                     )
                 )
             }.onFailure { Log.w(TAG, "Smart-Call-Status konnte nicht gespeichert werden", it) }
+        }
 
+        scope.launch {
             if (file == null) return@launch
 
             var previousSize = -1L
@@ -155,24 +162,34 @@ object HomeSipSmartAutomation {
                 if (stableChecks < 2) delay(500)
             }
 
-            if (!file.exists() || file.length() <= 44L) {
+            if (!file.exists() || file.length() <= 44L || stableChecks < 2) {
                 Log.e(TAG, "Smart-Call-Aufnahme ist nach dem Auflegen nicht lesbar: ${file.name}")
+                recordingPaths.remove(file.absolutePath)
                 return@launch
             }
 
+            val metadata = runCatching {
+                com.example.recording.SmartRecordingMetadata.resolve(context, finished.number, finished.contactName)
+            }.getOrElse { org.json.JSONObject().put("phone", finished.number).put("contactName", finished.contactName.orEmpty()) }
+            val completedFile = com.example.recording.SmartRecordingMetadata.rename(file, metadata)
+            recordingPaths.add(completedFile.absolutePath)
             runCatching {
                 LocalTranscripts.request(
                     context = context,
-                    file = file,
+                    file = completedFile,
                     callDurationSeconds = reliableDuration,
-                    callStartedAt = callStartedAt
+                    callStartedAt = callStartedAt,
+                    callEndedAt = callEndedAt,
+                    metadata = metadata
                 )
             }.onFailure { Log.e(TAG, "Transkriptions-Workflow konnte nicht automatisch eingeplant werden", it) }
+            recordingPaths.remove(file.absolutePath)
+            recordingPaths.remove(completedFile.absolutePath)
 
             runCatching {
                 val storage = RecordingStorageManager(context)
                 if (storage.isAutoExportEnabled() && storage.getCustomFolderUri() != null) {
-                    storage.saveFileToCustomFolder(file)
+                    storage.saveFileToCustomFolder(completedFile)
                 }
             }.onFailure { Log.w(TAG, "Aufnahme konnte nicht in den Zielordner exportiert werden", it) }
         }

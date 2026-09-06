@@ -20,6 +20,10 @@ import java.util.Locale
 
 /** Local Gemma post-processing for Smart Calls. */
 object LocalGemma {
+    private val busy = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val executor = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+        Thread(task, "smart-call-gemma").apply { isDaemon = true }
+    }
     const val MODEL_PAGE = "https://huggingface.co/google/gemma-3n-E2B-it-litert-lm"
     private const val MODEL_NAME = "gemma-3n-e2b-it.litertlm"
     private const val MIN_MODEL_BYTES = 500L * 1024L * 1024L
@@ -48,16 +52,31 @@ object LocalGemma {
     }
 
     /** Uses the user-editable documentation/customer/follow-up rules saved in the app. */
-    suspend fun analyze(context: Context, transcript: String): Result<Analysis> = withContext(Dispatchers.IO) {
+    suspend fun analyze(context: Context, transcript: String, callContext: String = "", callStartedAt: Long = System.currentTimeMillis()): Result<Analysis> = withContext(Dispatchers.IO) {
+        if (!ready(context) || !busy.compareAndSet(false, true)) return@withContext Result.failure(
+            IllegalStateException("Gemma nicht verfügbar – regelbasierte Analyse"))
+        val task = executor.submit<Analysis> {
+            try { analyzeBlocking(context, transcript, callContext, callStartedAt).getOrThrow() }
+            finally { busy.set(false) }
+        }
+        // Native inference may ignore coroutine cancellation; bound the caller and prevent
+        // additional engines from starting until the native task really exits.
+        runCatching { task.get(90, java.util.concurrent.TimeUnit.SECONDS) }
+    }
+
+    private fun analyzeBlocking(context: Context, transcript: String, callContext: String, callStartedAt: Long): Result<Analysis> =
         runCatching {
             require(ready(context)) { "Gemma-Modell ist nicht installiert" }
             val documentationRules = GemmaPromptSettings.documentation(context)
             val customerRules = GemmaPromptSettings.customer(context)
             val followUpRules = GemmaPromptSettings.followUp(context)
-            val nowText = SimpleDateFormat("EEEE, dd.MM.yyyy HH:mm", Locale.GERMANY).format(Date())
+            val nowText = SimpleDateFormat("EEEE, dd.MM.yyyy HH:mm", Locale.GERMANY).format(Date(callStartedAt))
             val prompt = """
                 Du wertest ein deutsches Kundengespräch für Stromruf aus.
-                Aktuelles Datum und Uhrzeit: $nowText
+                Datum und Uhrzeit des Gesprächs: $nowText
+                $callContext
+                Übernimm bekannte Kundennummer und Telefonnummer exakt in die interne Dokumentation.
+                Erfinde keine fehlende Kundennummer.
 
                 REGELN FÜR INTERNE DOKUMENTATION:
                 $documentationRules
@@ -111,5 +130,4 @@ object LocalGemma {
                 }
             }
         }
-    }
 }
