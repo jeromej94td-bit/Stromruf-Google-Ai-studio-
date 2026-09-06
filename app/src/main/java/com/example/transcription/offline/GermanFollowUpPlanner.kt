@@ -9,7 +9,7 @@ object GermanFollowUpPlanner {
 
     fun plan(transcript: String, now: Long = System.currentTimeMillis()): Plan? {
         val text = transcript.lowercase(Locale.GERMAN).replace(Regex("\\s+"), " ")
-        val callback = Regex("sprechen|telefonier|anruf|rückruf|zurückruf|zurückrufen|melden|wiederhören|kontakt|termin")
+        val callback = Regex("sprechen|telefonier|anruf|rückruf|zurückruf|zurückrufen|rufen.*an|hören uns|melden|wiederhören|kontakt|termin")
         if (!callback.containsMatchIn(text)) return null
 
         val calendar = Calendar.getInstance().apply {
@@ -38,8 +38,8 @@ object GermanFollowUpPlanner {
             }
             Regex("nächste woche|kommende woche").containsMatchIn(text) -> {
                 explicitDate = true
-                calendar.add(Calendar.WEEK_OF_YEAR, 1)
-                calendar.set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+                val delta = (Calendar.MONDAY - calendar.get(Calendar.DAY_OF_WEEK) + 7) % 7
+                calendar.add(Calendar.DAY_OF_YEAR, if (delta == 0) 7 else delta)
             }
             else -> {
                 val weekday = mapOf(

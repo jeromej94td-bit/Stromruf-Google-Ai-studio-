@@ -191,6 +191,8 @@ fun OfflineRecordingTranscript(file: File) {
     val customerText = snapshot.optString("customerText")
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Telefon: " + com.example.recording.SmartRecordingMetadata.phone(snapshot, file.name), style = MaterialTheme.typography.bodySmall)
+        Text("Kundennummer: " + snapshot.optString("customerNumber").ifBlank { "nicht eindeutig zugeordnet" }, style = MaterialTheme.typography.bodySmall)
         Text(localError ?: snapshot.optString("message", "Smart-Call-Verarbeitung"), style = MaterialTheme.typography.bodySmall)
         if (source.isNotBlank() && source != "pending") {
             Text(

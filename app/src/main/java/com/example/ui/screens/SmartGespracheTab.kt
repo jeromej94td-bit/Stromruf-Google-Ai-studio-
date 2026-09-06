@@ -18,6 +18,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,12 +51,15 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings = remember { SecureIntegrationSettings(context) }
+    val playback = remember { RecordingPlayback() }
+    DisposableEffect(playback) { onDispose { playback.stop() } }
 
     val recordings by produceState(initialValue = emptyList<File>(), context) {
         while (true) {
             val folder = File(context.filesDir, "smart_calls_recordings")
             val files = folder.listFiles()
-                ?.filter { it.isFile && it.extension.equals("wav", ignoreCase = true) }
+                ?.filter { it.isFile && it.extension.equals("wav", ignoreCase = true) &&
+                    !com.example.homesip.HomeSipSmartAutomation.isRecording(it) }
                 ?.sortedByDescending { it.lastModified() }
                 .orEmpty()
             value = files
@@ -87,7 +91,7 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
                 Text("Smart Calls", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Aufnahme → automatisch Groq Whisper Large v3 → Gemma → Dokumentation, Kundenfassung & Termin → Supabase",
+                    "Aufnahme → einmaliger Start ab 90 Sekunden nach dem Auflegen → Groq → Gemma → Dokumentation, Kundenfassung & Termin",
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
@@ -135,6 +139,8 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
 
         item { OfflineTranscriptionSetup() }
         item { LocalGemmaSetup() }
+        item { RecordingFolderSettings() }
+        playback.error?.let { error -> item { Text(error, color = MaterialTheme.colorScheme.error) } }
 
         item {
             Text("Gespräche & Zusammenfassungen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
@@ -158,6 +164,7 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
                     Text(recording.nameWithoutExtension.removePrefix("Call_"), fontWeight = FontWeight.SemiBold)
                     Text(SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMANY).format(Date(recording.lastModified())), style = MaterialTheme.typography.bodySmall)
                     OfflineRecordingTranscript(recording)
+                    RecordingAudioControls(recording, playback)
                 }
             }
         }

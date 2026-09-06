@@ -92,9 +92,11 @@ class RecordingStorageManager(private val context: Context) {
                 context.contentResolver.takePersistableUriPermission(uri, takeFlags)
             } catch (e: SecurityException) {
                 Log.w(TAG, "Could not take persistable permission: ${e.message}")
+                return false
             }
 
             val doc = DocumentFile.fromTreeUri(context, uri)
+            if (doc?.isDirectory != true || !doc.canWrite()) return false
             val folderName = doc?.name ?: "Zielordner"
             val uriStr = uri.toString().lowercase()
             val isDrive = uriStr.contains("com.google.android.apps.docs.storage") ||

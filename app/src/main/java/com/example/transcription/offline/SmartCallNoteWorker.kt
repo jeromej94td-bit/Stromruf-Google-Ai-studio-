@@ -22,7 +22,9 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
         val name = inputData.getString("file") ?: return@withContext Result.success()
         val job = LocalTranscripts.read(context, name)
         if (job.optString("state") != "done") return@withContext Result.success()
-        if (job.optString("syncState") == "done" && job.optString("followUpState") in setOf("done", "none")) {
+        LocalTranscripts.enrich(context, name, job)
+        if (job.optString("syncState") == "done" && job.optString("followUpState") in setOf("done", "none") &&
+            (job.optString("followUpState") == "none" || job.optBoolean("followUpSynced"))) {
             return@withContext Result.success()
         }
 
@@ -32,9 +34,13 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
             val durationSeconds = maxOf(wavDurationSeconds, callDurationSeconds)
             val transcript = job.optString("text").trim()
             val nextAction = job.optString("nextAction").trim()
-            val summary = job.optString("summary").ifBlank { GermanCallSummary.create(transcript) }
-            val phone = name.removePrefix("Call_").removeSuffix(".wav")
-                .substringBeforeLast("_").trim().ifBlank { "Unbekannt" }
+            val baseSummary = job.optString("summary").ifBlank { GermanCallSummary.create(transcript) }
+            val identity = com.example.recording.SmartRecordingMetadata.context(job)
+            val summary = if (baseSummary.startsWith("Verifizierte Zuordnung:")) baseSummary else "$identity\n$baseSummary"
+            val phone = com.example.recording.SmartRecordingMetadata.phone(job, name)
+            val db = AppDatabase.getDatabase(context)
+            val repository = StromrufRepository(context, db.stromrufDao())
+            val followUpId = UUID.nameUUIDFromBytes("smart-call-followup:$name".toByteArray()).toString()
 
             job.put("summary", summary)
                 .put("durationSeconds", durationSeconds)
@@ -49,22 +55,21 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                     if (nextAction.isNotBlank()) append("\nNächster Schritt: ").append(nextAction)
                     if (summary.isNotBlank()) append("\nZusammenfassung: ").append(summary)
                 }
-                val plan = GermanFollowUpPlanner.plan(planningText)
+                val referenceTime = job.optLong("callStartedAt").takeIf { it > 0L }
+                    ?: LocalTranscripts.recording(context, name).lastModified()
+                val plan = GermanFollowUpPlanner.plan(planningText, referenceTime)
                 if (plan != null) {
-                    val db = AppDatabase.getDatabase(context)
-                    val repository = StromrufRepository(context, db.stromrufDao())
                     val contact = repository.getContactByPhone(phone)
-                    val followUpId = UUID.nameUUIDFromBytes("smart-call-followup:$name".toByteArray()).toString()
-                    val inserted = repository.insertFollowUp(
+                    val inserted = repository.getFollowUpById(followUpId) ?: repository.insertFollowUp(
                         FollowUpEntity(
                             id = followUpId,
-                            contactId = contact?.id,
-                            contactName = contact?.name ?: phone,
+                            contactId = contact?.id ?: job.optString("contactId").takeIf { it.isNotBlank() },
+                            contactName = contact?.name ?: job.optString("contactName").ifBlank { phone },
                             contactPhone = phone,
                             note = "Smart Call: $summary\n${plan.description}",
                             dueAt = plan.dueAt,
                             callReason = "Smart Call"
-                        )
+                        ), preserveExactTime = true, syncImmediately = false
                     )
                     FollowUpAlarmScheduler.scheduleAlarm(
                         context,
@@ -83,12 +88,17 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                 LocalTranscripts.write(context, name, job)
             }
 
+            if (job.optString("followUpState") == "done" && !job.optBoolean("followUpSynced")) {
+                job.put("followUpSynced", repository.syncFollowUp(followUpId))
+                LocalTranscripts.write(context, name, job)
+            }
+
             val file = LocalTranscripts.recording(context, name)
             val saved = SmartCallSupabaseSync.saveSummary(
                 context = context,
                 phone = phone,
-                contactId = null,
-                contactName = null,
+                contactId = job.optString("contactId").takeIf { it.isNotBlank() },
+                contactName = job.optString("contactName").takeIf { it.isNotBlank() },
                 callStartedAt = job.optLong("callStartedAt").takeIf { it > 0L } ?: file.lastModified(),
                 durationSeconds = durationSeconds,
                 summary = summary,
@@ -99,13 +109,15 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                 job.put("syncState", "done")
                     .put("syncMessage", "Als Smart-Call-Notiz in Supabase gespeichert")
                 LocalTranscripts.write(context, name, job)
-                Result.success()
+                if (job.optString("followUpState") == "done" && !job.optBoolean("followUpSynced")) Result.retry()
+                else Result.success()
             } else {
                 job.put("syncState", "pending")
                     .put("syncMessage", "Wartet auf Anmeldung oder Internet")
                 LocalTranscripts.write(context, name, job)
                 Result.retry()
             }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e
         } catch (e: Exception) {
             job.put("syncState", "pending")
                 .put("syncMessage", "Automatische Verarbeitung wird erneut versucht")

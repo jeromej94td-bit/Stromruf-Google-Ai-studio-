@@ -20,7 +20,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val context = applicationContext
         if (LocalTranscripts.ready(context)) { LocalTranscripts.resume(context); return@withContext Result.success() }
-        val partial = File(LocalTranscripts.directory(context), "model.download")
+        val partial = File(LocalTranscripts.directory(context), "${LocalTranscripts.MODEL_NAME}.download")
         try {
             if (partial.length() > LocalTranscripts.MODEL_SIZE) partial.delete()
             var offset = partial.length()
@@ -97,6 +97,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
 }
 
 class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    companion object { private val nativeSlot = java.util.concurrent.Semaphore(1) }
     private fun callActive(): Boolean = HomeSipTrunk.get(applicationContext).state.value.status in
         setOf(HomeSipStatus.DIALING, HomeSipStatus.RINGING, HomeSipStatus.IN_CALL)
 
@@ -105,12 +106,15 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
         val name = inputData.getString("file") ?: return@withContext Result.success()
         val job = LocalTranscripts.read(context, name)
         if (job.optString("state") == "done") return@withContext Result.success()
+        LocalTranscripts.enrich(context, name, job)
         if (!LocalTranscripts.ready(context)) {
             job.put("state", "pending").put("message", "Wartet auf schnelles Whisper-Fallback")
             LocalTranscripts.write(context, name, job)
+            LocalTranscripts.download(context)
             return@withContext Result.success()
         }
         if (callActive()) return@withContext Result.retry()
+        if (!nativeSlot.tryAcquire()) return@withContext Result.retry()
         var native: WhisperNative? = null
         var handle = 0L
         try {
@@ -157,8 +161,7 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                                     return@withContext Result.retry()
                                 }
                                 native!!.didTimeOut() -> {
-                                    job.put("warning", "Ein sehr langsamer Audioabschnitt wurde übersprungen")
-                                    ""
+                                    throw IOException("Whisper-Zeitlimit erreicht – bitte erneut verarbeiten")
                                 }
                                 else -> throw IOException("Whisper-Verarbeitung fehlgeschlagen")
                             }
@@ -174,12 +177,14 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                     if (SystemClock.elapsedRealtime() >= deadline && next < wav.durationMs) {
                         job.put("state", "pending").put("message", "Fortsetzung eingeplant")
                         LocalTranscripts.write(context, name, job)
-                        LocalTranscripts.enqueue(context, name)
-                        return@withContext Result.success()
+                        return@withContext Result.retry()
                     }
                 }
                 val fallbackSummary = GermanCallSummary.create(text.toString())
-                val gemma = if (text.isBlank()) null else LocalGemma.analyze(context, text.toString()).getOrNull()
+                val gemma = if (text.isBlank()) null else LocalGemma.analyze(context, text.toString(),
+                    com.example.recording.SmartRecordingMetadata.context(job),
+                    job.optLong("callStartedAt").takeIf { it > 0 } ?: file.lastModified()).getOrNull()
+                ensureActive()
                 val nextAction = gemma?.nextAction.orEmpty()
                 val baseSummary = gemma?.summary?.ifBlank { fallbackSummary } ?: fallbackSummary
                 val summary = if (nextAction.isBlank()) baseSummary else "$baseSummary\nNächster Schritt: $nextAction"
@@ -204,6 +209,9 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
             job.put("state", "error").put("message", e.message ?: "Transkription fehlgeschlagen")
             LocalTranscripts.write(context, name, job)
             Result.success()
-        } finally { if (handle != 0L) native?.close(handle) }
+        } finally {
+            try { if (handle != 0L) native?.close(handle) }
+            finally { nativeSlot.release() }
+        }
     }
 }

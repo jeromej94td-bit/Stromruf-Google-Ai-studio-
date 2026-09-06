@@ -6,6 +6,8 @@ import androidx.work.WorkerParameters
 import com.example.util.SecureIntegrationSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import com.example.recording.SmartRecordingMetadata
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -23,9 +25,9 @@ class PrimaryTranscriptionWorker(
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(5, TimeUnit.MINUTES)
-        .readTimeout(5, TimeUnit.MINUTES)
-        .callTimeout(8, TimeUnit.MINUTES)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .callTimeout(90, TimeUnit.SECONDS)
         .build()
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -33,6 +35,7 @@ class PrimaryTranscriptionWorker(
         val name = inputData.getString("file") ?: return@withContext Result.success()
         val job = LocalTranscripts.read(context, name)
         if (job.optString("state") == "done") return@withContext Result.success()
+        LocalTranscripts.enrich(context, name, job)
 
         val file = runCatching { LocalTranscripts.recording(context, name) }.getOrNull()
             ?: return@withContext Result.success()
@@ -42,14 +45,33 @@ class PrimaryTranscriptionWorker(
             return@withContext Result.success()
         }
 
-        val key = SecureIntegrationSettings(context).getGroqKey()
-        if (!key.isNullOrBlank()) {
+        if (file.length() <= 44L) {
+            job.put("state", "error").put("message", "Die Aufnahme enthält keine Audiodaten")
+            LocalTranscripts.write(context, name, job)
+            return@withContext Result.success()
+        }
+        // A fallback job must never be routed back to Groq by a UI scan or app restart.
+        if (job.optString("transcriptionSource") == "local-whisper-base-q5_1") {
+            if (LocalTranscripts.ready(context)) LocalTranscripts.enqueue(context, name)
+            else LocalTranscripts.download(context)
+            return@withContext Result.success()
+        }
+        val key = runCatching { SecureIntegrationSettings(context).getGroqKey() }.getOrNull()
+        val online = runCatching {
+            val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            manager.getNetworkCapabilities(manager.activeNetwork)
+                ?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        }.getOrDefault(false)
+        if (job.optString("groqText").isNotBlank() || (!key.isNullOrBlank() && online)) {
             job.put("state", "running")
                 .put("message", "Groq Whisper Large v3 transkribiert …")
                 .put("transcriptionSource", "groq-whisper-large-v3")
             LocalTranscripts.write(context, name, job)
 
-            val groq = runCatching { transcribeWithGroq(file, key) }
+            val groq = runCatching {
+                job.optString("groqText").ifBlank { transcribeWithGroq(file, key.orEmpty()) }
+            }
+            ensureActive()
             if (groq.isSuccess) {
                 val transcript = groq.getOrThrow().trim()
                 if (transcript.isNotBlank()) {
@@ -57,7 +79,12 @@ class PrimaryTranscriptionWorker(
                     val callDurationMs = job.optLong("callDurationSeconds").coerceAtLeast(0L) * 1000L
                     val durationMs = maxOf(wavDurationMs, callDurationMs)
                     val fallbackSummary = GermanCallSummary.create(transcript)
-                    val gemma = LocalGemma.analyze(context, transcript).getOrNull()
+                    job.put("groqText", transcript).put("text", transcript)
+                        .put("message", "Transkript fertig – lokale Analyse läuft …")
+                    LocalTranscripts.write(context, name, job)
+                    val gemma = LocalGemma.analyze(context, transcript, SmartRecordingMetadata.context(job),
+                        job.optLong("callStartedAt").takeIf { it > 0 } ?: file.lastModified()).getOrNull()
+                    ensureActive()
                     val nextAction = gemma?.nextAction.orEmpty()
                     val baseSummary = gemma?.summary?.ifBlank { fallbackSummary } ?: fallbackSummary
                     val summary = if (nextAction.isBlank()) baseSummary else "$baseSummary\nNächster Schritt: $nextAction"
@@ -82,12 +109,12 @@ class PrimaryTranscriptionWorker(
                 }
             }
 
-            val reason = groq.exceptionOrNull()?.message.orEmpty().take(160)
+            val reason = groq.exceptionOrNull()?.javaClass?.simpleName.orEmpty()
             job.put("groqFallbackReason", reason)
                 .put("message", "Groq nicht verfügbar – lokaler Whisper-Fallback wird gestartet")
             LocalTranscripts.write(context, name, job)
         } else {
-            job.put("message", "Kein Groq-Schlüssel – lokaler Whisper-Fallback wird gestartet")
+            job.put("message", "Groq-Schlüssel oder Internet fehlt – lokaler Whisper-Fallback wird gestartet")
             LocalTranscripts.write(context, name, job)
         }
 
@@ -108,7 +135,7 @@ class PrimaryTranscriptionWorker(
     }
 
     private fun transcribeWithGroq(file: java.io.File, apiKey: String): String {
-        require(file.length() > 0L) { "Audiodatei ist leer" }
+        require(file.length() in 45L..25_000_000L) { "Aufnahme wird lokal verarbeitet" }
         val multipart = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("model", "whisper-large-v3")
@@ -130,10 +157,7 @@ class PrimaryTranscriptionWorker(
         http.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                val detail = runCatching {
-                    JSONObject(body).optJSONObject("error")?.optString("message")
-                }.getOrNull().orEmpty()
-                throw IOException(if (detail.isBlank()) "Groq HTTP ${response.code}" else detail)
+                throw IOException("Groq HTTP ${response.code}")
             }
             val text = runCatching { JSONObject(body).optString("text") }.getOrDefault("")
             if (text.isBlank()) throw IOException("Groq hat kein Transkript geliefert")
