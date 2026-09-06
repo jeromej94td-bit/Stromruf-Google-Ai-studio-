@@ -25,7 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.example.homesip.HomeSipSmartAutomation
+import com.example.homesip.HomeSipCallUiState
 import com.example.homesip.HomeSipStatus
 import com.example.homesip.HomeSipTrunk
 import com.example.ui.design.AppCard
@@ -55,7 +55,7 @@ fun DialerCard(viewModel: StromrufViewModel, modifier: Modifier = Modifier) {
     }
 
     fun startSmartCallOnce(phone: String, name: String?) {
-        HomeSipSmartAutomation.arm(phone, name)
+        HomeSipCallUiState.prepare(phone, name, smartCall = true)
         homeSip.startCall(phone)
         clearPendingSmart()
         quickPhone = ""
@@ -68,13 +68,10 @@ fun DialerCard(viewModel: StromrufViewModel, modifier: Modifier = Modifier) {
         val name = quickName.takeIf { it.isNotBlank() }
 
         if (sipState.status == HomeSipStatus.READY) {
-            // SIP is already registered: dial exactly once and do not leave a pending trigger behind.
             startSmartCallOnce(phone, name)
         } else {
-            // Only keep a pending number while waiting for registration to become READY.
             pendingSmartPhone = phone
             pendingSmartName = name
-            HomeSipSmartAutomation.arm(phone, name)
             val saved = homeSip.savedSettings()
             homeSip.connect(saved)
         }
@@ -89,10 +86,7 @@ fun DialerCard(viewModel: StromrufViewModel, modifier: Modifier = Modifier) {
         when (sipState.status) {
             HomeSipStatus.READY -> startSmartCallOnce(phone, pendingSmartName)
             HomeSipStatus.DIALING, HomeSipStatus.RINGING, HomeSipStatus.IN_CALL -> clearPendingSmart()
-            HomeSipStatus.ERROR, HomeSipStatus.OFFLINE -> {
-                HomeSipSmartAutomation.cancelPrepared()
-                clearPendingSmart()
-            }
+            HomeSipStatus.ERROR, HomeSipStatus.OFFLINE -> clearPendingSmart()
             else -> Unit
         }
     }
