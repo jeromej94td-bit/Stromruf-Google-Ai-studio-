@@ -27,7 +27,7 @@ fun OfflineTranscriptionSetup() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var ready by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Modellstatus wird geladen …") }
+    var status by remember { mutableStateOf("Fallback-Modellstatus wird geladen …") }
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) { LocalTranscripts.resume(context) }
         while (true) {
@@ -41,21 +41,58 @@ fun OfflineTranscriptionSetup() {
     }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Kostenlos transkribieren · Deutsch", style = MaterialTheme.typography.titleMedium)
-            Text(if (ready) "Bereit. Neue Gespräche über eine Minute werden nach dem Auflegen auf dem Handy transkribiert."
-                else "Einmal etwa 60 MB herunterladen. Danach funktioniert die Transkription ohne Internet und ohne API-Gebühren.")
+            Text("Lokales Whisper · Fallback", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Haupttranskriptor ist Groq Whisper Large v3. Dieses schnelle lokale Modell übernimmt automatisch, wenn Groq oder Internet nicht verfügbar ist.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                if (ready) "Fallback ist bereit und kann offline übernehmen."
+                else "Einmal etwa 60 MB herunterladen. Danach steht der Offline-Fallback ohne API-Kosten bereit."
+            )
             Text(status, style = MaterialTheme.typography.bodySmall)
             if (!ready) Button(onClick = {
                 scope.launch(Dispatchers.IO) { LocalTranscripts.download(context) }
-            }) { Text("Schnelles Deutsch-Modell laden / fortsetzen") }
-            Text("Die Verarbeitung läuft abschnittsweise und zeigt nach jedem kurzen Abschnitt Fortschritt. Während eines Smart Calls pausiert sie automatisch.",
-                style = MaterialTheme.typography.bodySmall)
+            }) { Text("60-MB-Fallback laden / fortsetzen") }
         }
     }
 }
 
 @Composable
-fun LocalGemmaSetup() { val context = LocalContext.current; val scope = rememberCoroutineScope(); var installed by remember { mutableStateOf(LocalGemma.ready(context)) }; var message by remember { mutableStateOf("") }; val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) scope.launch { message = "Gemma-Modell wird installiert …"; val result = LocalGemma.install(context, uri); installed = result.isSuccess; message = result.exceptionOrNull()?.message ?: "Gemma 3n E2B ist lokal bereit" } }; Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { Text("Lokale KI für Notiz und nächsten Schritt · optional", style = MaterialTheme.typography.titleMedium); Text(if (installed) "Gemma 3n E2B ist installiert. Nach der Transkription erstellt sie die Gesprächsnotiz direkt auf dem Handy." else "Gemma 3n E2B kann Zusammenfassung und nächsten Schritt zusätzlich lokal formulieren. Ohne sie nutzt die App weiterhin die sichere Regel-Logik für Termine.", style = MaterialTheme.typography.bodySmall); if (message.isNotBlank()) Text(message, style = MaterialTheme.typography.bodySmall); if (!installed) { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(LocalGemma.MODEL_PAGE))) }) { Text("Modellseite öffnen") }; Button(onClick = { picker.launch(arrayOf("application/octet-stream", "*/*")) }) { Text("Heruntergeladenes Modell installieren") } }; Text("Einmal auf der Modellseite die Gemma-Lizenz akzeptieren, die .litertlm-Datei herunterladen und hier auswählen. Das Modell ist zu groß für die APK; Audio und Gesprächsinhalt bleiben dabei auf deinem Handy.", style = MaterialTheme.typography.bodySmall) } } }
+fun LocalGemmaSetup() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var installed by remember { mutableStateOf(LocalGemma.ready(context)) }
+    var message by remember { mutableStateOf("") }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            message = "Gemma-Modell wird installiert …"
+            val result = LocalGemma.install(context, uri)
+            installed = result.isSuccess
+            message = result.exceptionOrNull()?.message ?: "Gemma 3n E2B ist lokal bereit"
+        }
+    }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Gemma 3n E2B · Zusammenfassung & nächster Schritt", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (installed) "Gemma ist installiert und wertet fertige Transkripte lokal aus."
+                else "Gemma kann Zusammenfassung und nächsten Schritt lokal formulieren. Ohne Gemma nutzt Stromruf die regelbasierte Zusammenfassungs- und Terminlogik.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            if (message.isNotBlank()) Text(message, style = MaterialTheme.typography.bodySmall)
+            if (!installed) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(LocalGemma.MODEL_PAGE)))
+                    }) { Text("Modellseite") }
+                    Button(onClick = { picker.launch(arrayOf("application/octet-stream", "*/*")) }) {
+                        Text("Gemma installieren")
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -73,11 +110,33 @@ fun OfflineRecordingTranscript(file: File) {
         }
     }
     val state = snapshot.optString("state")
+    val source = snapshot.optString("transcriptionSource")
+    val analysis = snapshot.optString("analysisSource")
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(localError ?: snapshot.optString("message", "Lokales Deutsch-Transkript"), style = MaterialTheme.typography.bodySmall)
+        Text(localError ?: snapshot.optString("message", "Smart-Call-Verarbeitung"), style = MaterialTheme.typography.bodySmall)
+        if (source.isNotBlank() && source != "pending") {
+            Text(
+                "Transkription: " + when (source) {
+                    "groq-whisper-large-v3" -> "Groq Whisper Large v3"
+                    "local-whisper-base-q5_1" -> "Lokales Whisper (Fallback)"
+                    else -> source
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        if (analysis.isNotBlank()) {
+            Text(
+                "Analyse: " + when (analysis) {
+                    "gemma-3n-e2b" -> "Gemma 3n E2B"
+                    "regelbasiert" -> "Regelbasierter Fallback"
+                    else -> analysis
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         snapshot.optString("syncMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         snapshot.optString("followUpMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-        snapshot.optString("summary").takeIf { it.isNotBlank() }?.let { Text("Notiz: $it", style = MaterialTheme.typography.bodySmall, maxLines = 6) }
+        snapshot.optString("summary").takeIf { it.isNotBlank() }?.let { Text("Zusammenfassung: $it", style = MaterialTheme.typography.bodySmall, maxLines = 8) }
         snapshot.optString("nextAction").takeIf { it.isNotBlank() }?.let { Text("Nächster Schritt: $it", style = MaterialTheme.typography.bodySmall) }
         if (state in setOf("", "error")) OutlinedButton(onClick = {
             scope.launch {
@@ -85,14 +144,14 @@ fun OfflineRecordingTranscript(file: File) {
                     runCatching { LocalTranscripts.request(context, file) }.exceptionOrNull()?.message
                 }
             }
-        }) { Text(if (state == "error") "Lokal erneut versuchen" else "Kostenlos auf Deutsch transkribieren") }
+        }) { Text(if (state == "error") "Erneut verarbeiten" else "Jetzt verarbeiten") }
         if (snapshot.optString("text").isNotBlank()) TextButton(onClick = { showText = true }) {
-            Text(if (state == "done") "Deutsch-Transkript öffnen" else "Bisherigen Text öffnen")
+            Text(if (state == "done") "Transkript öffnen" else "Bisherigen Text öffnen")
         }
     }
     if (showText) AlertDialog(
         onDismissRequest = { showText = false },
-        title = { Text("Gesprächstext · Deutsch") },
+        title = { Text("Gesprächstranskript") },
         text = {
             SelectionContainer {
                 Column(Modifier.heightIn(max = 450.dp).verticalScroll(rememberScrollState())) {
