@@ -14,6 +14,9 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /** Local Gemma post-processing for Smart Calls. */
 object LocalGemma {
@@ -51,8 +54,10 @@ object LocalGemma {
             val documentationRules = GemmaPromptSettings.documentation(context)
             val customerRules = GemmaPromptSettings.customer(context)
             val followUpRules = GemmaPromptSettings.followUp(context)
+            val nowText = SimpleDateFormat("EEEE, dd.MM.yyyy HH:mm", Locale.GERMANY).format(Date())
             val prompt = """
                 Du wertest ein deutsches Kundengespräch für Stromruf aus.
+                Aktuelles Datum und Uhrzeit: $nowText
 
                 REGELN FÜR INTERNE DOKUMENTATION:
                 $documentationRules
@@ -63,10 +68,13 @@ object LocalGemma {
                 REGELN FÜR NÄCHSTEN SCHRITT / TERMIN:
                 $followUpRules
 
+                Wenn die Terminregeln einen automatisch berechneten Termin verlangen, schreibe in next_action
+                das berechnete konkrete Datum UND die konkrete Uhrzeit, damit Stromruf es eindeutig übernehmen kann.
+
                 Antworte ausschließlich als JSON ohne Markdown:
                 {
                   "summary":"interne Gesprächsnotiz",
-                  "next_action":"vereinbarter nächster Schritt oder leer",
+                  "next_action":"vereinbarter oder nach Nutzerregel berechneter nächster Schritt; bei Kalendertermin mit DD.MM.YYYY und HH:MM Uhr",
                   "customer_text":"kundenfreundliche Fassung zum direkten Kopieren"
                 }
 
@@ -83,7 +91,7 @@ object LocalGemma {
                 engine.createConversation(
                     ConversationConfig(
                         systemInstruction = Contents.of(
-                            "Du bearbeitest deutsche Geschäftsgespräche. Halte dich an die gespeicherten Nutzerregeln. Erfinde keine Fakten, Termine, Preise oder Zusagen."
+                            "Du bearbeitest deutsche Geschäftsgespräche. Halte dich an die gespeicherten Nutzerregeln. Erfinde keine Fakten, Termine, Preise oder Zusagen außerhalb dieser Regeln."
                         ),
                         samplerConfig = SamplerConfig(topK = 8, topP = 0.8, temperature = 0.1),
                         maxOutputToken = 700
