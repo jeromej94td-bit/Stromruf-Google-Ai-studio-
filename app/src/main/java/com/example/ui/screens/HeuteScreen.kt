@@ -202,6 +202,8 @@ fun HeuteScreen(
 
         item { DialerCard(viewModel) }
 
+        item { HomeSipTrunkCard() }
+
         // ---- Jetzt fällig ----
         item {
             SectionHeader(
