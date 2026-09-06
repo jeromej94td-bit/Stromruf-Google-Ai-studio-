@@ -85,49 +85,51 @@ fun StromrufShell(
                     onRequestFollowUp = onAddFollowUpFor
                 )
             } else {
-            val navOrder = listOf("heute", "leads", "aktivitaeten", "statistiken", "agents")
-            AnimatedContent(
-                targetState = area,
-                transitionSpec = {
-                    val dir = navOrder.indexOf(targetState) - navOrder.indexOf(initialState)
-                    val slide = if (dir >= 0) 1 else -1
-                    (slideInHorizontally(
-                        animationSpec = tween(340, easing = FastOutSlowInEasing)
-                    ) { it / 5 * slide } + fadeIn(tween(280)) + scaleIn(
-                        initialScale = 0.96f, animationSpec = tween(340, easing = FastOutSlowInEasing)
-                    )) togetherWith (slideOutHorizontally(
-                        animationSpec = tween(300, easing = FastOutSlowInEasing)
-                    ) { -it / 6 * slide } + fadeOut(tween(200)))
-                },
-                label = "areaSwitch"
-            ) { current ->
-                when (current) {
-                    "heute" -> HeuteScreen(
-                        viewModel = viewModel,
-                        onNavigate = { area = it },
-                        onAddContact = onAddContact,
-                        onAddFollowUp = onAddFollowUp,
-                        onOpenSettings = onOpenSettings,
-                        onOpenAiChat = onOpenAiChat
-                    )
-                    "leads" -> LeadsScreen(
-                        viewModel = viewModel,
-                        onOpenContact = { selectedContact = it },
-                        onAddNeukunde = onAddNeukunde
-                    )
-                    "aktivitaeten" -> AktivitaetenCalendarHost(
-                        viewModel = viewModel,
-                        onAddFollowUp = onAddFollowUp
-                    )
-                    "statistiken" -> StatistikenScreen(
-                        viewModel = viewModel
-                    )
-                    "agents" -> AgentsScreen(
-                        viewModel = viewModel
-                    )
+                val navOrder = listOf("heute", "leads", "aktivitaeten", "statistiken", "agents")
+                AnimatedContent(
+                    targetState = area,
+                    transitionSpec = {
+                        val dir = navOrder.indexOf(targetState) - navOrder.indexOf(initialState)
+                        val slide = if (dir >= 0) 1 else -1
+                        (slideInHorizontally(
+                            animationSpec = tween(340, easing = FastOutSlowInEasing)
+                        ) { it / 5 * slide } + fadeIn(tween(280)) + scaleIn(
+                            initialScale = 0.96f, animationSpec = tween(340, easing = FastOutSlowInEasing)
+                        )) togetherWith (slideOutHorizontally(
+                            animationSpec = tween(300, easing = FastOutSlowInEasing)
+                        ) { -it / 6 * slide } + fadeOut(tween(200)))
+                    },
+                    label = "areaSwitch"
+                ) { current ->
+                    when (current) {
+                        "heute" -> HeuteScreen(
+                            viewModel = viewModel,
+                            onNavigate = { area = it },
+                            onAddContact = onAddContact,
+                            onAddFollowUp = onAddFollowUp,
+                            onOpenSettings = onOpenSettings,
+                            onOpenAiChat = onOpenAiChat
+                        )
+                        "leads" -> LeadsScreen(
+                            viewModel = viewModel,
+                            onOpenContact = { selectedContact = it },
+                            onAddNeukunde = onAddNeukunde
+                        )
+                        "aktivitaeten" -> AktivitaetenCalendarHost(
+                            viewModel = viewModel,
+                            onAddFollowUp = onAddFollowUp
+                        )
+                        "statistiken" -> StatistikenScreen(
+                            viewModel = viewModel
+                        )
+                        "agents" -> AgentsScreen(
+                            viewModel = viewModel
+                        )
+                    }
                 }
             }
-        }
+
+            HomeSipCallOverlay()
         }
 
         // Navigationsleiste ausblenden, solange ein Kontakt im Fokus ist (mehr Fläche).
