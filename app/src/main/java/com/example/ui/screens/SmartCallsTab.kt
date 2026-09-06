@@ -81,7 +81,11 @@ fun SmartCallsTab() {
     var sipUser by remember { mutableStateOf(prefs.getString("sipUser", "") ?: "") }
     var authUser by remember { mutableStateOf(prefs.getString("authUser", "") ?: "") }
     var sipPassword by remember { mutableStateOf(prefs.getString("sipPassword", "") ?: "") }
-    var sipRegistrar by remember { mutableStateOf(prefs.getString("sipRegistrar", "voip.easybell.de") ?: "voip.easybell.de") }
+    val savedRegistrar = prefs.getString("sipRegistrar", "secure.sip.easybell.de") ?: "secure.sip.easybell.de"
+    val migratedEasybellRegistrar = savedRegistrar.trim().equals("voip.easybell.de", ignoreCase = true)
+    var sipRegistrar by remember {
+        mutableStateOf(if (migratedEasybellRegistrar) "secure.sip.easybell.de" else savedRegistrar)
+    }
     var selectedProtocol by remember {
         val protoStr = prefs.getString("protocol", SipTransportProtocol.TLS.name)
         mutableStateOf(SipTransportProtocol.entries.find { it.name == protoStr } ?: SipTransportProtocol.TLS)
@@ -354,9 +358,14 @@ fun SmartCallsTab() {
         sipClient.register(config)
     }
 
-    // Automatically connect when the Smart Calls 2 tab is opened.
+    // Automatically connect when the Smart Calls tab is opened.
     // Credentials are already stored locally by saveConfig().
     LaunchedEffect(Unit) {
+        // TLS verifies the host name. Easybell presents its certificate for this
+        // endpoint, so migrate the former default without weakening TLS checks.
+        if (migratedEasybellRegistrar) {
+            prefs.edit().putString("sipRegistrar", "secure.sip.easybell.de").apply()
+        }
         if (sipClient.state.value in setOf(SipState.DISCONNECTED, SipState.ERROR) &&
             sipUser.isNotBlank() &&
             sipPassword.isNotBlank() &&
@@ -801,11 +810,11 @@ fun SmartCallsTab() {
                     // Quick Easybell Preset Button
                     AssistChip(
                         onClick = {
-                            sipRegistrar = "voip.easybell.de"
+                            sipRegistrar = "secure.sip.easybell.de"
                             selectedProtocol = SipTransportProtocol.TLS
                             sipPort = "5061"
                         },
-                        label = { Text("Easybell Preset", fontSize = 11.sp, color = NeonCyan) },
+                        label = { Text("Easybell TLS", fontSize = 11.sp, color = NeonCyan) },
                         colors = AssistChipDefaults.assistChipColors(
                             containerColor = NeonCyan.copy(alpha = 0.1f)
                         ),

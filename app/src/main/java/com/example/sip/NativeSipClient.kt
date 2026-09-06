@@ -50,7 +50,7 @@ data class SipAccountConfig(
     val sipUser: String = "",
     val authUser: String = "",
     val sipPassword: String = "",
-    val sipRegistrar: String = "secure.sip.easybell.de",
+    val sipRegistrar: String = "voip.easybell.de",
     val protocol: SipTransportProtocol = SipTransportProtocol.TLS,
     val port: Int = 5061
 )
@@ -729,628 +729,2099 @@ class NativeSipClient(private val context: Context) {
                 return
             }
 
-…33515 tokens truncated…         )
-                        Text(
-                            text = "Zielordner frei wählen (lokal oder Google Drive)",
-                            fontSize = 11.sp,
-                            color = TextMuted
-                        )
-                    }
-                }
+            val relevantResponse = when (method) {
+                "REGISTER" -> _state.value == SipState.CONNECTING
+                "INVITE" -> inviteTransaction != null &&
+                    responseCallId == inviteTransaction.callIdHeader &&
+                    (_state.value == SipState.DIALING ||
+                        _state.value == SipState.RINGING ||
+                        _state.value == SipState.IN_CALL)
+                else -> false
+            }
+            if (!relevantResponse) {
+                Log.d(
+                    tag,
+                    "Ignoring SIP response for another transaction: " +
+                        "$method/$statusCode cseq=$responseCseq callId=$responseCallId"
+                )
+                return
+            }
 
-                // Current Destination Surface Box
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    color = Bg,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isGoogleDrive) Color(0xFF4285F4).copy(alpha = 0.4f) else CardBorder)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Surface(
-                            shape = CircleShape,
-                            color = if (isGoogleDrive) Color(0xFF4285F4).copy(alpha = 0.2f) else if (storageManager.getCustomFolderUri() != null) NeonGreen.copy(alpha = 0.2f) else SurfaceColor,
-                            modifier = Modifier.size(38.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = if (isGoogleDrive) Icons.Default.CloudDone else if (storageManager.getCustomFolderUri() != null) Icons.Default.FolderOpen else Icons.Default.PhoneAndroid,
-                                    contentDescription = null,
-                                    tint = if (isGoogleDrive) Color(0xFF4285F4) else if (storageManager.getCustomFolderUri() != null) NeonGreen else TextMuted,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = storageDisplayName,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isGoogleDrive) Color(0xFF93C5FD) else Color.White,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = if (isGoogleDrive) "Aufnahmen werden direkt in Google Drive gesichert" else if (storageManager.getCustomFolderUri() != null) "Aufnahmen werden in diesen lokalen Ordner synchronisiert" else "Standardmäßig im internen App-Speicher abgelegt",
-                                fontSize = 11.sp,
-                                color = TextMuted
-                            )
-                        }
-                    }
-                }
-
-                // Action Buttons Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = { folderPickerLauncher.launch(null) },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isGoogleDrive) Color(0xFF4285F4) else NeonCyan
-                        )
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DriveFolderUpload,
-                            contentDescription = null,
-                            tint = Color.Black,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "Zielordner / Drive wählen",
-                            color = Color.Black,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp
-                        )
-                    }
-
-                    if (storageManager.getCustomFolderUri() != null) {
-                        OutlinedButton(
-                            onClick = {
-                                storageManager.resetToDefault()
-                                storageDisplayName = storageManager.getStorageDisplayName()
-                                isGoogleDrive = storageManager.isGoogleDrive()
-                                Toast.makeText(ctx, "Auf Standard-Speicher zurückgesetzt", Toast.LENGTH_SHORT).show()
-                            },
-                            shape = RoundedCornerShape(8.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, CardBorder)
-                        ) {
-                            Icon(Icons.Default.RestartAlt, contentDescription = "Standard", tint = TextMuted, modifier = Modifier.size(16.dp))
-                        }
-                    }
-                }
-
-                // Auto-Sync Switch Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            "Automatisch im Zielordner speichern",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            "Jede neue SmartCall-Aufnahme direkt übertragen",
-                            color = TextMuted,
-                            fontSize = 10.sp
-                        )
-                    }
-                    Switch(
-                        checked = autoExportEnabled,
-                        onCheckedChange = {
-                            autoExportEnabled = it
-                            storageManager.setAutoExportEnabled(it)
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = NeonGreen,
-                            checkedTrackColor = NeonGreen.copy(alpha = 0.3f)
-                        )
+            // RFC 3261 section 17.1.1.3: every non-2xx final response to
+            // INVITE, including an authentication challenge, is completed by
+            // an ACK that exactly matches the original INVITE transaction.
+            if (method == "INVITE" && statusCode in 300..699) {
+                inviteTransaction?.let { transaction ->
+                    sendInviteFailureAck(
+                        response = message,
+                        config = config,
+                        transaction = transaction,
+                        udpDestination = lastUdpSender
                     )
                 }
 
-                // Batch Copy Button
-                if (recordingsList.isNotEmpty()) {
-                    OutlinedButton(
-                        onClick = { copyAllToTarget() },
-                        enabled = !isExportingAll,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, if (isGoogleDrive) Color(0xFF4285F4).copy(alpha = 0.6f) else NeonGreen.copy(alpha = 0.6f))
-                    ) {
-                        if (isExportingAll) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                color = NeonGreen,
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text("Wird übertragen...", color = Color.White, fontSize = 12.sp)
-                        } else {
-                            Icon(
-                                imageVector = if (isGoogleDrive) Icons.Default.CloudUpload else Icons.Default.FolderCopy,
-                                contentDescription = null,
-                                tint = if (isGoogleDrive) Color(0xFF4285F4) else NeonGreen,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "Alle ${recordingsList.size} Aufnahmen jetzt in Zielordner kopieren",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
+                // A late final response for the pre-authentication INVITE must
+                // never be mistaken for a challenge to the established dialog.
+                if (_state.value == SipState.IN_CALL &&
+                    inviteTransaction?.purpose == InvitePurpose.INITIAL
+                ) {
+                    Log.i(
+                        tag,
+                        "ACKed delayed initial INVITE response $statusCode/$responseCseq"
+                    )
+                    return
+                }
+
+                // A rejected optional refresh does not destroy an otherwise
+                // established dialog. Authentication and dialog-loss errors
+                // are handled below.
+                if (_state.value == SipState.IN_CALL &&
+                    inviteTransaction?.purpose == InvitePurpose.SESSION_REFRESH &&
+                    statusCode !in listOf(401, 407, 408, 481)
+                ) {
+                    Log.w(tag, "Session refresh rejected with $statusCode; keeping call active")
+                    return
                 }
             }
-        }
 
-        OfflineTranscriptionSetup()
-        LocalGemmaSetup()
-
-        // LOCAL RECORDINGS ARCHIVE CARD
-        Card(
-            colors = CardDefaults.cardColors(containerColor = SurfaceColor),
-            shape = RoundedCornerShape(14.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, CardBorder)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "Gespeicherte Aufnahmen (${recordingsList.size})",
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color.White,
-                            fontSize = 15.sp
-                        )
-                        Text(
-                            text = "Über 1 Minute automatisch lokal auf Deutsch transkribieren",
-                            fontSize = 11.sp,
-                            color = TextMuted
-                        )
+            when (statusCode) {
+                100 -> {
+                    if (method == "INVITE" && _state.value == SipState.DIALING) {
+                        _statusText.value = "Wählt..."
                     }
+                }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { showApiKeyDialog = true }) {
-                            Icon(
-                                imageVector = Icons.Default.Key,
-                                contentDescription = "Gemini API-Key",
-                                tint = if (transcriber.hasApiKey()) Color(0xFF8B5CF6) else TextMuted
+                180, 183 -> {
+                    if (method == "INVITE" &&
+                        inviteTransaction?.purpose == InvitePurpose.INITIAL &&
+                        (_state.value == SipState.DIALING || _state.value == SipState.RINGING)
+                    ) {
+                        _state.value = SipState.RINGING
+                        _statusText.value = "Klingelt..."
+                    }
+                }
+
+                200 -> {
+                    when {
+                        method == "REGISTER" && _state.value == SipState.CONNECTING -> {
+                            _state.value = SipState.REGISTERED
+                            _statusText.value =
+                                "Registriert (${config.sipRegistrar}:${config.port} [${config.protocol.name}])"
+                        }
+
+                        method == "INVITE" &&
+                            inviteTransaction?.purpose == InvitePurpose.INITIAL &&
+                            (_state.value == SipState.DIALING || _state.value == SipState.RINGING) -> {
+                            extractDialogInfo(message)
+                            dialogAuthHeaderName = inviteTransaction.authHeaderName
+                            dialogAuthChallenge = inviteTransaction.authChallenge
+
+                            val remoteMedia = parseRemoteSdp(message)
+                            if (remoteMedia != null) {
+                                applyRemoteMedia(remoteMedia)
+                            }
+
+                            _state.value = SipState.IN_CALL
+                            _statusText.value = if (remoteMedia == null) {
+                                "Im Gespräch (kein RTP-Audio ausgehandelt)"
+                            } else {
+                                "Im Gespräch"
+                            }
+
+                            lastInviteResponseUdpSender = lastUdpSender
+                            sendAck(
+                                response = message,
+                                config = config,
+                                inviteCseq = inviteTransaction.cseq,
+                                udpDestination = lastInviteResponseUdpSender
+                            )
+                            if (remoteMedia != null) {
+                                startRtpAudio(remoteMedia)
+                            } else {
+                                Log.e(tag, "200 OK contained no supported RTP audio SDP")
+                            }
+
+                            updateSessionTimer(message)
+                            startSessionRefresh(config)
+                            startInCallTimer()
+                            startCallRecording()
+                        }
+
+                        // RFC 3261 requires another ACK for every retransmitted
+                        // 2xx. Do this in response to the packet, not on a blind timer.
+                        method == "INVITE" &&
+                            inviteTransaction?.purpose == InvitePurpose.INITIAL &&
+                            _state.value == SipState.IN_CALL -> {
+                            sendAck(
+                                response = message,
+                                config = config,
+                                inviteCseq = inviteTransaction.cseq,
+                                udpDestination = lastUdpSender
                             )
                         }
-                        IconButton(onClick = {
-                            refreshRecordings()
-                            reloadTranscripts()
-                        }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Aktualisieren", tint = TextMuted)
+
+                        method == "INVITE" &&
+                            inviteTransaction?.purpose == InvitePurpose.SESSION_REFRESH &&
+                            _state.value == SipState.IN_CALL -> {
+                            extractDialogInfo(message)
+                            if (inviteTransaction.authChallenge != null) {
+                                dialogAuthHeaderName = inviteTransaction.authHeaderName
+                                dialogAuthChallenge = inviteTransaction.authChallenge
+                            }
+                            updateSessionTimer(message)
+                            parseRemoteSdp(message)?.let { remote -> applyRemoteMedia(remote) }
+                            sendAck(
+                                response = message,
+                                config = config,
+                                inviteCseq = inviteTransaction.cseq,
+                                udpDestination = lastUdpSender
+                            )
+                            startSessionRefresh(config)
                         }
                     }
                 }
 
-                if (recordingsList.isEmpty()) {
-                    Text(
-                        text = "Noch keine Anrufe aufgezeichnet. Anrufe über Smart Calls werden automatisch hier gespeichert.",
-                        fontSize = 12.sp,
-                        color = TextMuted,
-                        modifier = Modifier.padding(vertical = 8.dp)
-                    )
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        recordingsList.forEach { file ->
-                            val isPlaying = currentlyPlayingPath == file.absolutePath
-                            val isTranscribing = transcribingFiles.contains(file.name)
-                            val transcriptResult = cachedTranscripts[file.name]
-                            val isTranscribed = transcriptResult != null
+                401, 407 -> {
+                    val authHeader = when (statusCode) {
+                        401 -> message.lineSequence().firstOrNull {
+                            it.startsWith("WWW-Authenticate:", ignoreCase = true)
+                        }
+                        else -> message.lineSequence().firstOrNull {
+                            it.startsWith("Proxy-Authenticate:", ignoreCase = true)
+                        }
+                    }
+                    val challenge = authHeader?.let { parseAuthHeader(it) }
+                    if (challenge == null) {
+                        finishCallWithState(
+                            SipState.ERROR,
+                            "Fehler: $statusCode Unauthorized (Kein gültiger Auth-Header)"
+                        )
+                        return
+                    }
 
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(10.dp),
-                                color = Bg,
-                                border = androidx.compose.foundation.BorderStroke(
-                                    1.dp,
-                                    if (isPlaying) NeonCyan else if (isTranscribed) Color(0xFF8B5CF6).copy(alpha = 0.5f) else CardBorder
+                    val headerName = if (statusCode == 407) {
+                        "Proxy-Authorization"
+                    } else {
+                        "Authorization"
+                    }
+
+                    when {
+                        method == "REGISTER" && _state.value == SipState.CONNECTING -> {
+                            cseq++
+                            val auth = buildDigestAuth(
+                                method = "REGISTER",
+                                uri = "sip:${config.sipRegistrar}",
+                                config = config,
+                                challenge = challenge
+                            )
+                            sendRegister(config, auth)
+                        }
+
+                        method == "INVITE" && inviteTransaction != null -> {
+                            if (!markInviteChallengeHandled(
+                                    inviteTransaction,
+                                    statusCode,
+                                    challenge
                                 )
                             ) {
-                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    OfflineRecordingTranscript(file)
-                                    // Row 1: File Info & Audio Actions
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Text(
-                                                    text = file.name,
-                                                    fontWeight = FontWeight.Medium,
-                                                    color = Color.White,
-                                                    fontSize = 13.sp,
-                                                    maxLines = 1,
-                                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                                    modifier = Modifier.weight(1f, fill = false)
-                                                )
+                                Log.d(
+                                    tag,
+                                    "Ignoring repeated INVITE auth challenge " +
+                                        "$statusCode/$responseCseq"
+                                )
+                                return
+                            }
 
-                                                if (isTranscribed) {
-                                                    Surface(
-                                                        shape = RoundedCornerShape(4.dp),
-                                                        color = Color(0xFF8B5CF6).copy(alpha = 0.2f),
-                                                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF8B5CF6).copy(alpha = 0.4f))
-                                                    ) {
-                                                        Row(
-                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(3.dp)
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = Icons.Default.AutoAwesome,
-                                                                contentDescription = null,
-                                                                tint = Color(0xFF8B5CF6),
-                                                                modifier = Modifier.size(11.dp)
-                                                            )
-                                                            Text(
-                                                                text = "KI-Notiz",
-                                                                fontSize = 10.sp,
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = Color(0xFFC4B5FD)
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                            }
+                            when (inviteTransaction.purpose) {
+                                InvitePurpose.INITIAL -> {
+                                    cseq = maxOf(cseq, inviteTransaction.cseq) + 1
+                                    val target = activeCallTarget ?: return
+                                    sendInvite(
+                                        targetNumber = target,
+                                        config = config,
+                                        authChallenge = challenge,
+                                        authHeaderName = headerName
+                                    )
+                                }
 
-                                            val kb = file.length() / 1024
-                                            val date = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMANY).format(Date(file.lastModified()))
-                                            Text(
-                                                text = "$date · ${kb} KB",
-                                                fontSize = 11.sp,
-                                                color = TextMuted
-                                            )
-                                        }
-
-                                        Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            // Play / Pause
-                                            IconButton(onClick = { playRecording(file) }) {
-                                                Icon(
-                                                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                                    contentDescription = "Abspielen",
-                                                    tint = if (isPlaying) NeonCyan else NeonGreen
-                                                )
-                                            }
-
-                                            // Save to Target / Drive
-                                            IconButton(
-                                                onClick = { saveSingleToTarget(file) }
-                                            ) {
-                                                Icon(
-                                                    imageVector = if (isGoogleDrive) Icons.Default.CloudUpload else Icons.Default.SaveAlt,
-                                                    contentDescription = "In Zielordner speichern",
-                                                    tint = if (isGoogleDrive) Color(0xFF4285F4) else NeonCyan
-                                                )
-                                            }
-
-                                            // Share / Open in Drive
-                                            IconButton(
-                                                onClick = { storageManager.shareRecording(file) }
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Share,
-                                                    contentDescription = "Teilen / In Drive senden",
-                                                    tint = TextMuted
-                                                )
-                                            }
-
-                                            // Delete
-                                            IconButton(onClick = {
-                                                deleteRecording(file)
-                                                transcriptCache.delete(file.name)
-                                                reloadTranscripts()
-                                            }) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Delete,
-                                                    contentDescription = "Löschen",
-                                                    tint = DangerRed.copy(alpha = 0.8f)
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    // Row 2: Transcription Area / Note Preview
-                                    if (isTranscribing) {
-                                        Surface(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = Color(0xFF8B5CF6).copy(alpha = 0.12f),
-                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF8B5CF6).copy(alpha = 0.3f))
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                            ) {
-                                                CircularProgressIndicator(
-                                                    modifier = Modifier.size(16.dp),
-                                                    color = Color(0xFF8B5CF6),
-                                                    strokeWidth = 2.dp
-                                                )
-                                                Text(
-                                                    text = "✨ Gemini analysiert Audio & erstellt Notiz...",
-                                                    fontSize = 12.sp,
-                                                    color = Color(0xFFC4B5FD),
-                                                    fontWeight = FontWeight.Medium
-                                                )
-                                            }
-                                        }
-                                    } else if (isTranscribed && transcriptResult != null) {
-                                        // Preview card with quick view button
-                                        Surface(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { activeTranscriptResult = transcriptResult },
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = SurfaceColor,
-                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF8B5CF6).copy(alpha = 0.25f))
-                                        ) {
-                                            Column(
-                                                modifier = Modifier.padding(10.dp),
-                                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Text(
-                                                    text = transcriptResult.summary.ifBlank { transcriptResult.rawText }
-                                                        .lineSequence()
-                                                        .filter { it.isNotBlank() && !it.startsWith("#") }
-                                                        .take(3)
-                                                        .joinToString("\n"),
-                                                    fontSize = 11.sp,
-                                                    color = Color(0xFFE2E8F0),
-                                                    maxLines = 3,
-                                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                                    lineHeight = 16.sp
-                                                )
-
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Text(
-                                                        text = "Tippen für vollständige Notiz & Transkript",
-                                                        fontSize = 10.sp,
-                                                        color = Color(0xFF93C5FD)
-                                                    )
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.Visibility,
-                                                            contentDescription = null,
-                                                            tint = Color(0xFF8B5CF6),
-                                                            modifier = Modifier.size(14.dp)
-                                                        )
-                                                        Text(
-                                                            text = "Ansehen",
-                                                            fontSize = 11.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = Color(0xFF8B5CF6)
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        // Transcribe Button
-                                        OutlinedButton(
-                                            onClick = { startTranscription(file) },
-                                            modifier = Modifier.fillMaxWidth(),
-                                            shape = RoundedCornerShape(8.dp),
-                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF8B5CF6).copy(alpha = 0.6f)),
-                                            colors = ButtonDefaults.outlinedButtonColors(
-                                                contentColor = Color(0xFFC4B5FD)
-                                            )
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.AutoAwesome,
-                                                contentDescription = null,
-                                                tint = Color(0xFF8B5CF6),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Spacer(Modifier.width(8.dp))
-                                            Text(
-                                                text = "Kostenlos lokal auf Deutsch transkribieren",
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = Color.White
-                                            )
-                                        }
-                                    }
+                                InvitePurpose.SESSION_REFRESH -> {
+                                    cseq = maxOf(cseq, inviteTransaction.cseq)
+                                    sendSessionRefresh(
+                                        config = config,
+                                        authChallenge = challenge,
+                                        authHeaderName = headerName
+                                    )
                                 }
                             }
+                        }
+                    }
+                }
+
+                403 -> finishCallWithState(
+                    SipState.ERROR,
+                    "Fehler 403: Zugriff verweigert (Passwort/Benutzer prüfen)"
+                )
+
+                404 -> finishCallWithState(
+                    SipState.ERROR,
+                    "Fehler 404: Rufnummer nicht gefunden"
+                )
+
+                408 -> finishCallWithState(
+                    SipState.ERROR,
+                    "SIP-Dialog abgelaufen (408 Request Timeout)"
+                )
+
+                481 -> finishCallWithState(
+                    SipState.ERROR,
+                    "SIP-Dialog nicht mehr vorhanden (481)"
+                )
+
+                486 -> finishCallWithState(
+                    SipState.ERROR,
+                    "Besetzt (486 Busy Here)"
+                )
+
+                487 -> finishCallWithState(
+                    SipState.REGISTERED,
+                    "Anruf abgebrochen"
+                )
+
+                else -> {
+                    if (statusCode >= 300) {
+                        finishCallWithState(
+                            SipState.ERROR,
+                            "SIP Fehler $statusCode: ${firstLine.substringAfter(statusCode.toString()).trim()}"
+                        )
+                    }
+                }
+            }
+            return
+        }
+
+        // Requests arrive on the same SIP connection. Ignore call-control
+        // messages from another dialog so an unrelated BYE cannot end this call.
+        val requestMethod = firstLine.substringBefore(" ").uppercase(Locale.ROOT)
+        val requestCallId = extractHeaderValue(message, "Call-ID")?.trim()
+        if (_state.value == SipState.IN_CALL &&
+            requestMethod != "OPTIONS" &&
+            requestCallId != "$callId@$localIp"
+        ) {
+            Log.w(tag, "Ignoring $requestMethod for another SIP dialog")
+            sendSipResponseForRequest(message, 481, "Call/Transaction Does Not Exist", config)
+            return
+        }
+
+        when (requestMethod) {
+            "INVITE" -> {
+                if (_state.value == SipState.IN_CALL) {
+                    parseRemoteSdp(message)?.let { remote -> applyRemoteMedia(remote) }
+                    sendInviteResponseForRequest(message, config)
+                } else {
+                    sendSipResponseForRequest(message, 491, "Request Pending", config)
+                }
+            }
+
+            "UPDATE" -> {
+                if (_state.value == SipState.IN_CALL) {
+                    sendSipResponseForRequest(message, 200, "OK", config)
+                } else {
+                    sendSipResponseForRequest(message, 481, "Call/Transaction Does Not Exist", config)
+                }
+            }
+
+            "BYE" -> {
+                val remoteReason = extractHeaderValue(message, "Reason")
+                    ?: extractHeaderValue(message, "Warning")
+                Log.w(tag, "Remote BYE received${remoteReason?.let { ": $it" }.orEmpty()}")
+                sendSipResponseForRequest(message, 200, "OK", config)
+                finishCallWithState(
+                    SipState.REGISTERED,
+                    remoteReason?.let { "Gespräch beendet: $it" }
+                        ?: "Gegenstelle beendet; TX=$rtpPacketsSent RX=$rtpPacketsReceived SRTP-verworfen=$srtpPacketsRejected"
+                )
+            }
+
+            "CANCEL" -> {
+                sendSipResponseForRequest(message, 200, "OK", config)
+                finishCallWithState(SipState.REGISTERED, "Anruf abgebrochen")
+            }
+
+            "OPTIONS" -> sendSipResponseForRequest(message, 200, "OK", config)
+            "ACK" -> Unit
+        }
+    }
+
+    private fun sendRegister(config: SipAccountConfig, authHeader: String?) {
+        val transport = config.protocol.name
+        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+
+        val sb = StringBuilder()
+        sb.append("REGISTER sip:$domain SIP/2.0\r\n")
+        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: \"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append("To: <sip:$user@$domain>\r\n")
+        sb.append("Call-ID: $callId@$localIp\r\n")
+        sb.append("CSeq: $cseq REGISTER\r\n")
+        sb.append("Contact: <sip:$user@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
+        sb.append("Expires: 3600\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        if (authHeader != null) {
+            sb.append("Authorization: $authHeader\r\n")
+        }
+        sb.append("Content-Length: 0\r\n\r\n")
+
+        sendSipMessage(sb.toString(), config)
+    }
+
+    fun setMuted(value: Boolean) {
+        muted = value
+    }
+
+    fun setSpeakerphoneOn(enabled: Boolean) {
+        speakerphoneOn = enabled
+        audioManager?.let { manager ->
+            runCatching { manager.isSpeakerphoneOn = enabled }
+        }
+    }
+
+    fun makeCall(targetNumber: String) {
+        val config = currentConfig
+        if (config == null || _state.value != SipState.REGISTERED) return
+
+        val cleanNumber = targetNumber.replace(Regex("[^0-9+]"), "")
+        activeCallTarget = cleanNumber
+        _state.value = SipState.DIALING
+        _statusText.value = "Wählt $cleanNumber..."
+        cseq++
+        callId = UUID.randomUUID().toString()
+        fromTag = generateRandomHex(8)
+        toTag = null
+        inviteRequestUri = null
+        inviteViaBranch = null
+        remoteContactUri = null
+        remoteToHeader = null
+        routeSet = emptyList()
+        clearInviteTransactionState()
+        lastInviteResponseUdpSender = null
+        stopSessionRefresh()
+        sessionExpiresSeconds = DEFAULT_SESSION_EXPIRES_SECONDS
+        sessionRefresher = "uac"
+
+        scope.launch {
+            try {
+                prepareRtpSocket()
+                sendInvite(cleanNumber, config, null)
+            } catch (e: Exception) {
+                Log.e(tag, "Error sending invite", e)
+                stopRtpAudio()
+                _state.value = SipState.ERROR
+                _statusText.value = "Netzwerkfehler beim Anruf: ${e.message}"
+            }
+        }
+    }
+    private fun localMediaIp(): String {
+        val socketIp = rtpSocket?.localAddress?.hostAddress
+        return socketIp?.takeIf {
+            it.isNotBlank() && it != "0.0.0.0" && it != "::"
+        } ?: localIp
+    }
+
+    private fun buildLocalSdp(config: SipAccountConfig): String {
+        val rtpPort = rtpSocket?.localPort
+            ?: throw IllegalStateException("RTP-Socket wurde vor dem SDP nicht geöffnet")
+        val advertisedIp = localMediaIp()
+        val useSrtp = config.protocol == SipTransportProtocol.TLS
+        val mediaTransport = if (useSrtp) "RTP/SAVP" else "RTP/AVP"
+
+        val cryptoLine = if (useSrtp) {
+            val keySalt = localSrtpMasterKeySalt ?: ByteArray(30).also {
+                SecureRandom().nextBytes(it)
+                localSrtpMasterKeySalt = it
+            }
+            if (localSrtpContext == null) {
+                localSrtpContext = SrtpContext(
+                    SrtpCryptoParameters(
+                        masterKey = keySalt.copyOfRange(0, 16),
+                        masterSalt = keySalt.copyOfRange(16, 30)
+                    )
+                )
+            }
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${Base64.encodeToString(keySalt, Base64.NO_WRAP)}|2^20"
+        } else {
+            localSrtpMasterKeySalt = null
+            localSrtpContext = null
+            null
+        }
+
+        return StringBuilder()
+            .append("v=0\r\n")
+            .append("o=SmartCalls 1000 1000 IN IP4 $advertisedIp\r\n")
+            .append("s=SmartCall\r\n")
+            .append("c=IN IP4 $advertisedIp\r\n")
+            .append("t=0 0\r\n")
+            .append("m=audio $rtpPort $mediaTransport 8 0 101\r\n")
+            .apply { cryptoLine?.let { append("$it\r\n") } }
+            .append("a=rtpmap:8 PCMA/8000\r\n")
+            .append("a=rtpmap:0 PCMU/8000\r\n")
+            .append("a=rtpmap:101 telephone-event/8000\r\n")
+            .append("a=ptime:20\r\n")
+            .append("a=sendrecv\r\n")
+            .toString()
+    }
+
+    private fun sendSessionRefresh(
+        config: SipAccountConfig,
+        authChallenge: DigestChallenge? = dialogAuthChallenge,
+        authHeaderName: String? = dialogAuthHeaderName
+    ) {
+        if (_state.value != SipState.IN_CALL) return
+        val target = activeCallTarget ?: return
+        val remoteTarget = remoteContactUri
+            ?: inviteRequestUri
+            ?: "sip:$target@${config.sipRegistrar}"
+        if (rtpSocket == null) return
+
+        val routing = dialogRouting(remoteTarget, routeSet)
+        val refreshCseq = ++cseq
+        val transport = config.protocol.name
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+        val viaHeader =
+            "SIP/2.0/$transport $localIp:$localPort;branch=z9hG4bK-${generateRandomHex(10)};rport"
+        val fromHeader =
+            "\"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag"
+        val callIdHeader = "$callId@$localIp"
+        val authHeaderValue = if (authChallenge != null && authHeaderName != null) {
+            buildDigestAuth(
+                method = "INVITE",
+                uri = routing.requestUri,
+                config = config,
+                challenge = authChallenge
+            )
+        } else {
+            null
+        }
+        val sdp = buildLocalSdp(config)
+        val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
+
+        rememberInviteTransaction(
+            InviteClientTransaction(
+                cseq = refreshCseq,
+                purpose = InvitePurpose.SESSION_REFRESH,
+                requestUri = routing.requestUri,
+                viaHeader = viaHeader,
+                fromHeader = fromHeader,
+                callIdHeader = callIdHeader,
+                routeHeaders = routing.routeHeaders,
+                authHeaderName = authHeaderName,
+                authHeaderValue = authHeaderValue,
+                authChallenge = authChallenge
+            )
+        )
+
+        val sb = StringBuilder()
+        sb.append("INVITE ${routing.requestUri} SIP/2.0\r\n")
+        sb.append("Via: $viaHeader\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: $fromHeader\r\n")
+        sb.append("To: ${remoteToHeader ?: "<sip:$target@$domain>"}\r\n")
+        sb.append("Call-ID: $callIdHeader\r\n")
+        sb.append("CSeq: $refreshCseq INVITE\r\n")
+        sb.append(
+            "Contact: <sip:$user@$localIp:$localPort;transport=" +
+                "${transport.lowercase(Locale.ROOT)}>\r\n"
+        )
+        routing.routeHeaders.forEach { route -> sb.append("Route: $route\r\n") }
+        sb.append("Supported: timer\r\n")
+        sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
+        sb.append("Content-Type: application/sdp\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        if (authHeaderName != null && authHeaderValue != null) {
+            sb.append("$authHeaderName: $authHeaderValue\r\n")
+        }
+        sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
+        sb.append(sdp)
+        sendSipMessage(sb.toString(), config)
+    }
+
+    private fun sendInvite(
+        targetNumber: String,
+        config: SipAccountConfig,
+        authChallenge: DigestChallenge? = null,
+        authHeaderName: String? = null
+    ) {
+        val transport = config.protocol.name
+        val viaBranch = "z9hG4bK-${generateRandomHex(10)}"
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+        val requestUri = "sip:$targetNumber@$domain"
+        val viaHeader =
+            "SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport"
+        val fromHeader =
+            "\"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag"
+        val callIdHeader = "$callId@$localIp"
+        val requestCseq = cseq
+        val authHeaderValue = if (authChallenge != null && authHeaderName != null) {
+            buildDigestAuth(
+                method = "INVITE",
+                uri = requestUri,
+                config = config,
+                challenge = authChallenge
+            )
+        } else {
+            null
+        }
+
+        inviteRequestUri = requestUri
+        inviteViaBranch = viaBranch
+
+        val sdp = buildLocalSdp(config)
+        val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
+
+        rememberInviteTransaction(
+            InviteClientTransaction(
+                cseq = requestCseq,
+                purpose = InvitePurpose.INITIAL,
+                requestUri = requestUri,
+                viaHeader = viaHeader,
+                fromHeader = fromHeader,
+                callIdHeader = callIdHeader,
+                routeHeaders = emptyList(),
+                authHeaderName = authHeaderName,
+                authHeaderValue = authHeaderValue,
+                authChallenge = authChallenge
+            )
+        )
+
+        val sb = StringBuilder()
+        sb.append("INVITE $requestUri SIP/2.0\r\n")
+        sb.append("Via: $viaHeader\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: $fromHeader\r\n")
+        sb.append("To: <sip:$targetNumber@$domain>\r\n")
+        sb.append("Call-ID: $callIdHeader\r\n")
+        sb.append("CSeq: $requestCseq INVITE\r\n")
+        sb.append(
+            "Contact: <sip:$user@$localIp:$localPort;transport=" +
+                "${transport.lowercase(Locale.ROOT)}>\r\n"
+        )
+        sb.append("Supported: timer\r\n")
+        sb.append("Session-Expires: ${sessionExpiresSeconds};refresher=uac\r\n")
+        sb.append("Content-Type: application/sdp\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        if (authHeaderName != null && authHeaderValue != null) {
+            sb.append("$authHeaderName: $authHeaderValue\r\n")
+        }
+        sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
+        sb.append(sdp)
+
+        sendSipMessage(sb.toString(), config)
+    }
+
+    /**
+     * ACK for a successful INVITE response is a dialog request. It uses the
+     * Contact/Record-Route information from that exact 2xx response and carries
+     * the same authorization credentials as the acknowledged INVITE.
+     */
+    private fun sendAck(
+        response: String,
+        config: SipAccountConfig,
+        inviteCseq: Int,
+        udpDestination: InetSocketAddress? = null
+    ) {
+        val transaction = findInviteTransaction(inviteCseq)
+        if (transaction == null) {
+            Log.e(tag, "Cannot ACK 2xx: INVITE transaction $inviteCseq is unknown")
+            return
+        }
+
+        val target = activeCallTarget ?: return
+        val domain = config.sipRegistrar
+        val remoteTarget = parseSipUri(extractHeaderValue(response, "Contact"))
+            ?: remoteContactUri
+            ?: transaction.requestUri
+        val responseRoutes = splitSipHeaderList(headerValues(response, "Record-Route"))
+        val effectiveRouteSet = if (responseRoutes.isNotEmpty()) {
+            responseRoutes.asReversed()
+        } else {
+            routeSet
+        }
+        val routing = dialogRouting(remoteTarget, effectiveRouteSet)
+        val toHeader = extractHeaderValue(response, "To")
+            ?: remoteToHeader
+            ?: "<sip:$target@$domain>${toTag?.let { ";tag=$it" }.orEmpty()}"
+        val viaHeader =
+            "SIP/2.0/${config.protocol.name} $localIp:$localPort;" +
+                "branch=${successfulAckBranch(inviteCseq)};rport"
+
+        val sb = StringBuilder()
+        sb.append("ACK ${routing.requestUri} SIP/2.0\r\n")
+        sb.append("Via: $viaHeader\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: ${transaction.fromHeader}\r\n")
+        sb.append("To: $toHeader\r\n")
+        sb.append("Call-ID: ${transaction.callIdHeader}\r\n")
+        sb.append("CSeq: $inviteCseq ACK\r\n")
+        routing.routeHeaders.forEach { route -> sb.append("Route: $route\r\n") }
+        if (transaction.authHeaderName != null &&
+            transaction.authHeaderValue != null
+        ) {
+            sb.append(
+                "${transaction.authHeaderName}: " +
+                    "${transaction.authHeaderValue}\r\n"
+            )
+        }
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        sb.append("Content-Length: 0\r\n\r\n")
+
+        Log.i(
+            tag,
+            "Sending 2xx ACK: cseq=$inviteCseq, requestUri=${routing.requestUri}, " +
+                "to=$toHeader, routeCount=${routing.routeHeaders.size}, " +
+                "auth=${transaction.authHeaderName ?: "none"}, " +
+                "sameTlsSocket=" +
+                "${config.protocol == SipTransportProtocol.TLS &&
+                    socketWriter != null && sslSocket?.isClosed == false}"
+        )
+        sendSipMessage(sb.toString(), config, udpDestination)
+    }
+
+    /**
+     * ACK for 3xx-6xx stays inside the original INVITE transaction. Its top
+     * Via branch and Request-URI must therefore be byte-for-byte equivalent
+     * to the original request, even on a reliable TLS transport.
+     */
+    private fun sendInviteFailureAck(
+        response: String,
+        config: SipAccountConfig,
+        transaction: InviteClientTransaction,
+        udpDestination: InetSocketAddress? = null
+    ) {
+        val target = activeCallTarget.orEmpty()
+        val toHeader = extractHeaderValue(response, "To")
+            ?: "<sip:$target@${config.sipRegistrar}>"
+
+        val sb = StringBuilder()
+        sb.append("ACK ${transaction.requestUri} SIP/2.0\r\n")
+        sb.append("Via: ${transaction.viaHeader}\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: ${transaction.fromHeader}\r\n")
+        sb.append("To: $toHeader\r\n")
+        sb.append("Call-ID: ${transaction.callIdHeader}\r\n")
+        sb.append("CSeq: ${transaction.cseq} ACK\r\n")
+        transaction.routeHeaders.forEach { route -> sb.append("Route: $route\r\n") }
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        sb.append("Content-Length: 0\r\n\r\n")
+
+        Log.i(
+            tag,
+            "Sending non-2xx INVITE ACK: cseq=${transaction.cseq}, " +
+                "sameVia=${transaction.viaHeader}, status=" +
+                "${response.lineSequence().firstOrNull().orEmpty()}"
+        )
+        sendSipMessage(sb.toString(), config, udpDestination)
+    }
+
+    fun hangUp() {
+        val config = currentConfig ?: return
+        val stateBefore = _state.value
+        val target = activeCallTarget
+        val byeUri = remoteContactUri
+            ?: inviteRequestUri
+            ?: target?.let { "sip:$it@${config.sipRegistrar}" }
+        val byeToHeader = remoteToHeader
+            ?: target?.let {
+                if (toTag != null) "<sip:$it@${config.sipRegistrar}>;tag=$toTag"
+                else "<sip:$it@${config.sipRegistrar}>"
+            }
+        val cancelUri = inviteRequestUri
+            ?: target?.let { "sip:$it@${config.sipRegistrar}" }
+        val cancelBranch = inviteViaBranch
+        val routes = routeSet.toList()
+
+        stopInCallTimer()
+        stopSessionRefresh()
+        stopRtpAudio()
+        stopCallRecording()
+
+        scope.launch {
+            try {
+                if (stateBefore == SipState.IN_CALL && target != null && byeUri != null) {
+                    cseq++
+                    sendBye(config, byeUri, byeToHeader ?: "<sip:$target@${config.sipRegistrar}>", routes)
+                } else if (
+                    (stateBefore == SipState.DIALING || stateBefore == SipState.RINGING) &&
+                    target != null &&
+                    cancelUri != null
+                ) {
+                    sendCancel(config, cancelUri, target, cancelBranch)
+                }
+            } catch (e: Exception) {
+                Log.w(tag, "Could not send hangup request", e)
+            } finally {
+                clearCallDialog()
+                _state.value = SipState.REGISTERED
+                _statusText.value =
+                    "Registriert (${config.sipRegistrar}:${config.port} [${config.protocol.name}])"
+            }
+        }
+    }
+
+    private fun sendBye(
+        config: SipAccountConfig,
+        requestUri: String,
+        toHeader: String,
+        routes: List<String>
+    ) {
+        val transport = config.protocol.name
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+        val routing = dialogRouting(requestUri, routes)
+        val authHeaderName = dialogAuthHeaderName
+        val authHeaderValue = if (
+            dialogAuthChallenge != null && authHeaderName != null
+        ) {
+            buildDigestAuth(
+                method = "BYE",
+                uri = routing.requestUri,
+                config = config,
+                challenge = dialogAuthChallenge!!
+            )
+        } else {
+            null
+        }
+
+        val sb = StringBuilder()
+        sb.append("BYE ${routing.requestUri} SIP/2.0\r\n")
+        sb.append(
+            "Via: SIP/2.0/$transport $localIp:$localPort;" +
+                "branch=z9hG4bK-${generateRandomHex(10)};rport\r\n"
+        )
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append(
+            "From: \"${config.displayName}\" " +
+                "<sip:$user@$domain>;tag=$fromTag\r\n"
+        )
+        sb.append("To: $toHeader\r\n")
+        sb.append("Call-ID: $callId@$localIp\r\n")
+        sb.append("CSeq: $cseq BYE\r\n")
+        routing.routeHeaders.forEach { route -> sb.append("Route: $route\r\n") }
+        if (authHeaderName != null && authHeaderValue != null) {
+            sb.append("$authHeaderName: $authHeaderValue\r\n")
+        }
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        sb.append("Content-Length: 0\r\n\r\n")
+        sendSipMessage(sb.toString(), config)
+    }
+
+    private fun sendCancel(
+        config: SipAccountConfig,
+        requestUri: String,
+        target: String,
+        branch: String?
+    ) {
+        val transport = config.protocol.name
+        val user = config.sipUser
+        val domain = config.sipRegistrar
+        val viaBranch = branch ?: "z9hG4bK-${generateRandomHex(10)}"
+        val sb = StringBuilder()
+        sb.append("CANCEL $requestUri SIP/2.0\r\n")
+        sb.append("Via: SIP/2.0/$transport $localIp:$localPort;branch=$viaBranch;rport\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: \"${config.displayName}\" <sip:$user@$domain>;tag=$fromTag\r\n")
+        sb.append("To: <sip:$target@$domain>\r\n")
+        sb.append("Call-ID: $callId@$localIp\r\n")
+        sb.append("CSeq: $cseq CANCEL\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        sb.append("Content-Length: 0\r\n\r\n")
+        sendSipMessage(sb.toString(), config)
+    }
+
+    private fun finishCallWithState(nextState: SipState, message: String) {
+        stopInCallTimer()
+        stopRtpAudio()
+        stopCallRecording()
+        clearCallDialog()
+        _state.value = nextState
+        _statusText.value = message
+    }
+
+    private fun clearCallDialog() {
+        stopSessionRefresh()
+        clearInviteTransactionState()
+        lastInviteResponseUdpSender = null
+        localSrtpMasterKeySalt = null
+        localSrtpContext = null
+        remoteSrtpContext = null
+        remoteSrtpParameters = null
+        remoteUsesSrtp = false
+        activeCallTarget = null
+        inviteRequestUri = null
+        inviteViaBranch = null
+        remoteContactUri = null
+        remoteToHeader = null
+        routeSet = emptyList()
+        toTag = null
+    }
+    private fun extractDialogInfo(message: String) {
+        extractHeaderValue(message, "To")?.let { toValue ->
+            remoteToHeader = toValue
+            toTag = Regex("(?i)(?:^|;)\\s*tag=([^;\\s]+)")
+                .find(toValue)
+                ?.groupValues
+                ?.getOrNull(1)
+        }
+        parseSipUri(extractHeaderValue(message, "Contact"))?.let {
+            remoteContactUri = it
+        }
+
+        // A route set is created by the initial dialog response and is not
+        // erased merely because an in-dialog re-INVITE response omits it.
+        val responseRoutes = splitSipHeaderList(headerValues(message, "Record-Route"))
+        if (responseRoutes.isNotEmpty() || routeSet.isEmpty()) {
+            routeSet = responseRoutes.asReversed()
+        }
+    }
+
+    private fun extractToTag(message: String) {
+        extractDialogInfo(message)
+    }
+
+    private fun extractCSeqMethod(message: String): String? {
+        val value = extractHeaderValue(message, "CSeq") ?: return null
+        return value.trim().split(Regex("\\s+")).getOrNull(1)?.uppercase(Locale.ROOT)
+    }
+
+    private fun extractCSeqNumber(message: String): Int? {
+        val value = extractHeaderValue(message, "CSeq") ?: return null
+        return value.trim().split(Regex("\\s+")).firstOrNull()?.toIntOrNull()
+    }
+
+    private fun headerValues(message: String, name: String): List<String> =
+        message.lineSequence()
+            .filter { line ->
+                line.substringBefore(":").trim().equals(name, ignoreCase = true)
+            }
+            .map { it.substringAfter(":").trim() }
+            .filter { it.isNotBlank() }
+            .toList()
+
+    private fun extractHeaderValue(message: String, name: String): String? =
+        headerValues(message, name).firstOrNull()
+
+    private fun parseSipUri(value: String?): String? {
+        var candidate = value?.trim().orEmpty()
+        if (candidate.isBlank()) return null
+        if (candidate.contains("<") && candidate.contains(">")) {
+            candidate = candidate.substringAfter("<").substringBefore(">")
+        } else {
+            candidate = candidate.substringBefore(";").trim()
+        }
+        return candidate.takeIf {
+            it.startsWith("sip:", ignoreCase = true) ||
+                it.startsWith("sips:", ignoreCase = true)
+        }
+    }
+
+    private fun splitSipHeaderList(values: List<String>): List<String> {
+        val result = mutableListOf<String>()
+        values.forEach { value ->
+            val current = StringBuilder()
+            var inQuotes = false
+            var escaped = false
+            var angleDepth = 0
+
+            fun flush() {
+                current.toString().trim()
+                    .takeIf { it.isNotEmpty() }
+                    ?.let(result::add)
+                current.setLength(0)
+            }
+
+            value.forEach { character ->
+                when {
+                    escaped -> {
+                        current.append(character)
+                        escaped = false
+                    }
+
+                    character == '\\' && inQuotes -> {
+                        current.append(character)
+                        escaped = true
+                    }
+
+                    character == '"' -> {
+                        current.append(character)
+                        inQuotes = !inQuotes
+                    }
+
+                    character == '<' && !inQuotes -> {
+                        current.append(character)
+                        angleDepth++
+                    }
+
+                    character == '>' && !inQuotes -> {
+                        current.append(character)
+                        angleDepth = (angleDepth - 1).coerceAtLeast(0)
+                    }
+
+                    character == ',' && !inQuotes && angleDepth == 0 -> flush()
+                    else -> current.append(character)
+                }
+            }
+            flush()
+        }
+        return result
+    }
+
+    private fun parseRouteUri(route: String): String? {
+        val candidate = route.trim().let { value ->
+            if (value.contains("<") && value.contains(">")) {
+                value.substringAfter("<").substringBefore(">").trim()
+            } else {
+                value
+            }
+        }
+        return candidate.takeIf {
+            it.startsWith("sip:", ignoreCase = true) ||
+                it.startsWith("sips:", ignoreCase = true)
+        }
+    }
+
+    /**
+     * RFC 3261 section 12.2.1.1 routing, including legacy strict routers.
+     */
+    private fun dialogRouting(
+        remoteTarget: String,
+        routes: List<String>
+    ): DialogRouting {
+        if (routes.isEmpty()) {
+            return DialogRouting(remoteTarget, emptyList())
+        }
+
+        val firstRoute = routes.first()
+        val isLooseRouter = Regex(
+            "(?i)(?:[;?&])lr(?:[=;?&>]|\\s|$)"
+        ).containsMatchIn(firstRoute)
+        if (isLooseRouter) {
+            return DialogRouting(remoteTarget, routes)
+        }
+
+        val strictRequestUri = parseRouteUri(firstRoute) ?: remoteTarget
+        val strictRoutes = routes.drop(1).toMutableList().apply {
+            add("<$remoteTarget>")
+        }
+        return DialogRouting(strictRequestUri, strictRoutes)
+    }
+
+    private fun extractMessageBody(message: String): String {
+        val crlf = message.indexOf("\r\n\r\n")
+        if (crlf >= 0) return message.substring(crlf + 4)
+        val lf = message.indexOf("\n\n")
+        return if (lf >= 0) message.substring(lf + 2) else ""
+    }
+
+    private fun parseSrtpCrypto(body: String): SrtpCryptoParameters? {
+        var inAudio = false
+        for (line in body.lineSequence().map { it.trim() }) {
+            when {
+                line.startsWith("m=", ignoreCase = true) -> {
+                    val parts = line.substringAfter("m=").split(Regex("\\s+"))
+                    inAudio = parts.firstOrNull()?.equals("audio", ignoreCase = true) == true
+                }
+
+                line.startsWith("a=crypto:", ignoreCase = true) && inAudio -> {
+                    val parts = line.substringAfter(":").trim().split(Regex("\\s+"), limit = 3)
+                    val suite = parts.getOrNull(1) ?: continue
+                    if (!suite.equals("AES_CM_128_HMAC_SHA1_80", ignoreCase = true)) continue
+
+                    val keyInfo = parts.getOrNull(2)
+                        ?.substringBefore("|")
+                        ?.takeIf { it.startsWith("inline:", ignoreCase = true) }
+                        ?: continue
+                    val encoded = keyInfo.substringAfter(":")
+                    val decoded = runCatching {
+                        Base64.decode(encoded, Base64.DEFAULT)
+                    }.getOrNull() ?: continue
+                    if (decoded.size != 30) continue
+
+                    return SrtpCryptoParameters(
+                        masterKey = decoded.copyOfRange(0, 16),
+                        masterSalt = decoded.copyOfRange(16, 30)
+                    )
+                }
+            }
+        }
+        return null
+    }
+
+    private fun parseRemoteSdp(message: String): RemoteRtpDescription? {
+        val body = extractMessageBody(message)
+        if (body.isBlank()) return null
+
+        var sessionAddress: String? = null
+        var audioAddress: String? = null
+        var audioPort: Int? = null
+        var audioTransport: String? = null
+        var audioPayloadTypes: List<Int> = emptyList()
+        var inAudio = false
+        val codecs = mutableMapOf<Int, G711Codec>()
+
+        body.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.startsWith("m=", ignoreCase = true) -> {
+                    val parts = line.substringAfter("m=").split(Regex("\\s+"))
+                    inAudio = parts.firstOrNull()?.equals("audio", ignoreCase = true) == true
+                    if (inAudio && parts.size >= 4) {
+                        audioPort = parts[1].toIntOrNull()
+                        audioTransport = parts.getOrNull(2)
+                        audioPayloadTypes = parts.drop(3).mapNotNull { it.toIntOrNull() }
+                    }
+                }
+
+                line.startsWith("c=", ignoreCase = true) -> {
+                    val address = line.substringAfter("c=").trim()
+                        .split(Regex("\\s+")).lastOrNull()
+                    if (inAudio) audioAddress = address
+                    else if (sessionAddress == null) sessionAddress = address
+                }
+
+                line.startsWith("a=rtpmap:", ignoreCase = true) && inAudio -> {
+                    val parts = line.substringAfter(":").trim()
+                        .split(Regex("\\s+"), limit = 2)
+                    val payloadType = parts.firstOrNull()?.toIntOrNull()
+                    val codecName = parts.getOrNull(1)
+                        ?.substringBefore("/")
+                        ?.uppercase(Locale.ROOT)
+                    if (payloadType != null) {
+                        when (codecName) {
+                            "PCMA" -> codecs[payloadType] = G711Codec.PCMA
+                            "PCMU" -> codecs[payloadType] = G711Codec.PCMU
                         }
                     }
                 }
             }
         }
 
-        // SUPABASE SMART CALL NOTES (summary only)
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = SurfaceColor),
-            shape = RoundedCornerShape(16.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, CardBorder)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Gespeicherte Smart-Call-Notizen (${smartCallNotes.size})",
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color.White,
-                            fontSize = 15.sp
-                        )
-                        Text(
-                            text = "Nur Zusammenfassungen über 1 Minute · kein Audio und kein Transkript in Supabase",
-                            fontSize = 11.sp,
-                            color = TextMuted
-                        )
+        // PCMA/PCMU haben feste RTP-Payload-Typen, falls rtpmap fehlt.
+        if (!codecs.containsKey(8)) codecs[8] = G711Codec.PCMA
+        if (!codecs.containsKey(0)) codecs[0] = G711Codec.PCMU
+
+        val selectedPayloadType = audioPayloadTypes.firstOrNull { codecs.containsKey(it) }
+            ?: return null
+        val addressText = audioAddress ?: sessionAddress ?: return null
+        val port = audioPort ?: return null
+        if (port <= 0 || port > 65535 || addressText == "0.0.0.0") return null
+        val address = runCatching { InetAddress.getByName(addressText) }.getOrNull() ?: return null
+
+        val usesSrtp = audioTransport?.startsWith("RTP/SAVP", ignoreCase = true) == true
+        val srtpCrypto = if (usesSrtp) parseSrtpCrypto(body) else null
+        if (usesSrtp && srtpCrypto == null) {
+            Log.e(tag, "SRTP-Antwort ohne gültige a=crypto-Aushandlung")
+        }
+
+        return RemoteRtpDescription(
+            address = address,
+            port = port,
+            payloadType = selectedPayloadType,
+            codecs = codecs,
+            usesSrtp = usesSrtp,
+            srtpCrypto = srtpCrypto
+        )
+    }
+
+    private fun applyRemoteMedia(remote: RemoteRtpDescription) {
+        remoteRtpAddress = InetSocketAddress(remote.address, remote.port)
+        negotiatedPayloadType = remote.payloadType
+        negotiatedCodecs = remote.codecs
+        remoteUsesSrtp = remote.usesSrtp
+        val next = remote.srtpCrypto
+        val previous = remoteSrtpParameters
+        // Preserve ROC and sequence state when a refresh repeats the same key.
+        val unchanged = next != null && previous != null &&
+            next.masterKey.contentEquals(previous.masterKey) &&
+            next.masterSalt.contentEquals(previous.masterSalt) &&
+            next.authTagLength == previous.authTagLength
+        if (!unchanged) {
+            remoteSrtpContext = next?.let { SrtpContext(it) }
+            remoteSrtpParameters = next
+        }
+
+        Log.d(
+            tag,
+            "RTP media negotiated: ${remote.address.hostAddress}:${remote.port}, " +
+                "transport=${if (remote.usesSrtp) "SRTP" else "RTP"}, " +
+                "payload=${remote.payloadType}"
+        )
+    }
+
+    private fun sendInviteResponseForRequest(request: String, config: SipAccountConfig) {
+        val sdp = runCatching { buildLocalSdp(config) }.getOrElse {
+            sendSipResponseForRequest(request, 488, "Not Acceptable Here", config)
+            return
+        }
+        val transport = config.protocol.name
+        val sb = StringBuilder("SIP/2.0 200 OK\r\n")
+        listOf("Via", "From", "To", "Call-ID", "CSeq").forEach { name ->
+            headerValues(request, name).forEach { value ->
+                sb.append("$name: $value\r\n")
+            }
+        }
+        sb.append("Contact: <sip:${config.sipUser}@$localIp:$localPort;transport=${transport.lowercase(Locale.ROOT)}>\r\n")
+        sb.append("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, UPDATE\r\n")
+        sb.append("Supported: timer\r\n")
+        val requestSession = parseSessionExpiresSeconds(request) ?: sessionExpiresSeconds
+        sb.append("Session-Expires: $requestSession;refresher=uac\r\n")
+        sb.append("Content-Type: application/sdp\r\n")
+        sb.append("User-Agent: SmartCalls/1.7.0 Android\r\n")
+        val sdpBytes = sdp.toByteArray(Charsets.UTF_8)
+        sb.append("Content-Length: ${sdpBytes.size}\r\n\r\n")
+        sb.append(sdp)
+        sendSipMessage(sb.toString(), config)
+    }
+
+    private fun sendSipResponseForRequest(
+        request: String,
+        statusCode: Int,
+        reason: String,
+        config: SipAccountConfig
+    ) {
+        val sb = StringBuilder("SIP/2.0 $statusCode $reason\r\n")
+        listOf("Via", "From", "To", "Call-ID", "CSeq").forEach { name ->
+            headerValues(request, name).forEach { value ->
+                sb.append("$name: $value\r\n")
+            }
+        }
+        sb.append("Content-Length: 0\r\n\r\n")
+        sendSipMessage(sb.toString(), config)
+    }
+
+    private fun parseSessionExpiresSeconds(message: String): Int? {
+        val value = extractHeaderValue(message, "Session-Expires") ?: return null
+        return Regex("^\\s*(\\d+)")
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?.coerceAtLeast(MIN_SESSION_EXPIRES_SECONDS)
+    }
+
+    private fun updateSessionTimer(message: String) {
+        parseSessionExpiresSeconds(message)?.let { seconds ->
+            sessionExpiresSeconds = seconds
+        }
+        val value = extractHeaderValue(message, "Session-Expires") ?: return
+        Regex("(?i)(?:^|;)\\s*refresher\\s*=\\s*(uac|uas)")
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { sessionRefresher = it.lowercase(Locale.ROOT) }
+        Log.d(tag, "SIP session timer: ${sessionExpiresSeconds}s, refresher=$sessionRefresher")
+    }
+
+    private fun startSessionRefresh(config: SipAccountConfig) {
+        stopSessionRefresh()
+        if (!sessionRefresher.equals("uac", ignoreCase = true)) return
+        sessionRefreshJob = scope.launch(Dispatchers.IO) {
+            while (isActive && _state.value == SipState.IN_CALL) {
+                val waitMs = (sessionExpiresSeconds * 1000L / 2).coerceAtLeast(10_000L)
+                delay(waitMs)
+                if (isActive && _state.value == SipState.IN_CALL) {
+                    runCatching { sendSessionRefresh(config) }
+                        .onFailure { Log.w(tag, "SIP session refresh failed", it) }
+                }
+            }
+        }
+    }
+
+    private fun stopSessionRefresh() {
+        sessionRefreshJob?.cancel()
+        sessionRefreshJob = null
+    }
+
+    private fun parseAuthHeader(authHeader: String): DigestChallenge? {
+        val headerValue = authHeader.substringAfter(":", authHeader).trim()
+        val digestMarker = Regex("(?i)\\bDigest\\s+").find(headerValue) ?: return null
+        val parameterText = headerValue.substring(digestMarker.range.last + 1)
+
+        var realm: String? = null
+        var nonce: String? = null
+        var qop: String? = null
+        var opaque: String? = null
+
+        splitSipHeaderList(listOf(parameterText)).forEach { parameter ->
+            val separator = parameter.indexOf('=')
+            if (separator <= 0) return@forEach
+            val key = parameter.substring(0, separator).trim()
+            val value = parameter.substring(separator + 1)
+                .trim()
+                .removeSurrounding("\"")
+            when (key.lowercase(Locale.ROOT)) {
+                "realm" -> realm = value
+                "nonce" -> nonce = value
+                "qop" -> qop = value
+                "opaque" -> opaque = value
+            }
+        }
+
+        val parsedRealm = realm?.takeIf { it.isNotBlank() } ?: return null
+        val parsedNonce = nonce?.takeIf { it.isNotBlank() } ?: return null
+        return DigestChallenge(
+            realm = parsedRealm,
+            nonce = parsedNonce,
+            qop = qop,
+            opaque = opaque
+        )
+    }
+
+    private fun buildDigestAuth(
+        method: String,
+        uri: String,
+        config: SipAccountConfig,
+        challenge: DigestChallenge
+    ): String {
+        val username = if (config.authUser.isNotBlank()) config.authUser else config.sipUser
+        val password = config.sipPassword
+        val cnonce = generateRandomHex(16)
+        val nonceCount = "00000001"
+        val qopAuth = challenge.qop
+            ?.split(",")
+            ?.any { it.trim().equals("auth", ignoreCase = true) }
+            ?: false
+
+        if (challenge.qop != null && !qopAuth) {
+            throw IllegalArgumentException(
+                "Unsupported SIP Digest qop: ${challenge.qop}"
+            )
+        }
+
+        val ha1 = md5("$username:${challenge.realm}:$password")
+        val ha2 = md5("$method:$uri")
+        val response = if (qopAuth) {
+            md5(
+                "$ha1:${challenge.nonce}:$nonceCount:$cnonce:auth:$ha2"
+            )
+        } else {
+            md5("$ha1:${challenge.nonce}:$ha2")
+        }
+
+        val sb = StringBuilder()
+        sb.append("Digest username=\"$username\", ")
+        sb.append("realm=\"${challenge.realm}\", ")
+        sb.append("nonce=\"${challenge.nonce}\", ")
+        sb.append("uri=\"$uri\", ")
+        sb.append("response=\"$response\", ")
+        sb.append("algorithm=MD5")
+        challenge.opaque?.let { sb.append(", opaque=\"$it\"") }
+        if (qopAuth) {
+            sb.append(", qop=auth, nc=$nonceCount, cnonce=\"$cnonce\"")
+        }
+        return sb.toString()
+    }
+
+    private fun md5(input: String): String {
+        val md = MessageDigest.getInstance("MD5")
+        val digest = md.digest(input.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun generateRandomHex(length: Int): String {
+        val chars = "0123456789abcdef"
+        val random = SecureRandom()
+        return (1..length).map { chars[random.nextInt(chars.length)] }.joinToString("")
+    }
+
+    private fun startInCallTimer() {
+        durationJob?.cancel()
+        _callDurationSeconds.value = 0
+        durationJob = scope.launch {
+            while (isActive && _state.value == SipState.IN_CALL) {
+                delay(1000)
+                _callDurationSeconds.value += 1
+            }
+        }
+    }
+
+    private fun stopInCallTimer() {
+        durationJob?.cancel()
+        durationJob = null
+    }
+
+    private fun prepareRtpSocket() {
+        stopRtpAudio()
+        val random = SecureRandom()
+        var socket: DatagramSocket? = null
+
+        repeat(20) {
+            if (socket != null) return@repeat
+            val candidate = runCatching { DatagramSocket(null) }.getOrNull()
+                ?: return@repeat
+            try {
+                candidate.reuseAddress = true
+                val port = RTP_PORT_MIN + random.nextInt(RTP_PORT_MAX - RTP_PORT_MIN + 1)
+                val bindAddress = localIp
+                    .takeIf {
+                        it.isNotBlank() && it != "127.0.0.1" && it != "0.0.0.0"
                     }
-                    IconButton(onClick = { reloadSmartCallNotes() }) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Smart-Call-Notizen aktualisieren",
-                            tint = TextMuted
-                        )
+                    ?.let { ip -> runCatching { InetAddress.getByName(ip) }.getOrNull() }
+                candidate.bind(
+                    if (bindAddress != null) {
+                        InetSocketAddress(bindAddress, port)
+                    } else {
+                        InetSocketAddress(port)
+                    }
+                )
+                socket = candidate
+            } catch (_: BindException) {
+                candidate.close()
+            } catch (e: Exception) {
+                candidate.close()
+                throw e
+            }
+        }
+
+        if (socket == null) {
+            socket = DatagramSocket()
+            Log.w(tag, "Could not bind in Easybell RTP range; using ${socket!!.localPort}")
+        }
+        socket!!.soTimeout = 1000
+        rtpSocket = socket
+        remoteRtpAddress = null
+        negotiatedPayloadType = 8
+        negotiatedCodecs = mapOf(8 to G711Codec.PCMA, 0 to G711Codec.PCMU)
+        localSrtpMasterKeySalt = null
+        localSrtpContext = null
+        remoteSrtpContext = null
+        remoteSrtpParameters = null
+        remoteUsesSrtp = false
+        rtpSequence = SecureRandom().nextInt(65536)
+        rtpTimestamp = SecureRandom().nextInt().toLong() and 0xffffffffL
+        lastRtpSentAt = 0L
+        rtpPacketsSent = 0L
+        rtpPacketsReceived = 0L
+        srtpPacketsRejected = 0L
+    }
+
+    private fun startRtpAudio(remote: RemoteRtpDescription) {
+        val socket = rtpSocket
+        if (socket == null) {
+            Log.e(tag, "Cannot start RTP audio without a local RTP socket")
+            _statusText.value = "Im Gespräch (RTP-Socket fehlt)"
+            return
+        }
+
+        remoteRtpAddress = InetSocketAddress(remote.address, remote.port)
+        negotiatedPayloadType = remote.payloadType
+        negotiatedCodecs = remote.codecs
+
+        try {
+            acquireCallWakeLock()
+            prepareAudioDevices()
+            audioTrack?.play()
+            // Open the NAT/media path immediately, even if AudioRecord needs a moment
+            // to become ready. This avoids provider-side no-RTP timeouts after answer.
+            runCatching { sendRtpKeepAlive(socket) }
+                .onFailure { Log.w(tag, "Initial RTP keepalive failed", it) }
+
+            rtpReceiveJob = scope.launch(Dispatchers.IO) {
+                receiveRtpAudio(socket)
+            }
+            audioCaptureJob = scope.launch(Dispatchers.IO) {
+                captureAndSendRtp(socket)
+            }
+            rtpKeepAliveJob = scope.launch(Dispatchers.IO) {
+                while (isActive && _state.value == SipState.IN_CALL && !socket.isClosed) {
+                    delay(RTP_KEEPALIVE_INTERVAL_MS)
+                    if (System.currentTimeMillis() - lastRtpSentAt >= RTP_KEEPALIVE_GAP_MS) {
+                        runCatching { sendRtpKeepAlive(socket) }
+                            .onFailure { Log.w(tag, "RTP keepalive failed", it) }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to start RTP audio", e)
+            _statusText.value = "Im Gespräch (Audio konnte nicht gestartet werden)"
+            stopRtpAudio()
+        }
+    }
+
+    private fun acquireCallWakeLock() {
+        if (callWakeLock?.isHeld == true) return
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            ?: return
+        callWakeLock = runCatching {
+            powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "Stromruf:SmartCallsCall"
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }.getOrNull()
+    }
+
+    private fun releaseCallWakeLock() {
+        callWakeLock?.let { lock ->
+            runCatching {
+                if (lock.isHeld) lock.release()
+            }
+        }
+        callWakeLock = null
+    }
+
+    private fun prepareAudioDevices() {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            ?: throw IllegalStateException("AudioManager nicht verfügbar")
+        audioManager = manager
+        if (previousAudioMode == null) previousAudioMode = manager.mode
+        if (previousSpeakerphoneOn == null) previousSpeakerphoneOn = manager.isSpeakerphoneOn
+
+        manager.mode = AudioManager.MODE_IN_COMMUNICATION
+        manager.isSpeakerphoneOn = speakerphoneOn
+
+        val inputMin = AudioRecord.getMinBufferSize(
+            RTP_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (inputMin <= 0) {
+            throw IllegalStateException("AudioRecord unterstützt 8 kHz nicht")
+        }
+
+        val record = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            RTP_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            maxOf(inputMin, RTP_FRAME_SAMPLES * 2 * 10)
+        )
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            throw IllegalStateException("Mikrofon konnte nicht initialisiert werden")
+        }
+        audioRecord = record
+
+        val outputMin = AudioTrack.getMinBufferSize(
+            RTP_SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (outputMin <= 0) {
+            throw IllegalStateException("AudioTrack unterstützt 8 kHz nicht")
+        }
+
+        @Suppress("DEPRECATION")
+        val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(RTP_SAMPLE_RATE)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(maxOf(outputMin, RTP_FRAME_SAMPLES * 2 * 10))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+        } else {
+            AudioTrack(
+                AudioManager.STREAM_VOICE_CALL,
+                RTP_SAMPLE_RATE,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(outputMin, RTP_FRAME_SAMPLES * 2 * 10),
+                AudioTrack.MODE_STREAM
+            )
+        }
+
+        if (track.state != AudioTrack.STATE_INITIALIZED) {
+            track.release()
+            throw IllegalStateException("Lautsprecher konnte nicht initialisiert werden")
+        }
+        audioTrack = track
+    }
+
+    private suspend fun captureAndSendRtp(socket: DatagramSocket) {
+        val record = audioRecord ?: return
+        val pcm = ShortArray(RTP_FRAME_SAMPLES)
+
+        try {
+            record.startRecording()
+            if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                throw IllegalStateException("Mikrofonaufnahme konnte nicht gestartet werden")
+            }
+
+            while (
+                currentCoroutineContext().isActive &&
+                _state.value == SipState.IN_CALL &&
+                !socket.isClosed
+            ) {
+                var filled = 0
+                while (filled < RTP_FRAME_SAMPLES && currentCoroutineContext().isActive) {
+                    val read = record.read(
+                        pcm,
+                        filled,
+                        RTP_FRAME_SAMPLES - filled,
+                        AudioRecord.READ_BLOCKING
+                    )
+                    if (read < 0) {
+                        Log.w(tag, "AudioRecord wurde beendet ($read)")
+                        return
+                    }
+                    if (read == 0) {
+                        delay(20)
+                        continue
+                    }
+                    filled += read
+                }
+                if (filled < RTP_FRAME_SAMPLES) continue
+
+                val codec = negotiatedCodecs[negotiatedPayloadType] ?: G711Codec.PCMA
+                val payload = ByteArray(RTP_FRAME_SAMPLES)
+                for (i in 0 until RTP_FRAME_SAMPLES) {
+                    payload[i] = if (muted) {
+                        encodeG711Sample(0, codec)
+                    } else {
+                        encodeG711Sample(pcm[i].toInt(), codec)
                     }
                 }
 
-                when {
-                    isLoadingSmartCallNotes -> {
-                        Box(
-                            modifier = Modifier.fillMaxWidth(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                                color = NeonCyan
+                callWavRecorder?.writeMic(pcm)
+                sendRtpPacket(socket, payload)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(tag, "RTP microphone loop failed", e)
+        }
+    }
+
+    private fun sendRtpPacket(socket: DatagramSocket, payload: ByteArray) {
+        synchronized(rtpSendLock) {
+            val destination = remoteRtpAddress ?: return
+            val packet = ByteArray(12 + payload.size)
+            packet[0] = 0x80.toByte()
+            packet[1] = (negotiatedPayloadType and 0x7f).toByte()
+            packet[2] = ((rtpSequence ushr 8) and 0xff).toByte()
+            packet[3] = (rtpSequence and 0xff).toByte()
+            packet[4] = ((rtpTimestamp ushr 24) and 0xff).toByte()
+            packet[5] = ((rtpTimestamp ushr 16) and 0xff).toByte()
+            packet[6] = ((rtpTimestamp ushr 8) and 0xff).toByte()
+            packet[7] = (rtpTimestamp and 0xff).toByte()
+            packet[8] = ((rtpSsrc ushr 24) and 0xff).toByte()
+            packet[9] = ((rtpSsrc ushr 16) and 0xff).toByte()
+            packet[10] = ((rtpSsrc ushr 8) and 0xff).toByte()
+            packet[11] = (rtpSsrc and 0xff).toByte()
+            payload.copyInto(packet, destinationOffset = 12)
+
+            val srtpContext = if (remoteUsesSrtp) localSrtpContext else null
+            if (remoteUsesSrtp && srtpContext == null) {
+                Log.w(tag, "SRTP ist ausgehandelt, aber kein lokaler SRTP-Kontext verfügbar")
+                return
+            }
+            val wirePacket = srtpContext?.protect(packet) ?: packet
+            socket.send(DatagramPacket(wirePacket, wirePacket.size, destination))
+            rtpPacketsSent += 1
+            if (rtpPacketsSent <= 5 || rtpPacketsSent % 250L == 0L) {
+                Log.i(
+                    tag,
+                    "RTP TX #${rtpPacketsSent}: protected=${srtpContext != null}, " +
+                        "remote=${destination}, seq=${rtpSequence}, bytes=${wirePacket.size}"
+                )
+            }
+            rtpSequence = (rtpSequence + 1) and 0xffff
+            rtpTimestamp = (rtpTimestamp + RTP_FRAME_SAMPLES) and 0xffffffffL
+            lastRtpSentAt = System.currentTimeMillis()
+        }
+    }
+
+    private fun sendRtpKeepAlive(socket: DatagramSocket) {
+        val codec = negotiatedCodecs[negotiatedPayloadType] ?: G711Codec.PCMA
+        val silence = ByteArray(RTP_FRAME_SAMPLES) { encodeG711Sample(0, codec) }
+        sendRtpPacket(socket, silence)
+    }
+
+    private suspend fun receiveRtpAudio(socket: DatagramSocket) {
+        val buffer = ByteArray(4096)
+
+        try {
+            while (
+                currentCoroutineContext().isActive &&
+                _state.value == SipState.IN_CALL &&
+                !socket.isClosed
+            ) {
+                val packet = DatagramPacket(buffer, buffer.size)
+                try {
+                    socket.receive(packet)
+                } catch (_: SocketTimeoutException) {
+                    continue
+                }
+
+                if (packet.length < 12) continue
+                val wirePacket = buffer.copyOf(packet.length)
+                val srtpContext = remoteSrtpContext
+                val rtpPacket = if (remoteUsesSrtp) {
+                    if (srtpContext == null) continue
+                    val plainPacket = srtpContext.unprotect(wirePacket)
+                    if (plainPacket == null) {
+                        srtpPacketsRejected += 1
+                        if (srtpPacketsRejected <= 5 || srtpPacketsRejected % 250L == 0L) {
+                            Log.w(
+                                tag,
+                                "SRTP RX rejected #${srtpPacketsRejected}: bytes=${wirePacket.size}"
                             )
                         }
+                        continue
                     }
-                    smartCallNotes.isEmpty() -> {
-                        Text(
-                            text = "Noch keine passenden Smart-Call-Zusammenfassungen gespeichert.",
-                            fontSize = 12.sp,
-                            color = TextMuted
-                        )
-                    }
-                    else -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            smartCallNotes.forEach { note ->
-                                val minutes = note.durationSeconds / 60
-                                val seconds = note.durationSeconds % 60
-                                val duration = String.format(
-                                    Locale.GERMANY,
-                                    "%02d:%02d Min.",
-                                    minutes,
-                                    seconds
-                                )
-                                val date = SimpleDateFormat(
-                                    "dd.MM.yyyy HH:mm",
-                                    Locale.GERMANY
-                                ).format(Date(note.callStartedAt))
-                                val title = note.contactName?.takeIf { it.isNotBlank() }
-                                    ?: note.phone
+                    plainPacket
+                } else {
+                    wirePacket
+                }
+                if (rtpPacket.size < 12) continue
+                rtpPacketsReceived += 1
+                if (rtpPacketsReceived <= 5 || rtpPacketsReceived % 250L == 0L) {
+                    Log.i(
+                        tag,
+                        "RTP RX #${rtpPacketsReceived}: protected=${remoteUsesSrtp}, " +
+                            "from=${packet.address}:${packet.port}, bytes=${rtpPacket.size}"
+                    )
+                }
 
-                                Surface(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = Bg,
-                                    border = androidx.compose.foundation.BorderStroke(
-                                        1.dp,
-                                        CardBorder
-                                    )
-                                ) {
-                                    Column(
-                                        modifier = Modifier.padding(12.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = title,
-                                                color = Color.White,
-                                                fontWeight = FontWeight.Medium,
-                                                fontSize = 13.sp,
-                                                maxLines = 1,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            Text(
-                                                text = duration,
-                                                color = NeonCyan,
-                                                fontSize = 11.sp
-                                            )
-                                        }
-                                        Text(
-                                            text = "${note.phone} · $date",
-                                            color = TextMuted,
-                                            fontSize = 11.sp
-                                        )
-                                        Text(
-                                            text = note.summary,
-                                            color = Color.White.copy(alpha = 0.9f),
-                                            fontSize = 12.sp,
-                                            maxLines = 8
-                                        )
-                                    }
-                                }
+                val first = rtpPacket[0].toInt() and 0xff
+                val second = rtpPacket[1].toInt() and 0xff
+                if ((first ushr 6) != 2) continue
+
+                val csrcCount = first and 0x0f
+                var payloadOffset = 12 + csrcCount * 4
+                if (rtpPacket.size < payloadOffset) continue
+
+                if ((first and 0x10) != 0) {
+                    if (rtpPacket.size < payloadOffset + 4) continue
+                    val extensionWords =
+                        ((rtpPacket[payloadOffset + 2].toInt() and 0xff) shl 8) or
+                            (rtpPacket[payloadOffset + 3].toInt() and 0xff)
+                    payloadOffset += 4 + extensionWords * 4
+                }
+                if (rtpPacket.size <= payloadOffset) continue
+
+                var payloadEnd = rtpPacket.size
+                if ((first and 0x20) != 0) {
+                    val padding = rtpPacket[rtpPacket.size - 1].toInt() and 0xff
+                    if (padding <= payloadEnd - payloadOffset) payloadEnd -= padding
+                }
+
+                val payloadType = second and 0x7f
+                val codec = negotiatedCodecs[payloadType]
+                    ?: when (payloadType) {
+                        8 -> G711Codec.PCMA
+                        0 -> G711Codec.PCMU
+                        else -> null
+                    }
+                    ?: continue
+
+                val payloadLength = payloadEnd - payloadOffset
+                if (payloadLength <= 0) continue
+
+                remoteRtpAddress = InetSocketAddress(packet.address, packet.port)
+                val pcm = ShortArray(payloadLength)
+                for (i in 0 until payloadLength) {
+                    pcm[i] = decodeG711Sample(
+                        rtpPacket[payloadOffset + i].toInt() and 0xff,
+                        codec
+                    )
+                }
+
+                callWavRecorder?.writeRemote(pcm)
+                audioTrack?.write(pcm, 0, pcm.size)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(tag, "RTP receive loop failed", e)
+        }
+    }
+
+    private fun stopRtpAudio() {
+        releaseCallWakeLock()
+        rtpReceiveJob?.cancel()
+        audioCaptureJob?.cancel()
+        rtpKeepAliveJob?.cancel()
+        rtpReceiveJob = null
+        audioCaptureJob = null
+        rtpKeepAliveJob = null
+
+        try {
+            audioRecord?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            audioRecord?.release()
+        } catch (_: Exception) {
+        }
+        audioRecord = null
+
+        runCatching { audioTrack?.pause() }
+        runCatching { audioTrack?.flush() }
+        runCatching { audioTrack?.stop() }
+        runCatching { audioTrack?.release() }
+        audioTrack = null
+
+        try {
+            rtpSocket?.close()
+        } catch (_: Exception) {
+        }
+        rtpSocket = null
+        remoteRtpAddress = null
+        restoreAudioRoute()
+    }
+
+    private fun restoreAudioRoute() {
+        val manager = audioManager ?: return
+        previousSpeakerphoneOn?.let { previous ->
+            runCatching { manager.isSpeakerphoneOn = previous }
+        }
+        previousAudioMode?.let { previous ->
+            runCatching { manager.mode = previous }
+        }
+        audioManager = null
+        previousAudioMode = null
+        previousSpeakerphoneOn = null
+    }
+
+    private fun encodeG711Sample(sample: Int, codec: G711Codec): Byte =
+        when (codec) {
+            G711Codec.PCMA -> linearToALaw(sample)
+            G711Codec.PCMU -> linearToMuLaw(sample)
+        }
+
+    private fun decodeG711Sample(value: Int, codec: G711Codec): Short =
+        when (codec) {
+            G711Codec.PCMA -> aLawToLinear(value)
+            G711Codec.PCMU -> muLawToLinear(value)
+        }
+
+    private fun linearToMuLaw(sample: Int): Byte {
+        val bias = 0x84
+        val clip = 32635
+        val sign = if (sample < 0) 0x80 else 0
+        var pcm = if (sample < 0) -sample else sample
+        pcm = pcm.coerceAtMost(clip) + bias
+
+        var exponent = 7
+        var mask = 0x4000
+        while (exponent > 0 && (pcm and mask) == 0) {
+            exponent--
+            mask = mask ushr 1
+        }
+        val mantissa = (pcm ushr (exponent + 3)) and 0x0f
+        return (((sign or (exponent shl 4) or mantissa) xor 0xff) and 0xff).toByte()
+    }
+
+    private fun muLawToLinear(value: Int): Short {
+        val u = value.inv() and 0xff
+        var sample = ((u and 0x0f) shl 3) + 0x84
+        sample = sample shl ((u and 0x70) ushr 4)
+        val decoded = if ((u and 0x80) != 0) 0x84 - sample else sample - 0x84
+        return decoded.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+    }
+
+    private fun linearToALaw(sample: Int): Byte {
+        var pcm = sample
+        val mask: Int
+        if (pcm >= 0) {
+            mask = 0xd5
+        } else {
+            mask = 0x55
+            pcm = -pcm - 1
+        }
+        pcm = pcm.coerceAtMost(32635)
+
+        val encoded = if (pcm >= 256) {
+            var exponent = 7
+            var searchMask = 0x4000
+            while (exponent > 0 && (pcm and searchMask) == 0) {
+                exponent--
+                searchMask = searchMask ushr 1
+            }
+            (exponent shl 4) or ((pcm ushr (exponent + 3)) and 0x0f)
+        } else {
+            pcm ushr 4
+        }
+        return ((encoded xor mask) and 0xff).toByte()
+    }
+
+    private fun aLawToLinear(value: Int): Short {
+        val a = (value xor 0x55) and 0xff
+        var sample = (a and 0x0f) shl 4
+        val segment = (a and 0x70) ushr 4
+        when (segment) {
+            0 -> sample += 8
+            1 -> sample += 0x108
+            else -> {
+                sample += 0x108
+                sample = sample shl (segment - 1)
+            }
+        }
+        val decoded = if ((a and 0x80) != 0) sample else -sample
+        return decoded.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+    }
+
+    private fun startCallRecording() {
+        try {
+            val dir = File(context.filesDir, "smart_calls_recordings")
+            if (!dir.exists()) dir.mkdirs()
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.GERMANY).format(Date())
+            val file = File(dir, "Call_${activeCallTarget ?: "Unknown"}_$timestamp.wav")
+            val recorder = PcmCallRecorder(file)
+
+            callWavRecorder = recorder
+            currentRecordFile = file
+            _lastRecordingFile.value = file
+            _isRecording.value = true
+            Log.d(tag, "Local call recording started: ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to start local call recording", e)
+            _isRecording.value = false
+        }
+    }
+
+    private fun stopCallRecording() {
+        val recorder = callWavRecorder ?: return
+        callWavRecorder = null
+        val savedFile = recorder.outputFile
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                recorder.finish()
+                if (savedFile.exists() && savedFile.length() > 44) {
+                    Log.d(tag, "Local call recording saved: ${savedFile.absolutePath}")
+
+                    // Auto-save to user selected folder / Google Drive if enabled
+                    val storageMgr = RecordingStorageManager(context)
+                    if (storageMgr.getCustomFolderUri() != null && storageMgr.isAutoExportEnabled()) {
+                        val res = storageMgr.saveFileToCustomFolder(savedFile)
+                        if (res.isSuccess) {
+                            Log.d(tag, "Auto-saved recording to target: ${res.getOrNull()}")
+                        } else {
+                            Log.w(tag, "Could not auto-save to target: ${res.exceptionOrNull()?.message}")
+                        }
+                    }
+                } else {
+                    Log.w(tag, "Local call recording contained no audio samples")
+                }
+            } catch (e: Exception) {
+                Log.e(tag, "Error finalizing local call recording", e)
+            } finally {
+                if (callWavRecorder == null) _isRecording.value = false
+            }
+        }
+    }
+
+    private class PcmCallRecorder(val outputFile: File) {
+        private val workDir = File(outputFile.parentFile, ".smartcall_pcm")
+        private val micFile = File(workDir, "${outputFile.name}.mic.pcm")
+        private val remoteFile = File(workDir, "${outputFile.name}.remote.pcm")
+        private val micStream: BufferedOutputStream
+        private val remoteStream: BufferedOutputStream
+        private var finished = false
+
+        init {
+            workDir.mkdirs()
+            micFile.delete()
+            remoteFile.delete()
+            outputFile.delete()
+            micStream = BufferedOutputStream(FileOutputStream(micFile))
+            remoteStream = BufferedOutputStream(FileOutputStream(remoteFile))
+        }
+
+        fun writeMic(samples: ShortArray) {
+            synchronized(this) {
+                if (!finished) writeSamples(micStream, samples)
+            }
+        }
+
+        fun writeRemote(samples: ShortArray) {
+            synchronized(this) {
+                if (!finished) writeSamples(remoteStream, samples)
+            }
+        }
+
+        fun finish() {
+            synchronized(this) {
+                if (finished) return
+                finished = true
+                runCatching { micStream.flush(); micStream.close() }
+                runCatching { remoteStream.flush(); remoteStream.close() }
+            }
+
+            try {
+                combineToStereoWav()
+            } finally {
+                micFile.delete()
+                remoteFile.delete()
+            }
+        }
+
+        private fun writeSamples(output: OutputStream, samples: ShortArray) {
+            val bytes = ByteArray(samples.size * 2)
+            for (i in samples.indices) {
+                val value = samples[i].toInt()
+                bytes[i * 2] = (value and 0xff).toByte()
+                bytes[i * 2 + 1] = ((value ushr 8) and 0xff).toByte()
+            }
+            output.write(bytes)
+        }
+
+        private fun combineToStereoWav() {
+            val micSamples = micFile.length() / 2
+            val remoteSamples = remoteFile.length() / 2
+            val totalSamples = maxOf(micSamples, remoteSamples)
+            if (totalSamples <= 0) {
+                outputFile.delete()
+                return
+            }
+
+            var dataBytes = 0
+            val left = ShortArray(160)
+            val right = ShortArray(160)
+            FileInputStream(micFile).use { micInput ->
+                FileInputStream(remoteFile).use { remoteInput ->
+                    BufferedOutputStream(FileOutputStream(outputFile)).use { output ->
+                        writeWavHeader(output, 0)
+                        var processed = 0L
+                        while (processed < totalSamples) {
+                            val frameSamples =
+                                minOf(160L, totalSamples - processed).toInt()
+                            java.util.Arrays.fill(left, 0, frameSamples, 0.toShort())
+                            java.util.Arrays.fill(right, 0, frameSamples, 0.toShort())
+                            if (processed < micSamples) {
+                                readPcmSamples(micInput, left, frameSamples)
                             }
+                            if (processed < remoteSamples) {
+                                readPcmSamples(remoteInput, right, frameSamples)
+                            }
+
+                            val stereo = ByteArray(frameSamples * 4)
+                            for (i in 0 until frameSamples) {
+                                val leftValue = left[i].toInt()
+                                val rightValue = right[i].toInt()
+                                val offset = i * 4
+                                stereo[offset] = (leftValue and 0xff).toByte()
+                                stereo[offset + 1] = ((leftValue ushr 8) and 0xff).toByte()
+                                stereo[offset + 2] = (rightValue and 0xff).toByte()
+                                stereo[offset + 3] = ((rightValue ushr 8) and 0xff).toByte()
+                            }
+                            output.write(stereo)
+                            dataBytes += stereo.size
+                            processed += frameSamples
                         }
                     }
                 }
             }
+
+            RandomAccessFile(outputFile, "rw").use { file ->
+                file.seek(4)
+                writeLittleEndianInt(file, 36 + dataBytes)
+                file.seek(40)
+                writeLittleEndianInt(file, dataBytes)
+            }
         }
 
-        // TRANSCRIPTION DETAIL DIALOG
-        activeTranscriptResult?.let { result ->
-            TranscriptionDetailDialog(
-                result = result,
-                onDismiss = { activeTranscriptResult = null },
-                onReTranscribe = {
-                    val file = recordingsList.find { it.name == result.fileName }
-                    activeTranscriptResult = null
-                    if (file != null) {
-                        startTranscription(file)
-                    } else {
-                        Toast.makeText(ctx, "Audiodatei nicht gefunden", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            )
+        private fun readPcmSamples(
+            input: InputStream,
+            target: ShortArray,
+            count: Int
+        ) {
+            val bytes = ByteArray(count * 2)
+            var totalRead = 0
+            while (totalRead < bytes.size) {
+                val read = input.read(bytes, totalRead, bytes.size - totalRead)
+                if (read <= 0) break
+                totalRead += read
+            }
+            val samplesRead = totalRead / 2
+            for (i in 0 until samplesRead) {
+                target[i] = (
+                    (bytes[i * 2].toInt() and 0xff) or
+                        (bytes[i * 2 + 1].toInt() shl 8)
+                    ).toShort()
+            }
         }
 
-        // GEMINI API KEY DIALOG
-        if (showApiKeyDialog) {
-            GeminiApiKeyDialog(
-                onDismiss = {
-                    showApiKeyDialog = false
-                    pendingFileToTranscribe = null
-                },
-                onKeySaved = { key ->
-                    showApiKeyDialog = false
-                    pendingFileToTranscribe?.let { file ->
-                        startTranscription(file)
-                        pendingFileToTranscribe = null
-                    }
-                }
-            )
+        private fun writeWavHeader(output: OutputStream, dataBytes: Int) {
+            output.write("RIFF".toByteArray(Charsets.US_ASCII))
+            writeLittleEndianInt(output, 36 + dataBytes)
+            output.write("WAVE".toByteArray(Charsets.US_ASCII))
+            output.write("fmt ".toByteArray(Charsets.US_ASCII))
+            writeLittleEndianInt(output, 16)
+            writeLittleEndianShort(output, 1)
+            writeLittleEndianShort(output, 2)
+            writeLittleEndianInt(output, 8000)
+            writeLittleEndianInt(output, 8000 * 2 * 16 / 8)
+            writeLittleEndianShort(output, 2 * 16 / 8)
+            writeLittleEndianShort(output, 16)
+            output.write("data".toByteArray(Charsets.US_ASCII))
+            writeLittleEndianInt(output, dataBytes)
         }
+
+        private fun writeLittleEndianShort(output: OutputStream, value: Int) {
+            output.write(value and 0xff)
+            output.write((value ushr 8) and 0xff)
+        }
+
+        private fun writeLittleEndianInt(output: OutputStream, value: Int) {
+            output.write(value and 0xff)
+            output.write((value ushr 8) and 0xff)
+            output.write((value ushr 16) and 0xff)
+            output.write((value ushr 24) and 0xff)
+        }
+
+        private fun writeLittleEndianInt(file: RandomAccessFile, value: Int) {
+            file.write(value and 0xff)
+            file.write((value ushr 8) and 0xff)
+            file.write((value ushr 16) and 0xff)
+            file.write((value ushr 24) and 0xff)
+        }
+    }
+
+    fun disconnect() {
+        // Set the state before closing sockets. The blocking reader then sees
+        // an intentional disconnect instead of reporting a false transport error.
+        _state.value = SipState.DISCONNECTED
+        _statusText.value = "Nicht verbunden"
+        stopInCallTimer()
+        stopSessionRefresh()
+        stopSipKeepAlive()
+        stopRtpAudio()
+        stopCallRecording()
+        clientJob?.cancel()
+        clientJob = null
+
+        try {
+            udpSocket?.close()
+            tcpSocket?.close()
+            sslSocket?.close()
+        } catch (e: Exception) {
+            Log.w(tag, "Error closing SIP sockets", e)
+        }
+
+        udpSocket = null
+        tcpSocket = null
+        sslSocket = null
+        socketWriter = null
+        socketReader = null
+        lastUdpSender = null
+        clearCallDialog()
+
     }
 }
