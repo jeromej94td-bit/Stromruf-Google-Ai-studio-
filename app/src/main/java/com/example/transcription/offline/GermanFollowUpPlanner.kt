@@ -3,7 +3,7 @@ package com.example.transcription.offline
 import java.util.Calendar
 import java.util.Locale
 
-/** Finds an explicit German callback date without inventing a default appointment. */
+/** Finds an explicit German callback date/time without inventing a default appointment. */
 object GermanFollowUpPlanner {
     data class Plan(val dueAt: Long, val description: String)
 
@@ -58,24 +58,20 @@ object GermanFollowUpPlanner {
                 }
             }
         }
-
-        // No explicit date/day = no automatic calendar entry. Gemma may still document the next action.
         if (!explicitDate) return null
 
         val time = Regex("\\b([01]?\\d|2[0-3])(?:[:.]([0-5]\\d))?\\s*uhr(?:\\s*([0-5]\\d))?").find(text)
-        val hour = time?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 10
-        val minute = time?.groupValues?.getOrNull(2)?.toIntOrNull()
-            ?: time?.groupValues?.getOrNull(3)?.toIntOrNull() ?: 0
+            ?: return null
+        val hour = time.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
+        val minute = time.groupValues.getOrNull(2)?.toIntOrNull()
+            ?: time.groupValues.getOrNull(3)?.toIntOrNull() ?: 0
         calendar.set(Calendar.HOUR_OF_DAY, hour)
         calendar.set(Calendar.MINUTE, minute)
         if (calendar.timeInMillis <= now + 60_000L) return null
 
         return Plan(
             dueAt = calendar.timeInMillis,
-            description = if (time != null)
-                "Termin automatisch aus Gespräch erkannt"
-            else
-                "Tag aus Gespräch erkannt; Uhrzeit mangels Angabe auf 10:00 Uhr gesetzt"
+            description = "Termin automatisch aus Gespräch bzw. gespeicherter Gemma-Regel erkannt"
         )
     }
 }
