@@ -59,12 +59,6 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
-  externalNativeBuild {
-    cmake {
-      path = file("src/main/cpp/CMakeLists.txt")
-      version = "3.22.1"
-    }
-  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -77,9 +71,6 @@ secrets {
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
-  implementation("androidx.work:work-runtime-ktx:2.11.2")
-  implementation("org.linphone:linphone-sdk-android:5.5.18")
-  implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
