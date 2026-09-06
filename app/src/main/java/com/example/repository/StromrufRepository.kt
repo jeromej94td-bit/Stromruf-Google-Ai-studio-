@@ -59,6 +59,8 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
         return dao.getContactById(id)
     }
 
+    suspend fun getAllContactsList(): List<ContactEntity> = dao.getAllContactsList()
+
     suspend fun insertContact(contact: ContactEntity) {
         dao.insertContact(contact)
         if (com.example.util.ContactsUtil.hasWriteContactsPermission(context) && contact.name.isNotBlank() && contact.phone.isNotBlank()) {
@@ -212,10 +214,18 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
 
     suspend fun insertNeukunde(item: com.example.database.NeukundeEntity) {
         dao.insertNeukunde(item)
-        SupabaseDbClient.upsertNeukunde(context, item)
+        com.example.leads.LeadAutomation.schedule(context, item)
+        com.example.leads.LeadAutomation.enqueueCloudSync(context, item.id)
+    }
+
+    suspend fun insertNeukundeWithContact(item: com.example.database.NeukundeEntity, contact: ContactEntity) {
+        dao.insertNeukundeAndContact(item, contact)
+        com.example.leads.LeadAutomation.schedule(context, item)
+        com.example.leads.LeadAutomation.enqueueCloudSync(context, item.id)
     }
 
     suspend fun deleteNeukundeById(id: String) {
+        com.example.leads.LeadAutomation.cancel(context, id)
         dao.deleteNeukundeById(id)
         SupabaseDbClient.deleteNeukunde(context, id)
     }
