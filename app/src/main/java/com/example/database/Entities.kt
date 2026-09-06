@@ -1,6 +1,7 @@
 package com.example.database
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "contacts")
@@ -22,7 +23,8 @@ data class ContactEntity(
     val dateCreated: Long = System.currentTimeMillis(),
     val consumption: Long? = null,
     val zipCode: String? = null,
-    val energyType: String? = null // "Strom", "Gas", or null/empty
+    val energyType: String? = null, // "Strom", "Gas", or null/empty
+    val customerNumber: String? = null
 ) {
     fun isReachableNow(cal: java.util.Calendar = java.util.Calendar.getInstance()): Boolean {
         val currentDay = cal.get(java.util.Calendar.DAY_OF_WEEK)
@@ -135,7 +137,12 @@ data class NeukundeEntity(
     val deliveryAddress: String? = null,
     val meterNumber: String? = null,
     val consumption: Long? = null,
-    val energyType: String? = null // "Strom" oder "Gas"
+    val energyType: String? = null, // "Strom" oder "Gas"
+    val nextActionAt: Long? = null,
+    val offerSentAt: Long? = null,
+    val completedAt: Long? = null,
+    val archivedAt: Long? = null,
+    @ColumnInfo(defaultValue = "0") val updatedAt: Long = dateCreated
 )
 
 @Entity(tableName = "heisse_angebote")
@@ -165,6 +172,4 @@ data class CustomerMessageEntity(
     val sentAt: Long? = null,
     val errorMessage: String? = null
 )
-
-
 

@@ -228,22 +228,57 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         routine: String = "Keine"
     ) {
         viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            fun phoneKey(value: String) = value.filter(Char::isDigit).takeLast(10)
+            val cleanPhone = phone.trim()
+            val cleanEmail = email?.trim()?.lowercase().orEmpty()
+            val existing = repository.getAllContactsList().firstOrNull { contact ->
+                (cleanPhone.isNotBlank() && phoneKey(contact.phone) == phoneKey(cleanPhone)) ||
+                    (cleanEmail.isNotBlank() && contact.email?.trim()?.lowercase() == cleanEmail)
+            }
+            val effectivePhone = cleanPhone.ifBlank { existing?.phone.orEmpty() }
+            val leadId = existing?.id ?: java.util.UUID.randomUUID().toString()
+            val initialStatus = com.example.leads.LeadWorkflow.initial(effectivePhone)
+            val initialDue = if (initialStatus == com.example.leads.LeadWorkflow.MAIL)
+                com.example.leads.LeadWorkflow.atToday(15, 50, now) else null
             val item = com.example.database.NeukundeEntity(
-                id = java.util.UUID.randomUUID().toString(),
-                dateCreated = System.currentTimeMillis(),
-                customerNumber = customerNumber,
-                phone = phone,
+                id = leadId,
+                dateCreated = now,
+                customerNumber = customerNumber.trim(),
+                phone = effectivePhone,
                 callAttempts = 0,
-                status = "Anrufen",
+                status = initialStatus,
                 customerName = customerName,
                 company = company,
                 email = email,
                 deliveryAddress = deliveryAddress,
                 meterNumber = meterNumber,
                 consumption = consumption,
-                energyType = energyType
+                energyType = energyType,
+                nextActionAt = initialDue,
+                updatedAt = now
             )
-            repository.insertNeukunde(item)
+            val displayName = customerName?.trim().takeUnless { it.isNullOrEmpty() }
+                ?: company?.trim().takeUnless { it.isNullOrEmpty() }
+                ?: customerNumber.trim().takeIf { it.isNotEmpty() }?.let { "Kunde $it" }
+                ?: cleanEmail.ifBlank { cleanPhone }.ifBlank { "Neuer Lead" }
+            val contact = existing?.copy(
+                name = displayName,
+                phone = cleanPhone.ifBlank { existing.phone },
+                company = company?.trim().takeUnless { it.isNullOrEmpty() } ?: existing.company,
+                email = email?.trim().takeUnless { it.isNullOrEmpty() } ?: existing.email,
+                customerNumber = customerNumber.trim().takeIf { it.isNotEmpty() } ?: existing.customerNumber
+            ) ?: com.example.database.ContactEntity(
+                id = leadId,
+                name = displayName,
+                phone = cleanPhone,
+                company = company?.trim().takeUnless { it.isNullOrEmpty() },
+                email = email?.trim().takeUnless { it.isNullOrEmpty() },
+                lastCallAt = null,
+                lastOutcome = null,
+                customerNumber = customerNumber.trim().takeIf { it.isNotEmpty() }
+            )
+            repository.insertNeukundeWithContact(item, contact)
 
             if (routine == "Nicht erreicht") {
                 val dueAt = System.currentTimeMillis() + 2 * 60 * 60 * 1000L
@@ -281,24 +316,29 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
     fun incrementNeukundeCallAttempts(neukunde: com.example.database.NeukundeEntity) {
         viewModelScope.launch {
             val newAttempts = neukunde.callAttempts + 1
-            repository.insertNeukunde(neukunde.copy(callAttempts = newAttempts))
+            repository.insertNeukunde(neukunde.copy(callAttempts = newAttempts, updatedAt = System.currentTimeMillis()))
         }
+    }
+
+    fun markNeukundeNotReached(neukunde: com.example.database.NeukundeEntity) {
+        viewModelScope.launch { repository.insertNeukunde(com.example.leads.LeadWorkflow.missed(neukunde)) }
     }
 
     fun advanceNeukundeStatus(neukunde: com.example.database.NeukundeEntity, onRemoved: () -> Unit = {}) {
         viewModelScope.launch {
-            val nextStatus = when (neukunde.status) {
-                "Anrufen" -> "Datenmail schreiben"
-                "Datenmail schreiben" -> "Angebot erstellen"
-                "Angebot erstellen" -> "Zum Stand fragen"
-                else -> "Zum Stand fragen"
-            }
-            if (nextStatus == "Zum Stand fragen") {
-                repository.deleteNeukundeById(neukunde.id)
-                onRemoved()
-            } else {
-                repository.insertNeukunde(neukunde.copy(status = nextStatus))
-            }
+            val updated = com.example.leads.LeadWorkflow.next(neukunde)
+            repository.insertNeukunde(updated)
+            if (updated.status == com.example.leads.LeadWorkflow.DONE) onRemoved()
+        }
+    }
+
+    fun archiveNeukunde(neukunde: com.example.database.NeukundeEntity) {
+        viewModelScope.launch {
+            repository.insertNeukunde(neukunde.copy(
+                status = com.example.leads.LeadWorkflow.ARCHIVED,
+                archivedAt = System.currentTimeMillis(), nextActionAt = null,
+                updatedAt = System.currentTimeMillis()
+            ))
         }
     }
 
@@ -505,29 +545,15 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                 val hotContacts = allContacts.filter { contact ->
                     contact.isHotBox && getEffectiveHotBoxListName(contact.hotBoxListName) in activeLists
                 }
-                val cal = Calendar.getInstance()
-                val currentHour = cal.get(Calendar.HOUR_OF_DAY)
-                val currentDay = cal.get(Calendar.DAY_OF_WEEK)
-                val activeHotContacts = hotContacts.filter { contact ->
-                    val weekdaysStr = contact.hotBoxWeekdays
-                    if (!weekdaysStr.isNullOrEmpty()) {
-                        val daysList = weekdaysStr.split(",").mapNotNull { it.trim().toIntOrNull() }
-                        if (daysList.isNotEmpty() && currentDay !in daysList) return@filter false
-                    }
-                    val start = contact.hotBoxStartHour
-                    val end = contact.hotBoxEndHour
-                    if (start != null && end != null) {
-                        if (start <= end) currentHour in start..end else currentHour >= start || currentHour <= end
-                    } else true
-                }
-                val contactsToUse = if (activeHotContacts.isNotEmpty()) activeHotContacts else hotContacts
+                val cal = Calendar.getInstance().apply { timeInMillis = now }
+                val contactsToUse = hotContacts.filter { it.isReachableNow(cal) }
                 val uncalled = contactsToUse.filter { !it.hasBeenCalledInHotCycle }
                 val nextId = _nextHotBoxContactId.value
                 val stillValid = uncalled.any { it.id == nextId }
                 if (!stillValid) {
                     _nextHotBoxContactId.value = when {
-                        uncalled.isNotEmpty() -> uncalled.random().id
-                        contactsToUse.isNotEmpty() -> contactsToUse.random().id
+                        uncalled.isNotEmpty() -> smartestHotBoxContact(uncalled)?.id
+                        contactsToUse.isNotEmpty() -> smartestHotBoxContact(contactsToUse)?.id
                         else -> null
                     }
                 }
@@ -541,50 +567,26 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             val hotContacts = (contacts.value ?: emptyList()).filter { contact ->
                 contact.isHotBox && getEffectiveHotBoxListName(contact.hotBoxListName) in activeLists
             }
-            val cal = Calendar.getInstance()
-            val currentHour = cal.get(Calendar.HOUR_OF_DAY)
-            val currentDay = cal.get(Calendar.DAY_OF_WEEK)
-            val activeHotContacts = hotContacts.filter { contact ->
-                val weekdaysStr = contact.hotBoxWeekdays
-                if (!weekdaysStr.isNullOrEmpty()) {
-                    val daysList = weekdaysStr.split(",").mapNotNull { it.trim().toIntOrNull() }
-                    if (daysList.isNotEmpty() && currentDay !in daysList) {
-                        return@filter false
-                    }
-                }
-
-                val start = contact.hotBoxStartHour
-                val end = contact.hotBoxEndHour
-                if (start != null && end != null) {
-                    if (start <= end) {
-                        currentHour in start..end
-                    } else {
-                        currentHour >= start || currentHour <= end
-                    }
-                } else {
-                    true
-                }
-            }
-            val contactsToUse = if (activeHotContacts.isNotEmpty()) activeHotContacts else hotContacts
+            val contactsToUse = hotContacts.filter { it.isReachableNow() }
             val uncalled = contactsToUse.filter { !it.hasBeenCalledInHotCycle }
             
             val currentNextId = _nextHotBoxContactId.value
             val candidates = if (uncalled.isNotEmpty()) uncalled else contactsToUse
             val filteredCandidates = candidates.filter { it.id != currentNextId }
             
-            val chosen = if (filteredCandidates.isNotEmpty()) {
-                filteredCandidates.random()
-            } else if (candidates.isNotEmpty()) {
-                candidates.random()
-            } else {
-                null
-            }
+            val chosen = smartestHotBoxContact(filteredCandidates.ifEmpty { candidates })
             
             _nextHotBoxContactId.value = chosen?.id
         }
     }
 
     private var isFirstListLoad = true
+
+    private fun smartestHotBoxContact(candidates: List<ContactEntity>): ContactEntity? = candidates.minWithOrNull(
+        compareBy<ContactEntity> { it.lastCallAt ?: Long.MIN_VALUE }
+            .thenBy { it.dateCreated }
+            .thenBy { it.name.lowercase(Locale.GERMAN) }
+    )
 
     fun setHotBoxLists(lists: Set<String>) {
         val cleanLists = lists.filter { it != "Standard Hotbox" && it != "Passive Hotbox" }.toSet()
@@ -1817,35 +1819,11 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                 return@launch
             }
 
-            val cal = Calendar.getInstance()
-            val currentHour = cal.get(Calendar.HOUR_OF_DAY)
-            val currentDay = cal.get(Calendar.DAY_OF_WEEK)
-            val activeHotContacts = hotContacts.filter { contact ->
-                val weekdaysStr = contact.hotBoxWeekdays
-                if (!weekdaysStr.isNullOrEmpty()) {
-                    val daysList = weekdaysStr.split(",").mapNotNull { it.trim().toIntOrNull() }
-                    if (daysList.isNotEmpty() && currentDay !in daysList) {
-                        return@filter false
-                    }
-                }
-
-                val start = contact.hotBoxStartHour
-                val end = contact.hotBoxEndHour
-                if (start != null && end != null) {
-                    if (start <= end) {
-                        currentHour in start..end
-                    } else {
-                        currentHour >= start || currentHour <= end
-                    }
-                } else {
-                    true
-                }
-            }
-
-            val contactsToUse = if (activeHotContacts.isNotEmpty()) {
-                activeHotContacts
-            } else {
-                hotContacts
+            val contactsToUse = hotContacts.filter { it.isReachableNow() }
+            if (contactsToUse.isEmpty()) {
+                _showToastTrigger.emit("Aktuell liegt kein Hotbox-Kontakt in seinem Erreichbarkeitsfenster.")
+                onNoHotContacts()
+                return@launch
             }
 
             var uncalledHotContacts = contactsToUse.filter { !it.hasBeenCalledInHotCycle }
@@ -1859,7 +1837,9 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
             
             if (uncalledHotContacts.isNotEmpty()) {
                 val nextId = _nextHotBoxContactId.value
-                val chosenContact = uncalledHotContacts.firstOrNull { it.id == nextId } ?: uncalledHotContacts.random()
+                val chosenContact = uncalledHotContacts.firstOrNull { it.id == nextId }
+                    ?: smartestHotBoxContact(uncalledHotContacts)
+                    ?: return@launch
                 val updated = chosenContact.copy(hasBeenCalledInHotCycle = true)
                 repository.insertContact(updated)
                 initiateCall(chosenContact.phone, chosenContact.name, chosenContact.id, callType = "hotbox")
