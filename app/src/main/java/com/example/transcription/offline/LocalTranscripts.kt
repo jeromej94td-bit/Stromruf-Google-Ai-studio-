@@ -10,7 +10,6 @@ import java.util.concurrent.TimeUnit
 
 /** Groq Whisper Large v3 primary, fast local Whisper fallback, then Gemma/Supabase. */
 object LocalTranscripts {
-    // Fast ~60 MB local fallback. Groq Whisper Large v3 remains the primary transcriber.
     const val MODEL_SIZE = 59707625L
     const val MODEL_SHA = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898"
     const val MODEL_NAME = "ggml-base-q5_1.bin"
@@ -64,19 +63,31 @@ object LocalTranscripts {
         }
     }
 
-    /** Groq Whisper Large v3 is always attempted first; local Whisper is fallback only. */
-    @Synchronized fun request(context: Context, file: File) {
+    @Synchronized fun request(
+        context: Context,
+        file: File,
+        callDurationSeconds: Int = 0,
+        callStartedAt: Long = 0L
+    ) {
         val audio = recording(context, file.name)
         val previous = read(context, file.name)
         val unchanged = previous.optLong("size") == audio.length() &&
             previous.optLong("modified") == audio.lastModified()
         if (unchanged && previous.optString("state") == "done") {
-            if (previous.optString("syncState") != "done") enqueueNoteSync(context, file.name)
+            if (callDurationSeconds > 0) previous.put("callDurationSeconds", maxOf(previous.optInt("callDurationSeconds"), callDurationSeconds))
+            if (callStartedAt > 0L) previous.put("callStartedAt", callStartedAt)
+            write(context, file.name, previous)
+            if (previous.optString("syncState") !in setOf("done", "local_only")) enqueueNoteSync(context, file.name)
             return
         }
         val value = if (unchanged) previous else JSONObject()
-            .put("file", audio.name).put("size", audio.length()).put("modified", audio.lastModified())
-            .put("nextMs", 0L).put("text", "")
+            .put("file", audio.name)
+            .put("size", audio.length())
+            .put("modified", audio.lastModified())
+            .put("nextMs", 0L)
+            .put("text", "")
+        if (callDurationSeconds > 0) value.put("callDurationSeconds", callDurationSeconds)
+        if (callStartedAt > 0L) value.put("callStartedAt", callStartedAt)
         value.put("state", "pending")
             .put("message", "Wartet auf Groq Whisper Large v3")
             .put("transcriptionSource", "pending")
@@ -98,7 +109,6 @@ object LocalTranscripts {
         )
     }
 
-    /** Fast local Whisper fallback only. */
     fun enqueue(context: Context, name: String) {
         val request = OneTimeWorkRequestBuilder<WhisperWorker>()
             .setInputData(workDataOf("file" to name))
@@ -115,7 +125,7 @@ object LocalTranscripts {
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "$NOTE_SYNC_QUEUE-${id(name)}",
-            ExistingWorkPolicy.KEEP,
+            ExistingWorkPolicy.REPLACE,
             request
         )
     }
@@ -141,7 +151,7 @@ object LocalTranscripts {
                 if (name.isBlank()) return@forEach
                 when (value.optString("state")) {
                     "pending", "running" -> enqueuePrimary(context, name)
-                    "done" -> if (value.optString("syncState") != "done") enqueueNoteSync(context, name)
+                    "done" -> if (value.optString("syncState") !in setOf("done", "local_only")) enqueueNoteSync(context, name)
                 }
             }
     }

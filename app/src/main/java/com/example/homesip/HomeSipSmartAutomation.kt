@@ -7,6 +7,7 @@ import com.example.transcription.offline.LocalTranscripts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.linphone.core.Call
 import org.linphone.core.CallParams
@@ -17,11 +18,7 @@ import java.util.Locale
 
 /**
  * Sidecar around the Gold-Master HomeSipTrunk.
- *
- * It never registers a SIP account, never changes TLS/SRTP/registrar settings and never owns
- * a Linphone Core. It is armed only by the "Smart-Anruf" button and adds recording + post-call
- * processing to that one call. Normal SIP calls are therefore byte-for-byte equivalent in their
- * signaling path when this sidecar is not armed.
+ * It does not own SIP registration/signaling and does not alter TLS/SRTP settings.
  */
 object HomeSipSmartAutomation {
     private const val TAG = "SmartCallFlow"
@@ -34,23 +31,21 @@ object HomeSipSmartAutomation {
         val armedAt: Long,
         var recordingFile: File? = null,
         var recordingStarted: Boolean = false,
+        var connectedAt: Long = 0L,
         var maxDurationSeconds: Int = 0
     )
 
-    @Volatile
-    private var session: Session? = null
+    @Volatile private var session: Session? = null
 
     @Synchronized
     fun arm(number: String, contactName: String?) {
-        val normalized = number.filter { it.isDigit() || it == '+' }
         session = Session(
-            number = normalized,
+            number = number.filter { it.isDigit() || it == '+' },
             contactName = contactName?.trim()?.takeIf { it.isNotBlank() },
             armedAt = System.currentTimeMillis()
         )
     }
 
-    /** Called immediately before the existing Gold-Master inviteAddressWithParams(). */
     @Synchronized
     fun prepareCall(context: Context, number: String, params: CallParams) {
         val current = session ?: return
@@ -58,18 +53,16 @@ object HomeSipSmartAutomation {
             session = null
             return
         }
-        val normalized = number.filter { it.isDigit() || it == '+' }
-        if (normalized != current.number) return
+        if (number.filter { it.isDigit() || it == '+' } != current.number) return
 
         val dir = File(context.filesDir, "smart_calls_recordings")
         check(dir.isDirectory || dir.mkdirs()) { "Smart-Call-Aufnahmeordner konnte nicht erstellt werden" }
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val file = File(dir, "Call_${normalized}_$timestamp.wav")
+        val file = File(dir, "Call_${current.number}_$timestamp.wav")
         params.recordFile = file.absolutePath
         current.recordingFile = file
     }
 
-    /** Receives call states from the existing HomeSipTrunk listener without changing SIP logic. */
     fun onCallState(context: Context, call: Call, state: Call.State) {
         val current = synchronized(this) {
             session?.also { it.maxDurationSeconds = maxOf(it.maxDurationSeconds, call.duration) }
@@ -77,18 +70,17 @@ object HomeSipSmartAutomation {
 
         when (state) {
             Call.State.StreamsRunning -> {
+                synchronized(this) {
+                    if (session?.connectedAt == 0L) session?.connectedAt = System.currentTimeMillis()
+                }
                 if (current.recordingFile != null && !current.recordingStarted) {
                     runCatching { call.startRecording() }
                         .onFailure { Log.w(TAG, "Linphone-Aufnahme konnte nicht gestartet werden", it) }
-                    synchronized(this) {
-                        session?.recordingStarted = call.isRecording
-                    }
+                    synchronized(this) { session?.recordingStarted = call.isRecording }
                 }
             }
             Call.State.Error, Call.State.End -> {
-                if (current.recordingStarted && call.isRecording) {
-                    runCatching { call.stopRecording() }
-                }
+                if (current.recordingStarted && call.isRecording) runCatching { call.stopRecording() }
             }
             Call.State.Released -> finalizeRecording(context.applicationContext, call)
             else -> Unit
@@ -96,30 +88,51 @@ object HomeSipSmartAutomation {
     }
 
     @Synchronized
-    fun cancelPrepared() {
-        session = null
-    }
+    fun cancelPrepared() { session = null }
 
     private fun finalizeRecording(context: Context, call: Call) {
         val finished = synchronized(this) {
             val current = session ?: return
             current.maxDurationSeconds = maxOf(current.maxDurationSeconds, call.duration)
-            if (current.recordingStarted && call.isRecording) {
-                runCatching { call.stopRecording() }
-            }
+            if (current.recordingStarted && call.isRecording) runCatching { call.stopRecording() }
             session = null
             current
         }
 
         val file = finished.recordingFile ?: return
-        if (!file.exists() || file.length() <= 44L) return
+        val wallClockDuration = if (finished.connectedAt > 0L) {
+            ((System.currentTimeMillis() - finished.connectedAt) / 1000L).toInt().coerceAtLeast(0)
+        } else 0
+        val reliableDuration = maxOf(finished.maxDurationSeconds, wallClockDuration)
+        val callStartedAt = finished.connectedAt.takeIf { it > 0L } ?: finished.armedAt
 
         scope.launch {
+            var previousSize = -1L
+            var stableChecks = 0
+            var attempts = 0
+            while (attempts < 12 && stableChecks < 2) {
+                if (file.exists() && file.length() > 44L) {
+                    val size = file.length()
+                    stableChecks = if (size == previousSize) stableChecks + 1 else 0
+                    previousSize = size
+                }
+                attempts++
+                if (stableChecks < 2) delay(500)
+            }
+
+            if (!file.exists() || file.length() <= 44L) {
+                Log.e(TAG, "Smart-Call-Aufnahme ist nach dem Auflegen nicht lesbar: ${file.name}")
+                return@launch
+            }
+
             runCatching {
-                // LocalTranscripts automatically uses an already installed Whisper model and
-                // falls back to downloading the pinned local model only when it is actually absent.
-                LocalTranscripts.request(context, file)
-            }.onFailure { Log.e(TAG, "Whisper-Workflow konnte nicht eingeplant werden", it) }
+                LocalTranscripts.request(
+                    context = context,
+                    file = file,
+                    callDurationSeconds = reliableDuration,
+                    callStartedAt = callStartedAt
+                )
+            }.onFailure { Log.e(TAG, "Whisper-Workflow konnte nicht automatisch eingeplant werden", it) }
 
             runCatching {
                 val storage = RecordingStorageManager(context)
