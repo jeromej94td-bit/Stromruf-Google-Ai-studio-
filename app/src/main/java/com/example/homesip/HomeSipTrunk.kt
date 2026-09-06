@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.util.Log
 import androidx.core.app.ContextCompat
 import androidx.core.app.NotificationCompat
 import androidx.security.crypto.EncryptedSharedPreferences
@@ -75,8 +74,8 @@ internal class HomeSipSettingsStore(context: Context) {
 }
 
 /**
- * Gold-Master SIP implementation for the Home screen.
- * liblinphone owns SIP, TLS, SDP, RTP, SRTP, dialog routing and session refresh.
+ * A deliberately separate SIP implementation for the Home screen.
+ * The SDK owns SIP, TLS, SDP, RTP, SRTP, dialog routing and session refresh.
  */
 class HomeSipTrunk private constructor(private val appContext: Context) {
     companion object {
@@ -105,8 +104,6 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
             core: Core, account: Account, registrationState: RegistrationState, message: String
         ) {
             if (account != this@HomeSipTrunk.account) return
-            // A REGISTER refresh must never overwrite an active call state with READY.
-            if (activeCall != null || pendingNumber != null) return
             when (registrationState) {
                 RegistrationState.Ok -> _state.value = HomeSipState(HomeSipStatus.READY, "SIP-Trunk verbunden")
                 RegistrationState.Progress, RegistrationState.Refreshing ->
@@ -114,7 +111,7 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
                 RegistrationState.Failed ->
                     _state.value = HomeSipState(HomeSipStatus.ERROR, readableRegistrationError(message))
                 RegistrationState.Cleared, RegistrationState.None ->
-                    _state.value = HomeSipState(HomeSipStatus.OFFLINE, "Nicht verbunden")
+                    if (activeCall == null) _state.value = HomeSipState(HomeSipStatus.OFFLINE, "Nicht verbunden")
             }
         }
 
@@ -125,11 +122,6 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
             }
             if (activeCall == null && callState == Call.State.OutgoingInit && pendingNumber != null) activeCall = call
             if (call != activeCall) return
-
-            // Smart automation is a sidecar. A recording/DB exception must never break SIP state handling.
-            runCatching { HomeSipSmartAutomation.onCallState(appContext, call, callState) }
-                .onFailure { Log.w("HomeSipTrunk", "Smart-Call sidecar error in $callState", it) }
-
             when (callState) {
                 Call.State.OutgoingInit, Call.State.OutgoingProgress ->
                     _state.value = HomeSipState(HomeSipStatus.DIALING, "Anruf wird aufgebaut …")
@@ -142,16 +134,9 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
                         HomeSipStatus.ERROR,
                         "Anruf fehlgeschlagen (SIP ${call.errorInfo.protocolCode})"
                     )
-                    // Keep the foreground service and activeCall until Released. Linphone still owns
-                    // native dialog/media cleanup at this point.
+                    stopCallService()
                 }
-                Call.State.End -> {
-                    // IMPORTANT: End is not the final native lifecycle state. Do not null activeCall
-                    // here. Otherwise Released is ignored, the recorder/session is left stale and the
-                    // next call can fail immediately after answer.
-                    _state.value = HomeSipState(HomeSipStatus.DIALING, "Gespräch wird beendet …")
-                }
-                Call.State.Released -> {
+                Call.State.End, Call.State.Released -> {
                     activeCall = null
                     pendingNumber = null
                     _state.value = if (account?.state == RegistrationState.Ok) {
@@ -186,7 +171,6 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
     fun saveSettings(value: HomeSipSettings) = settingsStore.save(value)
 
     fun connect(newSettings: HomeSipSettings) = onMain {
-        if (activeCall != null || pendingNumber != null) return@onMain
         try {
             require(newSettings.user.isNotBlank()) { "SIP-Benutzer fehlt" }
             require(newSettings.password.isNotBlank()) { "SIP-Passwort fehlt" }
@@ -234,7 +218,7 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
     }
 
     fun startCall(number: String) = onMain {
-        if (_state.value.status != HomeSipStatus.READY || activeCall != null || pendingNumber != null) return@onMain
+        if (_state.value.status != HomeSipStatus.READY) return@onMain
         val normalized = number.filter { it.isDigit() || it == '+' }
         if (normalized.length < 3) {
             _state.value = HomeSipState(HomeSipStatus.ERROR, "Bitte eine gültige Zielrufnummer eingeben")
@@ -250,7 +234,6 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
 
     internal fun beginPendingCall() = onMain {
         val number = pendingNumber ?: return@onMain
-        if (activeCall != null) return@onMain
         val engine = core ?: return@onMain
         val config = settings ?: return@onMain
         try {
@@ -258,32 +241,21 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
             val params = requireNotNull(engine.createCallParams(null))
             params.mediaEncryption = MediaEncryption.SRTP
             engine.setMediaEncryptionMandatory(true)
-            HomeSipSmartAutomation.prepareCall(appContext, number, params)
             _state.value = HomeSipState(HomeSipStatus.DIALING, "Anruf wird aufgebaut …")
             activeCall = requireNotNull(engine.inviteAddressWithParams(destination, params)) {
                 "SIP-Anruf konnte nicht initialisiert werden"
             }
         } catch (error: Exception) {
             pendingNumber = null
-            HomeSipSmartAutomation.cancelPrepared()
             _state.value = HomeSipState(HomeSipStatus.ERROR, error.message ?: "Anruf konnte nicht gestartet werden")
             stopCallService()
         }
     }
 
     fun hangUp() = onMain {
+        activeCall?.terminate()
         pendingNumber = null
-        val call = activeCall
-        if (call != null) {
-            call.terminate()
-        } else {
-            stopCallService()
-            _state.value = if (account?.state == RegistrationState.Ok) {
-                HomeSipState(HomeSipStatus.READY, "SIP-Trunk verbunden")
-            } else {
-                HomeSipState(HomeSipStatus.OFFLINE, "Gespräch beendet")
-            }
-        }
+        stopCallService()
     }
 
     private fun stopCallService() {
