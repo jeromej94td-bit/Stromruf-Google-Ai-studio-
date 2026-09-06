@@ -26,7 +26,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
             var offset = partial.length()
             if (offset < LocalTranscripts.MODEL_SIZE) {
                 val client = OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS)
-                    .readTimeout(30, TimeUnit.SECONDS).callTimeout(12, TimeUnit.MINUTES).build()
+                    .readTimeout(30, TimeUnit.SECONDS).callTimeout(8, TimeUnit.MINUTES).build()
                 val request = Request.Builder()
                     .url(MODEL_URL).header("Accept-Encoding", "identity")
                     .apply { if (offset > 0) header("Range", "bytes=$offset-") }.build()
@@ -53,7 +53,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
                                 output.write(buffer, 0, count)
                                 val percent = (total * 100 / LocalTranscripts.MODEL_SIZE).toInt()
                                 if (percent != lastPercent) {
-                                    LocalTranscripts.modelStatus(context, "Whisper Qualitätsmodell wird geladen: $percent %")
+                                    LocalTranscripts.modelStatus(context, "Schnelles Whisper-Fallback wird geladen: $percent %")
                                     lastPercent = percent
                                 }
                             }
@@ -76,7 +76,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
             val target = LocalTranscripts.model(context)
             if (target.exists()) target.delete()
             check(partial.renameTo(target)) { "Modell konnte nicht gespeichert werden" }
-            LocalTranscripts.modelStatus(context, "Bereit · Whisper Small · Deutsch · offline")
+            LocalTranscripts.modelStatus(context, "Bereit · Whisper Base q5_1 · Deutsch · offline")
             LocalTranscripts.resume(context)
             Result.success()
         } catch (e: CancellationException) { throw e }
@@ -92,8 +92,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
     }
 
     companion object {
-        // Pinned multilingual Whisper Small q5_1 model, verified by SHA-256 before activation.
-        const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin"
+        const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/f281eb45af861ab5e5297d23694b7d46e090c02c/ggml-base-q5_1.bin"
     }
 }
 
@@ -107,7 +106,7 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
         val job = LocalTranscripts.read(context, name)
         if (job.optString("state") == "done") return@withContext Result.success()
         if (!LocalTranscripts.ready(context)) {
-            job.put("state", "pending").put("message", "Wartet auf Whisper Qualitätsmodell")
+            job.put("state", "pending").put("message", "Wartet auf schnelles Whisper-Fallback")
             LocalTranscripts.write(context, name, job)
             return@withContext Result.success()
         }
@@ -123,8 +122,8 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                 job.put("durationMs", wav.durationMs)
                 var next = job.optLong("nextMs").coerceIn(0L, wav.durationMs)
                 val text = StringBuilder(job.optString("text"))
-                val deadline = SystemClock.elapsedRealtime() + 12 * 60 * 1000
-                val windowMs = 6_000L
+                val deadline = SystemClock.elapsedRealtime() + 7 * 60 * 1000
+                val windowMs = 10_000L
                 native = WhisperNative { isStopped || callActive() }
                 handle = native!!.open(LocalTranscripts.model(context).absolutePath)
                 check(handle != 0L) { "Whisper konnte das Modell nicht laden" }
@@ -140,12 +139,11 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                     val section = (next / windowMs + 1).toInt()
                     val sections = ((wav.durationMs + windowMs - 1) / windowMs).toInt()
                     job.put("state", "running")
-                        .put("message", "Whisper Small: $percent % · Abschnitt $section/$sections")
+                        .put("transcriptionSource", "local-whisper-base-q5_1")
+                        .put("message", "Lokales Whisper: $percent % · Abschnitt $section/$sections")
                     LocalTranscripts.write(context, name, job)
 
-                    // Keep chunks short enough to avoid the old 30 s first-pass stall, but long
-                    // enough to give Small more linguistic context than the Tiny 3 s fallback.
-                    val start = (next - 1_000).coerceAtLeast(0)
+                    val start = (next - 500).coerceAtLeast(0)
                     val end = (next + windowMs).coerceAtMost(wav.durationMs)
                     val pcm = wav.read16k(start, end - start)
                     val rms = if (pcm.isEmpty()) 0.0 else sqrt(pcm.sumOf { (it * it).toDouble() } / pcm.size)
@@ -170,9 +168,8 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                             .append(words.trim()).append("\n\n")
                     }
                     next = end
-                    val completedPercent = (next * 100 / wav.durationMs).toInt().coerceAtMost(100)
                     job.put("nextMs", next).put("text", text.toString())
-                        .put("message", "Whisper Small: $completedPercent %")
+                        .put("message", "Lokales Whisper: ${(next * 100 / wav.durationMs).toInt().coerceAtMost(100)} %")
                     LocalTranscripts.write(context, name, job)
                     if (SystemClock.elapsedRealtime() >= deadline && next < wav.durationMs) {
                         job.put("state", "pending").put("message", "Fortsetzung eingeplant")
@@ -186,7 +183,13 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                 val nextAction = gemma?.nextAction.orEmpty()
                 val baseSummary = gemma?.summary?.ifBlank { fallbackSummary } ?: fallbackSummary
                 val summary = if (nextAction.isBlank()) baseSummary else "$baseSummary\nNächster Schritt: $nextAction"
-                job.put("state", "done").put("summary", summary).put("analysisSource", if (gemma != null) "gemma-3n-e2b" else "regelbasiert").put("nextAction", nextAction).put("syncState", "pending").put("message", if (text.isBlank()) "Keine Sprache erkannt" else if (gemma != null) "Whisper-Small-Transkript und lokale Gemma-Notiz fertig" else "Whisper-Small-Transkript fertig").put("syncMessage", "Zusammenfassung wird vorbereitet")
+                job.put("state", "done")
+                    .put("summary", summary)
+                    .put("analysisSource", if (gemma != null) "gemma-3n-e2b" else "regelbasiert")
+                    .put("nextAction", nextAction)
+                    .put("syncState", "pending")
+                    .put("message", if (text.isBlank()) "Keine Sprache erkannt" else if (gemma != null) "Lokales Whisper + Gemma fertig" else "Lokales Whisper fertig")
+                    .put("syncMessage", "Zusammenfassung wird vorbereitet")
                 LocalTranscripts.write(context, name, job)
                 LocalTranscripts.enqueueNoteSync(context, name)
             }
