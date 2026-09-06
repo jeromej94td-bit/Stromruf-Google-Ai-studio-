@@ -49,15 +49,32 @@ fun DialerCard(viewModel: StromrufViewModel, modifier: Modifier = Modifier) {
     val contacts by viewModel.contacts.collectAsState()
     val callLogs by viewModel.callLogs.collectAsState()
 
+    fun clearPendingSmart() {
+        pendingSmartPhone = null
+        pendingSmartName = null
+    }
+
+    fun startSmartCallOnce(phone: String, name: String?) {
+        HomeSipSmartAutomation.arm(phone, name)
+        homeSip.startCall(phone)
+        clearPendingSmart()
+        quickPhone = ""
+        quickName = ""
+    }
+
     fun launchSmartCall() {
         val phone = quickPhone.trim()
         if (phone.isBlank()) return
-        pendingSmartPhone = phone
-        pendingSmartName = quickName.takeIf { it.isNotBlank() }
-        HomeSipSmartAutomation.arm(phone, pendingSmartName)
+        val name = quickName.takeIf { it.isNotBlank() }
+
         if (sipState.status == HomeSipStatus.READY) {
-            homeSip.startCall(phone)
+            // SIP is already registered: dial exactly once and do not leave a pending trigger behind.
+            startSmartCallOnce(phone, name)
         } else {
+            // Only keep a pending number while waiting for registration to become READY.
+            pendingSmartPhone = phone
+            pendingSmartName = name
+            HomeSipSmartAutomation.arm(phone, name)
             val saved = homeSip.savedSettings()
             homeSip.connect(saved)
         }
@@ -69,11 +86,14 @@ fun DialerCard(viewModel: StromrufViewModel, modifier: Modifier = Modifier) {
 
     LaunchedEffect(sipState.status, pendingSmartPhone) {
         val phone = pendingSmartPhone ?: return@LaunchedEffect
-        if (sipState.status == HomeSipStatus.READY) {
-            homeSip.startCall(phone)
-            pendingSmartPhone = null
-            quickPhone = ""
-            quickName = ""
+        when (sipState.status) {
+            HomeSipStatus.READY -> startSmartCallOnce(phone, pendingSmartName)
+            HomeSipStatus.DIALING, HomeSipStatus.RINGING, HomeSipStatus.IN_CALL -> clearPendingSmart()
+            HomeSipStatus.ERROR, HomeSipStatus.OFFLINE -> {
+                HomeSipSmartAutomation.cancelPrepared()
+                clearPendingSmart()
+            }
+            else -> Unit
         }
     }
 
