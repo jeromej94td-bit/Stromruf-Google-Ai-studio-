@@ -101,6 +101,7 @@ fun ActivityCalendarContent(
     val selectedFmt = remember { SimpleDateFormat("EEEE, dd. MMMM", Locale.GERMAN) }
     val timeFmt = remember { SimpleDateFormat("HH:mm", Locale.GERMAN) }
     val syncFmt = remember { SimpleDateFormat("HH:mm:ss", Locale.GERMAN) }
+    val currentLastSyncAt = lastSyncAt
 
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -113,8 +114,8 @@ fun ActivityCalendarContent(
             Column(Modifier.weight(1f)) {
                 Text("Kalender", style = MaterialTheme.typography.titleLarge, color = TextPrimary, fontWeight = FontWeight.Bold)
                 Text(
-                    if (lastSyncAt == null) "Supabase wird verbunden"
-                    else "Supabase synchron · ${syncFmt.format(Date(lastSyncAt))}",
+                    if (currentLastSyncAt == null) "Supabase wird verbunden"
+                    else "Supabase synchron · ${syncFmt.format(Date(currentLastSyncAt))}",
                     color = TextMuted,
                     style = MaterialTheme.typography.labelSmall
                 )

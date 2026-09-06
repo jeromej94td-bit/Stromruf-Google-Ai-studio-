@@ -147,6 +147,7 @@ fun HomeSipTrunkCard() {
     }
 }
 
+@Composable
 private fun statusColor(status: HomeSipStatus): Color = when (status) {
     HomeSipStatus.READY, HomeSipStatus.IN_CALL -> ThemeAccent
     HomeSipStatus.ERROR -> Color(0xFFEF4444)
