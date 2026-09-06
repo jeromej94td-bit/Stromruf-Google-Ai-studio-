@@ -3,6 +3,7 @@ name: Android debug build
 on:
   push:
     branches:
+      - main
       - fix/gradle-wrapper-debug-build
   pull_request:
     branches:
@@ -50,3 +51,11 @@ jobs:
         run: |
           test -s app/build/outputs/apk/debug/app-debug.apk
           ls -lh app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: stromruf-debug-apk-${{ github.sha }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
