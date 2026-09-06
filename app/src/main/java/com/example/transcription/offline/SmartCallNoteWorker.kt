@@ -11,74 +11,110 @@ import com.example.repository.StromrufRepository
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 
-/** Sends the local summary, never the WAV file or complete transcript. */
+/** Sends only the local summary to Supabase; WAV and complete transcript remain local. */
 class SmartCallNoteWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val context = applicationContext
         val name = inputData.getString("file") ?: return@withContext Result.success()
         val job = LocalTranscripts.read(context, name)
         if (job.optString("state") != "done") return@withContext Result.success()
-        if (job.optString("syncState") == "done") return@withContext Result.success()
+        if (job.optString("syncState") == "done" && job.optString("followUpState") in setOf("done", "none")) {
+            return@withContext Result.success()
+        }
+
         try {
-            val durationSeconds = (job.optLong("durationMs") / 1000L).coerceAtLeast(0L)
+            val wavDurationSeconds = (job.optLong("durationMs") / 1000L).coerceAtLeast(0L)
+            val callDurationSeconds = job.optLong("callDurationSeconds").coerceAtLeast(0L)
+            val durationSeconds = maxOf(wavDurationSeconds, callDurationSeconds)
+            val transcript = job.optString("text").trim()
+            val nextAction = job.optString("nextAction").trim()
+            val summary = job.optString("summary").ifBlank { GermanCallSummary.create(transcript) }
+            val phone = name.removePrefix("Call_").removeSuffix(".wav")
+                .substringBeforeLast("_").trim().ifBlank { "Unbekannt" }
+
+            job.put("summary", summary)
+                .put("durationSeconds", durationSeconds)
+                .put("syncState", "running")
+                .put("syncMessage", "Notiz und Termin werden automatisch verarbeitet …")
+            LocalTranscripts.write(context, name, job)
+
+            // Follow-up planning is independent from the Supabase note threshold. This is crucial:
+            // even a short call can contain a binding appointment such as "Montag um 15 Uhr".
+            if (job.optString("followUpState") != "done") {
+                val planningText = buildString {
+                    append(transcript)
+                    if (nextAction.isNotBlank()) append("\nNächster Schritt: ").append(nextAction)
+                    if (summary.isNotBlank()) append("\nZusammenfassung: ").append(summary)
+                }
+                val plan = GermanFollowUpPlanner.plan(planningText)
+                if (plan != null) {
+                    val db = AppDatabase.getDatabase(context)
+                    val repository = StromrufRepository(context, db.stromrufDao())
+                    val contact = repository.getContactByPhone(phone)
+                    val followUpId = UUID.nameUUIDFromBytes("smart-call-followup:$name".toByteArray()).toString()
+                    val inserted = repository.insertFollowUp(
+                        FollowUpEntity(
+                            id = followUpId,
+                            contactId = contact?.id,
+                            contactName = contact?.name ?: phone,
+                            contactPhone = phone,
+                            note = "Smart Call: $summary\n${plan.description}",
+                            dueAt = plan.dueAt,
+                            callReason = "Smart Call"
+                        )
+                    )
+                    FollowUpAlarmScheduler.scheduleAlarm(
+                        context,
+                        inserted.id,
+                        inserted.contactName,
+                        inserted.contactPhone,
+                        inserted.dueAt
+                    )
+                    job.put("followUpState", "done")
+                        .put("followUpDueAt", inserted.dueAt)
+                        .put("followUpMessage", "Termin automatisch angelegt")
+                } else {
+                    job.put("followUpState", "none")
+                        .put("followUpMessage", "Kein eindeutiger Rückruftermin erkannt")
+                }
+                LocalTranscripts.write(context, name, job)
+            }
+
+            // Keep the existing >60 s cloud-note policy, but do not block the local automatic
+            // transcript/Gemma/follow-up pipeline when a call is shorter.
             if (durationSeconds <= 60L) {
                 job.put("syncState", "local_only")
-                    .put("syncMessage", "Kurzgespräch: Transkript und Notiz bleiben nur auf diesem Handy")
+                    .put("syncMessage", "Kurzgespräch: Auswertung automatisch abgeschlossen; Cloud-Notiz bleibt lokal")
                 LocalTranscripts.write(context, name, job)
                 return@withContext Result.success()
             }
-            val transcript = job.optString("text").trim()
-            val summary = job.optString("summary").ifBlank { GermanCallSummary.create(transcript) }
-            job.put("summary", summary).put("syncState", "running")
-                .put("syncMessage", "Zusammenfassung wird in Stromruf gespeichert …")
-            LocalTranscripts.write(context, name, job)
 
-            val phone = name.removePrefix("Call_").removeSuffix(".wav")
-                .substringBeforeLast("_").trim().ifBlank { "Unbekannt" }
             val file = LocalTranscripts.recording(context, name)
             val saved = AgentBackend.saveSmartCallNote(
                 context = context,
                 phone = phone,
                 contactId = null,
                 contactName = null,
-                callStartedAt = file.lastModified(),
+                callStartedAt = job.optLong("callStartedAt").takeIf { it > 0L } ?: file.lastModified(),
                 durationSeconds = durationSeconds,
                 summary = summary,
                 sourceFileName = name
             )
             if (saved) {
-                val plan = GermanFollowUpPlanner.plan(transcript)
-                if (plan != null) {
-                    val db = AppDatabase.getDatabase(context)
-                    val repository = StromrufRepository(context, db.stromrufDao())
-                    val contact = repository.getContactByPhone(phone)
-                    val followUpId = UUID.nameUUIDFromBytes("smart-call-followup:$name".toByteArray()).toString()
-                    val inserted = repository.insertFollowUp(FollowUpEntity(
-                        id = followUpId,
-                        contactId = contact?.id,
-                        contactName = contact?.name ?: phone,
-                        contactPhone = phone,
-                        note = "Smart Call: $summary\n${plan.description}",
-                        dueAt = plan.dueAt,
-                        callReason = "Smart Call"
-                    ))
-                    FollowUpAlarmScheduler.scheduleAlarm(context, inserted.id, inserted.contactName, inserted.contactPhone, inserted.dueAt)
-                    job.put("followUpState", "done").put("followUpMessage", "Termin automatisch angelegt")
-                } else {
-                    job.put("followUpState", "none").put("followUpMessage", "Kein eindeutiger Rückruftermin erkannt")
-                }
-                job.put("syncState", "done").put("syncMessage", "Als Smart-Call-Notiz gespeichert")
+                job.put("syncState", "done")
+                    .put("syncMessage", "Als Smart-Call-Notiz gespeichert")
                 LocalTranscripts.write(context, name, job)
                 Result.success()
             } else {
-                job.put("syncState", "pending").put("syncMessage", "Wartet auf Anmeldung oder Internet")
+                job.put("syncState", "pending")
+                    .put("syncMessage", "Wartet auf Anmeldung oder Internet")
                 LocalTranscripts.write(context, name, job)
                 Result.retry()
             }
         } catch (e: Exception) {
-            job.put("syncState", "pending").put("syncMessage", "Speicherung wird erneut versucht")
+            job.put("syncState", "pending")
+                .put("syncMessage", "Automatische Verarbeitung wird erneut versucht")
             LocalTranscripts.write(context, name, job)
             Result.retry()
         }
