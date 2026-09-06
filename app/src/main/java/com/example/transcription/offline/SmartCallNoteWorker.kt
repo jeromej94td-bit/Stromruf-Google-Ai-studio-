@@ -7,6 +7,7 @@ import com.example.database.AppDatabase
 import com.example.database.FollowUpEntity
 import com.example.receiver.FollowUpAlarmScheduler
 import com.example.repository.StromrufRepository
+import com.example.smartretry.SmartRetryManager
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -60,17 +61,22 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                 val plan = GermanFollowUpPlanner.plan(planningText, referenceTime)
                 if (plan != null) {
                     val contact = repository.getContactByPhone(phone)
+                    val dynamicMarkers = buildString {
+                        append("[smart-retry-original-at=").append(plan.originalAppointmentAt).append("]")
+                        plan.windowEndAt?.let { append(" [smart-callback-window-end=").append(it).append("]") }
+                    }
                     val inserted = repository.getFollowUpById(followUpId) ?: repository.insertFollowUp(
                         FollowUpEntity(
                             id = followUpId,
                             contactId = contact?.id ?: job.optString("contactId").takeIf { it.isNotBlank() },
                             contactName = contact?.name ?: job.optString("contactName").ifBlank { phone },
                             contactPhone = phone,
-                            note = "Smart Call: $summary\n${plan.description}",
+                            note = "$dynamicMarkers\nSmart Call: $summary\n${plan.description}",
                             dueAt = plan.dueAt,
                             callReason = "Smart Call"
                         ), preserveExactTime = true, syncImmediately = false
                     )
+                    SmartRetryManager.registerAppointment(context, repository, inserted)
                     FollowUpAlarmScheduler.scheduleAlarm(
                         context,
                         inserted.id,
@@ -80,7 +86,7 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                     )
                     job.put("followUpState", "done")
                         .put("followUpDueAt", inserted.dueAt)
-                        .put("followUpMessage", "Termin automatisch angelegt")
+                        .put("followUpMessage", if (plan.windowEndAt != null) "R?ckruf-Zeitfenster automatisch in dynamische Hotbox eingeplant" else "Termin automatisch in dynamische Hotbox eingeplant")
                 } else {
                     job.put("followUpState", "none")
                         .put("followUpMessage", "Kein eindeutiger Rückruftermin erkannt")
