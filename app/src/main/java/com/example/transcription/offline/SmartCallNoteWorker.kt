@@ -3,7 +3,6 @@ package com.example.transcription.offline
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import com.example.agent.AgentBackend
 import com.example.database.AppDatabase
 import com.example.database.FollowUpEntity
 import com.example.receiver.FollowUpAlarmScheduler
@@ -12,7 +11,11 @@ import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Sends only the local summary to Supabase; WAV and complete transcript remain local. */
+/**
+ * Completes every Smart Call automatically:
+ * summary -> follow-up planning -> Supabase summary sync.
+ * WAV and complete transcript stay local.
+ */
 class SmartCallNoteWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val context = applicationContext
@@ -39,9 +42,8 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                 .put("syncMessage", "Notiz und Termin werden automatisch verarbeitet …")
             LocalTranscripts.write(context, name, job)
 
-            // Follow-up planning is independent from the Supabase note threshold. This is crucial:
-            // even a short call can contain a binding appointment such as "Montag um 15 Uhr".
-            if (job.optString("followUpState") != "done") {
+            // Plan a follow-up independently of call duration or cloud sync success.
+            if (job.optString("followUpState") !in setOf("done", "none")) {
                 val planningText = buildString {
                     append(transcript)
                     if (nextAction.isNotBlank()) append("\nNächster Schritt: ").append(nextAction)
@@ -81,17 +83,8 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                 LocalTranscripts.write(context, name, job)
             }
 
-            // Keep the existing >60 s cloud-note policy, but do not block the local automatic
-            // transcript/Gemma/follow-up pipeline when a call is shorter.
-            if (durationSeconds <= 60L) {
-                job.put("syncState", "local_only")
-                    .put("syncMessage", "Kurzgespräch: Auswertung automatisch abgeschlossen; Cloud-Notiz bleibt lokal")
-                LocalTranscripts.write(context, name, job)
-                return@withContext Result.success()
-            }
-
             val file = LocalTranscripts.recording(context, name)
-            val saved = AgentBackend.saveSmartCallNote(
+            val saved = SmartCallSupabaseSync.saveSummary(
                 context = context,
                 phone = phone,
                 contactId = null,
@@ -101,9 +94,10 @@ class SmartCallNoteWorker(context: Context, params: WorkerParameters) : Coroutin
                 summary = summary,
                 sourceFileName = name
             )
+
             if (saved) {
                 job.put("syncState", "done")
-                    .put("syncMessage", "Als Smart-Call-Notiz gespeichert")
+                    .put("syncMessage", "Als Smart-Call-Notiz in Supabase gespeichert")
                 LocalTranscripts.write(context, name, job)
                 Result.success()
             } else {
