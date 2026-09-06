@@ -10,13 +10,13 @@ import java.util.concurrent.TimeUnit
 
 /** Separate from Gemini's summary cache: a transcript is not a conversation summary. */
 object LocalTranscripts {
-    // Quality-first local model for German phone calls. Small q5_1 is substantially
-    // more accurate than tiny/base while remaining practical on current high-end phones.
+    // Quality-first local fallback model for German phone calls.
     const val MODEL_SIZE = 190085487L
     const val MODEL_SHA = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"
     const val MODEL_NAME = "ggml-small-q5_1.bin"
     private val LEGACY_MODEL_NAMES = listOf("ggml-tiny-q5_1.bin", "ggml-base-q5_1.bin")
     const val QUEUE = "smartcalls-local-german"
+    const val PRIMARY_QUEUE = "smartcalls-primary-transcription"
     const val DOWNLOAD = "smartcalls-whisper-model"
     const val NOTE_SYNC_QUEUE = "smartcalls-summary-sync"
     fun directory(context: Context) = File(context.noBackupFilesDir, "local_transcription").apply { mkdirs() }
@@ -45,9 +45,9 @@ object LocalTranscripts {
     }
 
     @Synchronized fun modelStatus(context: Context): String {
-        val saved = readJson(File(directory(context), "model.json")).optString("status", "Modell noch nicht geladen")
+        val saved = readJson(File(directory(context), "model.json")).optString("status", "Lokales Fallback-Modell noch nicht geladen")
         return if (!ready(context) && saved.startsWith("Bereit"))
-            "Qualitätsmodell muss einmal geladen werden"
+            "Lokales Fallback-Modell muss einmal geladen werden"
         else saved
     }
 
@@ -63,6 +63,10 @@ object LocalTranscripts {
         }
     }
 
+    /**
+     * Main entry point. Groq Whisper Large v3 is attempted first. If no Groq key is configured
+     * or the cloud request fails, PrimaryTranscriptionWorker falls back to local Whisper Small.
+     */
     @Synchronized fun request(context: Context, file: File) {
         val audio = recording(context, file.name)
         val previous = read(context, file.name)
@@ -72,18 +76,33 @@ object LocalTranscripts {
         val value = if (unchanged) previous else JSONObject()
             .put("file", audio.name).put("size", audio.length()).put("modified", audio.lastModified())
             .put("nextMs", 0L).put("text", "")
-        value.put("state", "pending").put("message", if (ready(context)) "Wartet auf Verarbeitung" else "Wartet auf Modelldownload")
+        value.put("state", "pending")
+            .put("message", "Wartet auf Groq Whisper Large v3")
+            .put("transcriptionSource", "pending")
         write(context, file.name, value)
-        if (ready(context)) enqueue(context, file.name) else download(context)
+        enqueuePrimary(context, file.name)
     }
 
+    fun enqueuePrimary(context: Context, name: String) {
+        val request = OneTimeWorkRequestBuilder<PrimaryTranscriptionWorker>()
+            .setInputData(workDataOf("file" to name))
+            .setConstraints(Constraints.Builder().build())
+            .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.SECONDS)
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "$PRIMARY_QUEUE-${id(name)}",
+            ExistingWorkPolicy.REPLACE,
+            request
+        )
+    }
+
+    /** Local Whisper fallback only. */
     fun enqueue(context: Context, name: String) {
         val request = OneTimeWorkRequestBuilder<WhisperWorker>()
             .setInputData(workDataOf("file" to name))
             .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(true).build())
             .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.SECONDS)
             .build()
-        // One global chain bounds CPU/RAM. Workers also skip already completed files.
         WorkManager.getInstance(context).enqueueUniqueWork(QUEUE, ExistingWorkPolicy.APPEND_OR_REPLACE, request)
     }
 
@@ -95,7 +114,7 @@ object LocalTranscripts {
     fun download(context: Context) {
         if (ready(context)) { resume(context); return }
         LEGACY_MODEL_NAMES.forEach { File(directory(context), it).delete() }
-        modelStatus(context, "Whisper Qualitätsmodell wird vorbereitet …")
+        modelStatus(context, "Whisper Small Fallback wird vorbereitet …")
         WorkManager.getInstance(context).enqueueUniqueWork(DOWNLOAD, ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<WhisperModelWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
@@ -103,13 +122,15 @@ object LocalTranscripts {
     }
 
     fun resume(context: Context) {
-        if (!ready(context)) return
         directory(context).listFiles()?.filter { it.name.startsWith("job_") && it.extension == "json" }
             ?.forEach { file ->
                 val value = readJson(file)
                 val name = value.optString("file")
-                if (name.isNotBlank() && value.optString("state") in setOf("pending", "running")) enqueue(context, name)
-                else if (name.isNotBlank() && value.optString("state") == "done" && value.optString("syncState") != "done") enqueueNoteSync(context, name)
+                if (name.isBlank()) return@forEach
+                when (value.optString("state")) {
+                    "pending", "running" -> enqueuePrimary(context, name)
+                    "done" -> if (value.optString("syncState") != "done") enqueueNoteSync(context, name)
+                }
             }
     }
 }
