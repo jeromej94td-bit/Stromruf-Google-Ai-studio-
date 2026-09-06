@@ -63,7 +63,6 @@ object LocalTranscripts {
         }
     }
 
-    /** Groq Whisper Large v3 is always attempted first; local Whisper is fallback only. */
     @Synchronized fun request(
         context: Context,
         file: File,
@@ -78,7 +77,7 @@ object LocalTranscripts {
             if (callDurationSeconds > 0) previous.put("callDurationSeconds", maxOf(previous.optInt("callDurationSeconds"), callDurationSeconds))
             if (callStartedAt > 0L) previous.put("callStartedAt", callStartedAt)
             write(context, file.name, previous)
-            if (previous.optString("syncState") != "done") enqueueNoteSync(context, file.name)
+            if (previous.optString("syncState") !in setOf("done", "local_only")) enqueueNoteSync(context, file.name)
             return
         }
         val value = if (unchanged) previous else JSONObject()
@@ -152,7 +151,7 @@ object LocalTranscripts {
                 if (name.isBlank()) return@forEach
                 when (value.optString("state")) {
                     "pending", "running" -> enqueuePrimary(context, name)
-                    "done" -> if (value.optString("syncState") != "done") enqueueNoteSync(context, name)
+                    "done" -> if (value.optString("syncState") !in setOf("done", "local_only")) enqueueNoteSync(context, name)
                 }
             }
     }
