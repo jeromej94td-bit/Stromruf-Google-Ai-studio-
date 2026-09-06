@@ -7,6 +7,7 @@ import com.example.transcription.offline.LocalTranscripts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.linphone.core.Call
 import org.linphone.core.CallParams
@@ -20,8 +21,7 @@ import java.util.Locale
  *
  * It never registers a SIP account, never changes TLS/SRTP/registrar settings and never owns
  * a Linphone Core. It is armed only by the "Smart-Anruf" button and adds recording + post-call
- * processing to that one call. Normal SIP calls are therefore byte-for-byte equivalent in their
- * signaling path when this sidecar is not armed.
+ * processing to that one call.
  */
 object HomeSipSmartAutomation {
     private const val TAG = "SmartCallFlow"
@@ -34,6 +34,7 @@ object HomeSipSmartAutomation {
         val armedAt: Long,
         var recordingFile: File? = null,
         var recordingStarted: Boolean = false,
+        var connectedAt: Long = 0L,
         var maxDurationSeconds: Int = 0
     )
 
@@ -77,6 +78,9 @@ object HomeSipSmartAutomation {
 
         when (state) {
             Call.State.StreamsRunning -> {
+                synchronized(this) {
+                    if (session?.connectedAt == 0L) session?.connectedAt = System.currentTimeMillis()
+                }
                 if (current.recordingFile != null && !current.recordingStarted) {
                     runCatching { call.startRecording() }
                         .onFailure { Log.w(TAG, "Linphone-Aufnahme konnte nicht gestartet werden", it) }
@@ -112,14 +116,40 @@ object HomeSipSmartAutomation {
         }
 
         val file = finished.recordingFile ?: return
-        if (!file.exists() || file.length() <= 44L) return
+        val fallbackDuration = if (finished.connectedAt > 0L) {
+            ((System.currentTimeMillis() - finished.connectedAt) / 1000L).toInt().coerceAtLeast(0)
+        } else 0
+        val reliableDuration = maxOf(finished.maxDurationSeconds, fallbackDuration)
+        val callStartedAt = finished.connectedAt.takeIf { it > 0L } ?: finished.armedAt
 
         scope.launch {
+            // Linphone can still be flushing the WAV when Released arrives. Wait until the file
+            // exists and its size has stopped changing before handing it to Whisper.
+            var previousSize = -1L
+            var stableChecks = 0
+            repeat(12) {
+                if (file.exists() && file.length() > 44L) {
+                    val size = file.length()
+                    stableChecks = if (size == previousSize) stableChecks + 1 else 0
+                    previousSize = size
+                    if (stableChecks >= 2) return@repeat
+                }
+                delay(500)
+            }
+
+            if (!file.exists() || file.length() <= 44L) {
+                Log.e(TAG, "Smart-Call-Aufnahme ist nach dem Auflegen nicht lesbar: ${file.name}")
+                return@launch
+            }
+
             runCatching {
-                // LocalTranscripts automatically uses an already installed Whisper model and
-                // falls back to downloading the pinned local model only when it is actually absent.
-                LocalTranscripts.request(context, file)
-            }.onFailure { Log.e(TAG, "Whisper-Workflow konnte nicht eingeplant werden", it) }
+                LocalTranscripts.request(
+                    context = context,
+                    file = file,
+                    callDurationSeconds = reliableDuration,
+                    callStartedAt = callStartedAt
+                )
+            }.onFailure { Log.e(TAG, "Whisper-Workflow konnte nicht automatisch eingeplant werden", it) }
 
             runCatching {
                 val storage = RecordingStorageManager(context)
