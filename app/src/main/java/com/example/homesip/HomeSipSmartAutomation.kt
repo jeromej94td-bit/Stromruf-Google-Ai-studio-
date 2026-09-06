@@ -20,10 +20,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
-/**
- * Sidecar around the Gold-Master HomeSipTrunk.
- * It does not own SIP registration/signaling and does not alter TLS/SRTP settings.
- */
+/** Sidecar around the Gold-Master HomeSipTrunk. SIP registration/signaling stays untouched. */
 object HomeSipSmartAutomation {
     private const val TAG = "SmartCallFlow"
     private const val ARM_TTL_MS = 2 * 60 * 1000L
@@ -85,6 +82,10 @@ object HomeSipSmartAutomation {
             }
             Call.State.Error, Call.State.End -> {
                 if (current.recordingStarted && call.isRecording) runCatching { call.stopRecording() }
+                // Linphone usually emits End before Released. HomeSipTrunk clears activeCall on End,
+                // therefore Released can be filtered by the Gold-Master listener. Finalize here as
+                // the primary trigger and keep Released below only as a harmless fallback.
+                finalizeRecording(context.applicationContext, call)
             }
             Call.State.Released -> finalizeRecording(context.applicationContext, call)
             else -> Unit
@@ -94,6 +95,7 @@ object HomeSipSmartAutomation {
     @Synchronized
     fun cancelPrepared() { session = null }
 
+    /** Idempotent because the first caller atomically takes and clears the current session. */
     private fun finalizeRecording(context: Context, call: Call) {
         val finished = synchronized(this) {
             val current = session ?: return
@@ -113,9 +115,6 @@ object HomeSipSmartAutomation {
         val file = finished.recordingFile
 
         scope.launch {
-            // Smart SIP calls do not necessarily appear in Android's system call log. Persist one
-            // deterministic app call log so a scheduled Smart-Call callback can reliably advance
-            // its retry chain even when the customer never answers and no WAV is produced.
             runCatching {
                 val repository = StromrufRepository(
                     context,
@@ -141,8 +140,6 @@ object HomeSipSmartAutomation {
                 )
             }.onFailure { Log.w(TAG, "Smart-Call-Status konnte nicht gespeichert werden", it) }
 
-            // No answer means there is intentionally no usable recording. The call-log hook above
-            // is still enough to create the next Hotbox retry.
             if (file == null) return@launch
 
             var previousSize = -1L
@@ -170,7 +167,7 @@ object HomeSipSmartAutomation {
                     callDurationSeconds = reliableDuration,
                     callStartedAt = callStartedAt
                 )
-            }.onFailure { Log.e(TAG, "Whisper-Workflow konnte nicht automatisch eingeplant werden", it) }
+            }.onFailure { Log.e(TAG, "Transkriptions-Workflow konnte nicht automatisch eingeplant werden", it) }
 
             runCatching {
                 val storage = RecordingStorageManager(context)
