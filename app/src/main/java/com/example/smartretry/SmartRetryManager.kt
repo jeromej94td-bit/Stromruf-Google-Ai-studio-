@@ -43,7 +43,6 @@ object SmartRetryManager {
     private const val DUPLICATE_CALL_WINDOW_MS = 90L * 1000L
     private const val APPOINTMENT_MATCH_EARLY_MS = 3L * 60L * 60L * 1000L
     private const val APPOINTMENT_MATCH_LATE_MS = 2L * 24L * 60L * 60L * 1000L
-    private const val NEXT_DAY_HOUR = 10
     private const val LATEST_SAME_DAY_HOUR = 20
     private const val RETRY_REASON = "Smart Retry"
     private const val DEFAULT_HOTBOX = "Hotbox"
@@ -90,59 +89,41 @@ object SmartRetryManager {
             val fired = repository.getFollowUpById(followUpId) ?: return@withLock
             if (fired.isCompleted || !isSmartTracked(fired)) return@withLock
 
-            val phone = fired.contactPhone
-            val targetId = retryId(phone)
-            val existingRetry = repository.getFollowUpById(targetId)?.takeUnless { it.isCompleted }
-            val attempt = existingRetry?.let { attemptFrom(it.note) }
-                ?: attemptFrom(fired.note)
-
+            // A f?lliger Smart-Call-Termin bleibt ?berf?llig und damit ganz oben in der
+            // dynamischen Hotbox, bis wirklich angerufen wurde. Nur ein tats?chlicher
+            // "nicht erreicht"-Call erzeugt einen Retry.
             ensureHotBox(
                 context = context,
                 repository = repository,
-                phone = phone,
+                phone = fired.contactPhone,
                 fallbackName = fired.contactName,
-                attempt = attempt,
+                attempt = attemptFrom(fired.note),
                 lastOutcome = null,
                 lastCallAt = null,
-                active = attempt < MAX_MISSED_ATTEMPTS
+                active = true
             )
+            syncPriority(context, fired, "hoch")
+        }
+    }
 
-            if (attempt >= MAX_MISSED_ATTEMPTS) {
-                if (!fired.isCompleted) repository.updateFollowUpStatus(fired.id, true)
-                if (existingRetry != null && existingRetry.id != fired.id) {
-                    repository.updateFollowUpStatus(existingRetry.id, true)
-                }
-                FollowUpAlarmScheduler.cancelAlarm(context, fired.id)
-                FollowUpAlarmScheduler.cancelAlarm(context, targetId)
-                return@withLock
-            }
-
-            // If this is the original Gemma appointment, close it and switch to the single,
-            // deterministic retry id. If it already is the retry id we simply move that row.
-            if (fired.id != targetId) {
-                repository.updateFollowUpStatus(fired.id, true)
-                FollowUpAlarmScheduler.cancelAlarm(context, fired.id)
-            }
-
-            val base = existingRetry ?: fired
-            val due = nextDue(
-                from = maxOf(System.currentTimeMillis(), firedDueAt),
-                attempt = attempt,
-                afterActualMiss = false
-            )
-            saveRetry(
+    /** Marks a newly detected Smart-Call appointment as dynamically Hotbox-eligible immediately. */
+    suspend fun registerAppointment(
+        context: Context,
+        repository: StromrufRepository,
+        followUp: FollowUpEntity
+    ) {
+        mutex.withLock {
+            ensureHotBox(
                 context = context,
                 repository = repository,
-                base = base,
-                retryId = targetId,
-                attempt = attempt,
-                lastAttemptAt = lastAttemptAt(existingRetry?.note ?: fired.note),
-                dueAt = due,
-                message = if (attempt == 0)
-                    "Vereinbarter Rückruf noch offen – automatisch weiter im Blick"
-                else
-                    "Nicht erreicht – automatischer Nachfassversuch ${attempt + 1}/$MAX_MISSED_ATTEMPTS"
+                phone = followUp.contactPhone,
+                fallbackName = followUp.contactName,
+                attempt = 0,
+                lastOutcome = null,
+                lastCallAt = null,
+                active = true
             )
+            syncPriority(context, followUp, "hoch")
         }
     }
 
@@ -192,7 +173,8 @@ object SmartRetryManager {
                 note = noteFor(
                     attempt = attempt,
                     lastAttemptAt = callLog.timestamp,
-                    message = "8-mal hintereinander nicht erreicht – automatische Nachverfolgung beendet"
+                    message = "8-mal hintereinander nicht erreicht – automatische Nachverfolgung beendet",
+                    originalAppointmentAt = originalAppointmentAt(currentRetry?.note).takeIf { it > 0L } ?: appointment.dueAt
                 ),
                 dueAt = callLog.timestamp,
                 isCompleted = true,
@@ -205,7 +187,9 @@ object SmartRetryManager {
         }
 
         val base = currentRetry ?: appointment
-        val due = nextDue(callLog.timestamp, attempt, afterActualMiss = true)
+        val originalAppointmentAt = originalAppointmentAt(currentRetry?.note)
+            .takeIf { it > 0L } ?: originalAppointmentAt(appointment.note).takeIf { it > 0L } ?: appointment.dueAt
+        val due = nextDue(callLog.timestamp, attempt, originalAppointmentAt)
         saveRetry(
             context = context,
             repository = repository,
@@ -249,14 +233,15 @@ object SmartRetryManager {
         attempt: Int,
         lastAttemptAt: Long,
         dueAt: Long,
-        message: String
+        message: String,
+        originalAppointmentAt: Long = originalAppointmentAt(base.note).takeIf { it > 0L } ?: base.dueAt
     ) {
         val row = FollowUpEntity(
             id = retryId,
             contactId = base.contactId,
             contactName = base.contactName,
             contactPhone = base.contactPhone,
-            note = noteFor(attempt, lastAttemptAt, message),
+            note = noteFor(attempt, lastAttemptAt, message, originalAppointmentAt),
             dueAt = dueAt,
             isCompleted = false,
             callReason = RETRY_REASON
@@ -386,9 +371,18 @@ object SmartRetryManager {
     private fun lastAttemptAt(note: String?): Long = Regex("smart-retry-last-at=(\\d+)")
         .find(note.orEmpty())?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
 
-    private fun noteFor(attempt: Int, lastAttemptAt: Long, message: String): String = buildString {
+    private fun originalAppointmentAt(note: String?): Long = Regex("smart-retry-original-at=(\\d+)")
+        .find(note.orEmpty())?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
+
+    private fun noteFor(
+        attempt: Int,
+        lastAttemptAt: Long,
+        message: String,
+        originalAppointmentAt: Long
+    ): String = buildString {
         append("[smart-retry-attempt=").append(attempt).append("] ")
-        append("[smart-retry-last-at=").append(lastAttemptAt).append("]\n")
+        append("[smart-retry-last-at=").append(lastAttemptAt).append("] ")
+        append("[smart-retry-original-at=").append(originalAppointmentAt).append("]\n")
         append(message)
     }
 
@@ -399,26 +393,31 @@ object SmartRetryManager {
         return cleaned.takeIf { it.isNotBlank() }
     }
 
-    private fun nextDue(from: Long, attempt: Int, afterActualMiss: Boolean): Long {
-        if (afterActualMiss && attempt > 0 && attempt % 3 == 0) {
-            return nextDayAtTen(from)
+    private fun nextDue(from: Long, attempt: Int, originalAppointmentAt: Long): Long {
+        // 1. Nichterreichen: +2h. 2. Nichterreichen: n?chster Tag zur urspr?nglich
+        // vereinbarten Uhrzeit. Danach wiederholt sich dieses 2-Stufen-Muster.
+        if (attempt > 0 && attempt % 2 == 0) {
+            return nextDayAtOriginalTime(from, originalAppointmentAt)
         }
         val candidate = from + TWO_HOURS_MS
         val cal = Calendar.getInstance().apply { timeInMillis = candidate }
         if (cal.get(Calendar.HOUR_OF_DAY) >= LATEST_SAME_DAY_HOUR) {
-            return nextDayAtTen(from)
+            return nextDayAtOriginalTime(from, originalAppointmentAt)
         }
         return candidate
     }
 
-    private fun nextDayAtTen(from: Long): Long = Calendar.getInstance().apply {
-        timeInMillis = from
-        add(Calendar.DAY_OF_YEAR, 1)
-        set(Calendar.HOUR_OF_DAY, NEXT_DAY_HOUR)
-        set(Calendar.MINUTE, 0)
-        set(Calendar.SECOND, 0)
-        set(Calendar.MILLISECOND, 0)
-    }.timeInMillis
+    private fun nextDayAtOriginalTime(from: Long, originalAppointmentAt: Long): Long {
+        val original = Calendar.getInstance().apply { timeInMillis = originalAppointmentAt }
+        return Calendar.getInstance().apply {
+            timeInMillis = from
+            add(Calendar.DAY_OF_YEAR, 1)
+            set(Calendar.HOUR_OF_DAY, original.get(Calendar.HOUR_OF_DAY))
+            set(Calendar.MINUTE, original.get(Calendar.MINUTE))
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    }
 
     private fun repository(context: Context): StromrufRepository = StromrufRepository(
         context.applicationContext,

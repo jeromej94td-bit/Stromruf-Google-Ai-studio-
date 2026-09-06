@@ -19,6 +19,7 @@ import com.example.util.OpenAiClient
 import com.example.util.CustomerMailSender
 import com.example.database.CustomerMessageEntity
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
 import java.util.*
 
 data class CustomerMessageDraftState(
@@ -456,9 +457,51 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         _selectedHotBoxListName.value = next.firstOrNull() ?: name
     }
 
+    private fun isDynamicHotBoxFollowUp(followUp: FollowUpEntity): Boolean {
+        val reason = followUp.callReason.orEmpty().lowercase(Locale.GERMAN)
+        return reason.contains("smart call") || reason.contains("smart retry")
+    }
+
+    private fun queuePhoneKey(phone: String): String {
+        var digits = phone.filter { it.isDigit() || it == '+' }
+        if (digits.startsWith("0049")) digits = "+49" + digits.drop(4)
+        if (digits.startsWith("0") && !digits.startsWith("00")) digits = "+49" + digits.drop(1)
+        return digits
+    }
+
+    private fun dueDynamicContact(
+        allContacts: List<ContactEntity>,
+        followUps: List<FollowUpEntity>,
+        now: Long
+    ): ContactEntity? {
+        val due = followUps
+            .asSequence()
+            .filter { isDynamicHotBoxFollowUp(it) && it.dueAt <= now }
+            .sortedBy { it.dueAt }
+            .toList()
+        return due.firstNotNullOfOrNull { followUp ->
+            val key = queuePhoneKey(followUp.contactPhone)
+            allContacts.firstOrNull { queuePhoneKey(it.phone) == key }
+        }
+    }
+
     private fun setupHotBoxQueueObservers() {
         viewModelScope.launch {
-            combine(contacts, _selectedHotBoxListNames) { allContacts, activeLists ->
+            val clock = flow {
+                while (currentCoroutineContext().isActive) {
+                    emit(System.currentTimeMillis())
+                    delay(15_000L)
+                }
+            }
+            combine(contacts, _selectedHotBoxListNames, activeFollowUps, clock) { allContacts, activeLists, followUps, now ->
+                // F?llige Smart-Call-/Smart-Retry-Termine ?bersteuern die normale Hotbox.
+                // Damit kann der Nutzer den ganzen Tag in derselben Hotbox bleiben.
+                val dynamic = dueDynamicContact(allContacts, followUps, now)
+                if (dynamic != null) {
+                    _nextHotBoxContactId.value = dynamic.id
+                    return@combine
+                }
+
                 val hotContacts = allContacts.filter { contact ->
                     contact.isHotBox && getEffectiveHotBoxListName(contact.hotBoxListName) in activeLists
                 }
@@ -469,38 +512,23 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
                     val weekdaysStr = contact.hotBoxWeekdays
                     if (!weekdaysStr.isNullOrEmpty()) {
                         val daysList = weekdaysStr.split(",").mapNotNull { it.trim().toIntOrNull() }
-                        if (daysList.isNotEmpty() && currentDay !in daysList) {
-                            return@filter false
-                        }
+                        if (daysList.isNotEmpty() && currentDay !in daysList) return@filter false
                     }
-
                     val start = contact.hotBoxStartHour
                     val end = contact.hotBoxEndHour
                     if (start != null && end != null) {
-                        if (start <= end) {
-                            currentHour in start..end
-                        } else {
-                            currentHour >= start || currentHour <= end
-                        }
-                    } else {
-                        true
-                    }
+                        if (start <= end) currentHour in start..end else currentHour >= start || currentHour <= end
+                    } else true
                 }
-                val contactsToUse = if (activeHotContacts.isNotEmpty()) {
-                    activeHotContacts
-                } else {
-                    hotContacts
-                }
+                val contactsToUse = if (activeHotContacts.isNotEmpty()) activeHotContacts else hotContacts
                 val uncalled = contactsToUse.filter { !it.hasBeenCalledInHotCycle }
                 val nextId = _nextHotBoxContactId.value
                 val stillValid = uncalled.any { it.id == nextId }
                 if (!stillValid) {
-                    if (uncalled.isNotEmpty()) {
-                        _nextHotBoxContactId.value = uncalled.random().id
-                    } else if (contactsToUse.isNotEmpty()) {
-                        _nextHotBoxContactId.value = contactsToUse.random().id
-                    } else {
-                        _nextHotBoxContactId.value = null
+                    _nextHotBoxContactId.value = when {
+                        uncalled.isNotEmpty() -> uncalled.random().id
+                        contactsToUse.isNotEmpty() -> contactsToUse.random().id
+                        else -> null
                     }
                 }
             }.collect {}
@@ -1767,6 +1795,15 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
         viewModelScope.launch {
             val allCurrentContacts = contacts.value
             val activeLists = _selectedHotBoxListNames.value
+
+            // Dynamic appointment queue always wins over the normal/random Hotbox queue.
+            val dynamic = dueDynamicContact(allCurrentContacts, activeFollowUps.value, System.currentTimeMillis())
+            if (dynamic != null) {
+                repository.insertContact(dynamic.copy(hasBeenCalledInHotCycle = true))
+                initiateCall(dynamic.phone, dynamic.name, dynamic.id, callType = "hotbox")
+                return@launch
+            }
+
             var hotContacts = allCurrentContacts.filter { contact ->
                 contact.isHotBox && (activeLists.isEmpty() || getEffectiveHotBoxListName(contact.hotBoxListName) in activeLists)
             }

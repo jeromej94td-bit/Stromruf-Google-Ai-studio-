@@ -174,6 +174,7 @@ fun OfflineRecordingTranscript(file: File) {
     val scope = rememberCoroutineScope()
     var snapshot by remember(file.name) { mutableStateOf(JSONObject()) }
     var showText by remember(file.name) { mutableStateOf(false) }
+    var showSummary by remember(file.name) { mutableStateOf(false) }
     var showCustomerText by remember(file.name) { mutableStateOf(false) }
     var localError by remember(file.name) { mutableStateOf<String?>(null) }
 
@@ -216,8 +217,9 @@ fun OfflineRecordingTranscript(file: File) {
         }
         snapshot.optString("syncMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         snapshot.optString("followUpMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-        snapshot.optString("summary").takeIf { it.isNotBlank() }?.let {
-            Text("Zusammenfassung: $it", style = MaterialTheme.typography.bodySmall, maxLines = 8)
+        snapshot.optString("summary").takeIf { it.isNotBlank() }?.let { summary ->
+            Text("Zusammenfassung: $summary", style = MaterialTheme.typography.bodySmall, maxLines = 8)
+            TextButton(onClick = { showSummary = true }) { Text("Zusammenfassung vollst?ndig ?ffnen") }
         }
         snapshot.optString("nextAction").takeIf { it.isNotBlank() }?.let {
             Text("Nächster Schritt: $it", style = MaterialTheme.typography.bodySmall)
@@ -252,6 +254,26 @@ fun OfflineRecordingTranscript(file: File) {
                 }
             }
         }
+    }
+
+
+    if (showSummary) {
+        val summary = snapshot.optString("summary")
+        AlertDialog(
+            onDismissRequest = { showSummary = false },
+            title = { Text("Vollst?ndige Zusammenfassung") },
+            text = {
+                SelectionContainer {
+                    Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState())) {
+                        Text(summary)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { copySmartCallText(context, "Zusammenfassung", summary) }) { Text("Kopieren") }
+            },
+            confirmButton = { TextButton(onClick = { showSummary = false }) { Text("Schlie?en") } }
+        )
     }
 
     if (showText) AlertDialog(
