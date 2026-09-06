@@ -17,7 +17,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,10 +54,14 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
     val recordings by produceState(initialValue = emptyList<File>(), context) {
         while (true) {
             val folder = File(context.filesDir, "smart_calls_recordings")
-            value = folder.listFiles()
+            val files = folder.listFiles()
                 ?.filter { it.isFile && it.extension.equals("wav", ignoreCase = true) }
                 ?.sortedByDescending { it.lastModified() }
                 .orEmpty()
+            value = files
+            // Extra safety net: if a WAV arrives from any recorder/import path while this tab is
+            // open, Groq processing starts automatically even if no SIP lifecycle callback fired.
+            withContext(Dispatchers.IO) { LocalTranscripts.scanExisting(context) }
             delay(2_000)
         }
     }
@@ -70,6 +73,7 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
 
     LaunchedEffect(Unit) {
         groqKey = withContext(Dispatchers.IO) { settings.getGroqKey().orEmpty() }
+        withContext(Dispatchers.IO) { LocalTranscripts.scanExisting(context) }
         remoteNotes = withContext(Dispatchers.IO) { AgentBackend.fetchSmartCallNotes(context, 50) }
         notesLoading = false
     }
@@ -83,7 +87,7 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
                 Text("Smart Calls", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Aufnahme → Groq Whisper Large v3 → lokales Whisper-Fallback → Gemma → Zusammenfassung & Termin → Supabase",
+                    "Aufnahme → automatisch Groq Whisper Large v3 → Gemma → Dokumentation, Kundenfassung & Termin → Supabase",
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
@@ -93,7 +97,7 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Groq Whisper Large v3", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Haupttranskriptor für Smart Calls. Der Schlüssel wird verschlüsselt auf dem Gerät gespeichert.", style = MaterialTheme.typography.bodySmall)
+                    Text("Haupttranskriptor für Smart Calls. Vorhandene und neu eintreffende WAV-Dateien werden automatisch verarbeitet. Der Schlüssel wird verschlüsselt auf dem Gerät gespeichert.", style = MaterialTheme.typography.bodySmall)
                     OutlinedTextField(
                         value = groqKey,
                         onValueChange = { groqKey = it; groqSaved = false },
@@ -107,6 +111,7 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
                         Button(onClick = {
                             settings.saveGroqKey(groqKey)
                             groqSaved = true
+                            scope.launch(Dispatchers.IO) { LocalTranscripts.scanExisting(context) }
                         }) { Text("API-Key speichern") }
                         if (groqKey.isNotBlank()) {
                             OutlinedButton(onClick = {
@@ -118,7 +123,7 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
                     }
                     Text(
                         when {
-                            groqSaved -> "✓ Groq-Key gespeichert"
+                            groqSaved -> "✓ Groq-Key gespeichert · wartende Aufnahmen werden gestartet"
                             groqKey.isNotBlank() -> "Groq ist konfiguriert"
                             else -> "Kein Groq-Key: die App nutzt automatisch lokales Whisper als Fallback"
                         },
@@ -139,7 +144,7 @@ fun SmartGespracheTab(modifier: Modifier = Modifier) {
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Text(
-                        "Noch keine Smart-Call-Aufnahmen oder Zusammenfassungen vorhanden. Nach dem nächsten Smart-Anruf erscheinen sie automatisch hier.",
+                        "Noch keine Smart-Call-Aufnahmen oder Zusammenfassungen vorhanden. Neue Aufnahmen werden automatisch erkannt und verarbeitet.",
                         modifier = Modifier.padding(16.dp),
                         style = MaterialTheme.typography.bodyMedium
                     )
