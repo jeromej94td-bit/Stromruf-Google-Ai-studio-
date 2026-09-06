@@ -152,7 +152,7 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
     }
 
     private fun core(): Core = core ?: Factory.instance().run {
-        val config = createConfigFromString("[sip]\nstore_auth_info=0\n")
+        val config = createConfigFromString("[sip]\\nstore_auth_info=0\\n")
         createCoreWithConfig(config, appContext).also { created ->
             core = created
             created.addListener(listener)
