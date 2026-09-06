@@ -53,7 +53,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
                                 output.write(buffer, 0, count)
                                 val percent = (total * 100 / LocalTranscripts.MODEL_SIZE).toInt()
                                 if (percent != lastPercent) {
-                                    LocalTranscripts.modelStatus(context, "Deutsch-Modell wird geladen: $percent %")
+                                    LocalTranscripts.modelStatus(context, "Schnelles Whisper-Fallback wird geladen: $percent %")
                                     lastPercent = percent
                                 }
                             }
@@ -76,7 +76,7 @@ class WhisperModelWorker(context: Context, params: WorkerParameters) : Coroutine
             val target = LocalTranscripts.model(context)
             if (target.exists()) target.delete()
             check(partial.renameTo(target)) { "Modell konnte nicht gespeichert werden" }
-            LocalTranscripts.modelStatus(context, "Bereit · Whisper Base · Deutsch · offline")
+            LocalTranscripts.modelStatus(context, "Bereit · Whisper Base q5_1 · Deutsch · offline")
             LocalTranscripts.resume(context)
             Result.success()
         } catch (e: CancellationException) { throw e }
@@ -106,7 +106,7 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
         val job = LocalTranscripts.read(context, name)
         if (job.optString("state") == "done") return@withContext Result.success()
         if (!LocalTranscripts.ready(context)) {
-            job.put("state", "pending").put("message", "Wartet auf schnelles Deutsch-Modell")
+            job.put("state", "pending").put("message", "Wartet auf schnelles Whisper-Fallback")
             LocalTranscripts.write(context, name, job)
             return@withContext Result.success()
         }
@@ -131,24 +131,37 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                     ensureActive()
                     if (isStopped) throw CancellationException()
                     if (callActive()) {
-                        job.put("state", "pending").put("message", "Pausiert während eines Telefonats")
+                        job.put("state", "pending").put("message", "Pausiert während des Telefonats")
                         LocalTranscripts.write(context, name, job)
                         return@withContext Result.retry()
                     }
                     val percent = (next * 100 / wav.durationMs).toInt()
-                    job.put("state", "running").put("message", "Whisper: $percent %")
+                    val section = (next / windowMs + 1).toInt()
+                    val sections = ((wav.durationMs + windowMs - 1) / windowMs).toInt()
+                    job.put("state", "running")
+                        .put("transcriptionSource", "local-whisper-base-q5_1")
+                        .put("message", "Lokales Whisper: $percent % · Abschnitt $section/$sections")
                     LocalTranscripts.write(context, name, job)
+
                     val start = (next - 500).coerceAtLeast(0)
                     val end = (next + windowMs).coerceAtMost(wav.durationMs)
                     val pcm = wav.read16k(start, end - start)
                     val rms = if (pcm.isEmpty()) 0.0 else sqrt(pcm.sumOf { (it * it).toDouble() } / pcm.size)
                     native!!.beginChunk(45_000L)
                     val words = if (rms < 0.0001) "" else
-                        native!!.transcribe(handle, pcm, (next - start).toInt()) ?: when {
-                            isStopped || callActive() -> return@withContext Result.retry()
-                            native!!.didTimeOut() -> ""
-                            else -> throw IOException("Whisper-Verarbeitung fehlgeschlagen")
-                        }
+                        native!!.transcribe(handle, pcm, (next - start).toInt())
+                            ?: when {
+                                isStopped || callActive() -> {
+                                    job.put("state", "pending").put("message", "Verarbeitung wird fortgesetzt")
+                                    LocalTranscripts.write(context, name, job)
+                                    return@withContext Result.retry()
+                                }
+                                native!!.didTimeOut() -> {
+                                    job.put("warning", "Ein sehr langsamer Audioabschnitt wurde übersprungen")
+                                    ""
+                                }
+                                else -> throw IOException("Whisper-Verarbeitung fehlgeschlagen")
+                            }
                     if (words.isNotBlank()) {
                         val seconds = next / 1000
                         text.append("[%02d:%02d] ".format(seconds / 60, seconds % 60))
@@ -156,6 +169,7 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                     }
                     next = end
                     job.put("nextMs", next).put("text", text.toString())
+                        .put("message", "Lokales Whisper: ${(next * 100 / wav.durationMs).toInt().coerceAtMost(100)} %")
                     LocalTranscripts.write(context, name, job)
                     if (SystemClock.elapsedRealtime() >= deadline && next < wav.durationMs) {
                         job.put("state", "pending").put("message", "Fortsetzung eingeplant")
@@ -164,10 +178,8 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                         return@withContext Result.success()
                     }
                 }
-
-                val transcript = text.toString().trim()
-                val fallbackSummary = GermanCallSummary.create(transcript)
-                val gemma = if (transcript.isBlank()) null else LocalGemma.analyze(context, transcript).getOrNull()
+                val fallbackSummary = GermanCallSummary.create(text.toString())
+                val gemma = if (text.isBlank()) null else LocalGemma.analyze(context, text.toString()).getOrNull()
                 val nextAction = gemma?.nextAction.orEmpty()
                 val baseSummary = gemma?.summary?.ifBlank { fallbackSummary } ?: fallbackSummary
                 val summary = if (nextAction.isBlank()) baseSummary else "$baseSummary\nNächster Schritt: $nextAction"
@@ -176,18 +188,15 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                     .put("analysisSource", if (gemma != null) "gemma-3n-e2b" else "regelbasiert")
                     .put("nextAction", nextAction)
                     .put("syncState", "pending")
-                    .put("message", when {
-                        transcript.isBlank() -> "Keine Sprache erkannt"
-                        gemma != null -> "Whisper-Transkript und Gemma-Notiz fertig"
-                        else -> "Whisper-Transkript fertig"
-                    })
+                    .put("message", if (text.isBlank()) "Keine Sprache erkannt" else if (gemma != null) "Lokales Whisper + Gemma fertig" else "Lokales Whisper fertig")
+                    .put("syncMessage", "Zusammenfassung wird vorbereitet")
                 LocalTranscripts.write(context, name, job)
                 LocalTranscripts.enqueueNoteSync(context, name)
             }
             Result.success()
         } catch (e: CancellationException) { throw e }
         catch (e: LinkageError) {
-            job.put("state", "error").put("message", "Whisper fehlt in dieser APK – nativen Build installieren")
+            job.put("state", "error").put("message", "Whisper fehlt in dieser APK – vollständigen nativen Build installieren")
             LocalTranscripts.write(context, name, job)
             Result.success()
         } catch (e: Exception) {
