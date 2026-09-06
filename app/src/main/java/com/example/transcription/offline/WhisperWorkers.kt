@@ -185,6 +185,7 @@ class WhisperWorker(context: Context, params: WorkerParameters) : CoroutineWorke
                 val summary = if (nextAction.isBlank()) baseSummary else "$baseSummary\nNächster Schritt: $nextAction"
                 job.put("state", "done")
                     .put("summary", summary)
+                    .put("customerText", gemma?.customerText.orEmpty())
                     .put("analysisSource", if (gemma != null) "gemma-3n-e2b" else "regelbasiert")
                     .put("nextAction", nextAction)
                     .put("syncState", "pending")
