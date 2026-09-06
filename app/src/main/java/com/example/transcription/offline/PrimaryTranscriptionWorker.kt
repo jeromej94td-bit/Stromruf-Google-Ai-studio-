@@ -61,11 +61,13 @@ class PrimaryTranscriptionWorker(
                     val nextAction = gemma?.nextAction.orEmpty()
                     val baseSummary = gemma?.summary?.ifBlank { fallbackSummary } ?: fallbackSummary
                     val summary = if (nextAction.isBlank()) baseSummary else "$baseSummary\nNächster Schritt: $nextAction"
+                    val customerText = gemma?.customerText.orEmpty()
 
                     job.put("state", "done")
                         .put("durationMs", durationMs)
                         .put("text", transcript)
                         .put("summary", summary)
+                        .put("customerText", customerText)
                         .put("analysisSource", if (gemma != null) "gemma-3n-e2b" else "regelbasiert")
                         .put("nextAction", nextAction)
                         .put("syncState", "pending")

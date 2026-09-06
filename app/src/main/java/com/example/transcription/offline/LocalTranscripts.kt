@@ -96,6 +96,29 @@ object LocalTranscripts {
         enqueuePrimary(context, file.name)
     }
 
+    /** Picks up recordings that already exist but have never been processed or changed since the last job. */
+    fun scanExisting(context: Context) {
+        val root = File(context.filesDir, "smart_calls_recordings")
+        root.listFiles()
+            ?.filter { it.isFile && it.extension.equals("wav", ignoreCase = true) && it.length() > 44L }
+            ?.sortedBy { it.lastModified() }
+            ?.forEach { audio ->
+                val previous = read(context, audio.name)
+                val unchanged = previous.optLong("size") == audio.length() &&
+                    previous.optLong("modified") == audio.lastModified()
+                val state = previous.optString("state")
+                when {
+                    unchanged && state == "done" -> {
+                        if (previous.optString("syncState") !in setOf("done", "local_only")) {
+                            enqueueNoteSync(context, audio.name)
+                        }
+                    }
+                    unchanged && state in setOf("pending", "running") -> enqueuePrimary(context, audio.name)
+                    else -> request(context, audio)
+                }
+            }
+    }
+
     fun enqueuePrimary(context: Context, name: String) {
         val request = OneTimeWorkRequestBuilder<PrimaryTranscriptionWorker>()
             .setInputData(workDataOf("file" to name))
@@ -144,6 +167,7 @@ object LocalTranscripts {
     }
 
     fun resume(context: Context) {
+        scanExisting(context)
         directory(context).listFiles()?.filter { it.name.startsWith("job_") && it.extension == "json" }
             ?.forEach { file ->
                 val value = readJson(file)
