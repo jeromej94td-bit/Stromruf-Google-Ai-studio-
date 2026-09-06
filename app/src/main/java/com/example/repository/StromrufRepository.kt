@@ -35,8 +35,7 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
         val normalized = phone.replace("[^\\d+]".toRegex(), "")
         val direct = dao.getContactByPhone(normalized)
         if (direct != null) return direct
-        
-        // try prefix alternatives
+
         var alt: ContactEntity? = null
         if (normalized.startsWith("+49")) {
             val alternate = "0" + normalized.substring(3)
@@ -46,8 +45,7 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
             alt = dao.getContactByPhone(alternate)
         }
         if (alt != null) return alt
-        
-        // Memory match fallback across all contacts in the database
+
         try {
             val all = dao.getAllContactsList()
             return all.firstOrNull { com.example.util.ContactsUtil.arePhoneNumbersMatching(it.phone, phone) }
@@ -63,19 +61,22 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
 
     suspend fun insertContact(contact: ContactEntity) {
         dao.insertContact(contact)
-        // Also save directly to Android system phone contacts if permission is granted
         if (com.example.util.ContactsUtil.hasWriteContactsPermission(context) && contact.name.isNotBlank() && contact.phone.isNotBlank()) {
             runCatching {
                 com.example.util.ContactsUtil.saveContactToSystemDirectly(context, contact.name, contact.phone)
             }
         }
-        // Replicate to Supabase
+        SupabaseDbClient.upsertContact(context, contact)
+    }
+
+    /** Internal automation update without writing to the Android address book again. */
+    suspend fun upsertContactForAutomation(contact: ContactEntity) {
+        dao.insertContact(contact)
         SupabaseDbClient.upsertContact(context, contact)
     }
 
     suspend fun resetHotCycle() {
         dao.resetHotCycle()
-        // For resetting cycle locally, we also can push the updated status of contacts.
         val activeHotContacts = dao.getAllContactsList().filter { it.isHotBox }
         activeHotContacts.forEach {
             SupabaseDbClient.upsertContact(context, it.copy(hasBeenCalledInHotCycle = false))
@@ -84,33 +85,31 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
 
     suspend fun deleteContactById(id: String) {
         dao.deleteContactById(id)
-        // Replicate to Supabase
         SupabaseDbClient.deleteContact(context, id)
     }
 
     suspend fun insertFollowUp(followUp: FollowUpEntity): FollowUpEntity {
         val activeFollowUps = dao.getActiveFollowUpsList()
         var currentDueAt = followUp.dueAt
-        
+
         var clashFound = true
         while (clashFound) {
             clashFound = false
             for (existing in activeFollowUps) {
                 if (existing.id != followUp.id && Math.abs(existing.dueAt - currentDueAt) < 60000) {
                     clashFound = true
-                    currentDueAt += 10 * 60 * 1000 // push 10 minutes later
+                    currentDueAt += 10 * 60 * 1000
                     break
                 }
             }
         }
-        
+
         val finalizedFollowUp = if (currentDueAt != followUp.dueAt) {
             followUp.copy(dueAt = currentDueAt)
         } else {
             followUp
         }
         dao.insertFollowUp(finalizedFollowUp)
-        // Replicate to Supabase
         SupabaseDbClient.upsertFollowUp(context, finalizedFollowUp)
         return finalizedFollowUp
     }
@@ -123,32 +122,32 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
         dao.updateFollowUpStatus(id, isCompleted)
         val f = dao.getFollowUpById(id)
         if (f != null) {
-            // Replicate to Supabase
             SupabaseDbClient.upsertFollowUp(context, f)
         }
     }
 
     suspend fun deleteFollowUpById(id: String) {
         dao.deleteFollowUpById(id)
-        // Replicate to Supabase
         SupabaseDbClient.deleteFollowUp(context, id)
     }
 
     suspend fun insertCallLog(callLog: CallLogEntity) {
         dao.insertCallLog(callLog)
-        // Replicate to Supabase
         SupabaseDbClient.upsertCallLog(context, callLog)
+        // A single central hook means normal dialer, Hotbox and system call-log reconciliation all
+        // share the same bounded Smart Call retry policy. The manager ignores unrelated calls.
+        runCatching {
+            com.example.smartretry.SmartRetryManager.onCallLog(context, this, callLog)
+        }
     }
 
     suspend fun insertAiCall(aiCall: AiCallEntity) {
         dao.insertAiCall(aiCall)
-        // Replicate to Supabase
         SupabaseDbClient.upsertAiCall(context, aiCall)
     }
 
     suspend fun deleteAiCallById(id: String) {
         dao.deleteAiCallById(id)
-        // Replicate to Supabase
         SupabaseDbClient.deleteAiCall(context, id)
     }
 
@@ -162,7 +161,6 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
         SupabaseDbClient.deleteAnnahme(context, id)
     }
 
-    // --- Promised Annahmen ---
     val allPromisedAnnahmen: Flow<List<com.example.database.PromisedAnnahmeEntity>> = dao.getAllPromisedAnnahmen()
 
     suspend fun getPromisedAnnahmenList(): List<com.example.database.PromisedAnnahmeEntity> {
@@ -176,7 +174,6 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
 
     suspend fun updatePromisedAnnahmeStatus(id: String, isCalled: Boolean) {
         dao.updatePromisedAnnahmeStatus(id, isCalled)
-        // Find the item to sync
         val item = dao.getPromisedAnnahmenList().firstOrNull { it.id == id }
         if (item != null) {
             SupabaseDbClient.upsertPromisedAnnahme(context, item)
@@ -232,34 +229,19 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
         SupabaseDbClient.deleteHeissAngebot(context, id)
     }
 
-    suspend fun syncAnnahmeDokumenteFromSupabase():
-        List<com.example.database.AnnahmeDokumentEntity> {
-
+    suspend fun syncAnnahmeDokumenteFromSupabase(): List<com.example.database.AnnahmeDokumentEntity> {
         val remote = SupabaseDbClient.fetchAnnahmeDokumente(context)
-
-        remote.forEach { dokument ->
-            dao.insertAnnahmeDokument(dokument)
-        }
-
+        remote.forEach { dokument -> dao.insertAnnahmeDokument(dokument) }
         val remoteIds = remote.map { it.id }
-        if (remoteIds.isEmpty()) {
-            dao.deleteAllAnnahmeDokumente()
-        } else {
-            dao.deleteAnnahmeDokumenteNotIn(remoteIds)
-        }
-
+        if (remoteIds.isEmpty()) dao.deleteAllAnnahmeDokumente()
+        else dao.deleteAnnahmeDokumenteNotIn(remoteIds)
         return remote
     }
 
-
-    suspend fun downloadAnnahmeDokument(
-        doc: com.example.database.AnnahmeDokumentEntity
-    ): ByteArray? {
-
+    suspend fun downloadAnnahmeDokument(doc: com.example.database.AnnahmeDokumentEntity): ByteArray? {
         return SupabaseDbClient.downloadAnnahmeDokument(context, doc)
     }
 
-    // --- Customer Messages ---
     val allCustomerMessages: kotlinx.coroutines.flow.Flow<List<com.example.database.CustomerMessageEntity>> = dao.getAllCustomerMessages()
 
     fun getCustomerMessagesForContact(contactId: String): kotlinx.coroutines.flow.Flow<List<com.example.database.CustomerMessageEntity>> {
@@ -268,7 +250,6 @@ class StromrufRepository(private val context: Context, private val dao: Stromruf
 
     suspend fun insertCustomerMessage(message: com.example.database.CustomerMessageEntity) {
         dao.insertCustomerMessage(message)
-        // Replicate to Supabase (customer_messages)
         try {
             val payload = org.json.JSONObject().apply {
                 put("id", message.id)

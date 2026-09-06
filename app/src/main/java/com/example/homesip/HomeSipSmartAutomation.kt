@@ -2,7 +2,10 @@ package com.example.homesip
 
 import android.content.Context
 import android.util.Log
+import com.example.database.AppDatabase
+import com.example.database.CallLogEntity
 import com.example.recording.RecordingStorageManager
+import com.example.repository.StromrufRepository
 import com.example.transcription.offline.LocalTranscripts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +18,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 /**
  * Sidecar around the Gold-Master HomeSipTrunk.
@@ -99,14 +103,48 @@ object HomeSipSmartAutomation {
             current
         }
 
-        val file = finished.recordingFile ?: return
         val wallClockDuration = if (finished.connectedAt > 0L) {
             ((System.currentTimeMillis() - finished.connectedAt) / 1000L).toInt().coerceAtLeast(0)
         } else 0
         val reliableDuration = maxOf(finished.maxDurationSeconds, wallClockDuration)
         val callStartedAt = finished.connectedAt.takeIf { it > 0L } ?: finished.armedAt
+        val callEndedAt = System.currentTimeMillis()
+        val wasConnected = finished.connectedAt > 0L
+        val file = finished.recordingFile
 
         scope.launch {
+            // Smart SIP calls do not necessarily appear in Android's system call log. Persist one
+            // deterministic app call log so a scheduled Smart-Call callback can reliably advance
+            // its retry chain even when the customer never answers and no WAV is produced.
+            runCatching {
+                val repository = StromrufRepository(
+                    context,
+                    AppDatabase.getDatabase(context).stromrufDao()
+                )
+                repository.insertCallLog(
+                    CallLogEntity(
+                        id = UUID.nameUUIDFromBytes(
+                            "smart-sip:${finished.number}:${finished.armedAt}".toByteArray(Charsets.UTF_8)
+                        ).toString(),
+                        phone = finished.number,
+                        contactName = finished.contactName,
+                        outcome = if (wasConnected) "erreicht_interesse" else "nicht_erreicht",
+                        note = if (wasConnected)
+                            "Smart Call automatisch erfasst (${reliableDuration}s)"
+                        else
+                            "Smart Call: Kunde nicht erreicht",
+                        timestamp = callEndedAt,
+                        durationSeconds = reliableDuration.toLong(),
+                        callReason = "Smart Call",
+                        callType = "smart_call"
+                    )
+                )
+            }.onFailure { Log.w(TAG, "Smart-Call-Status konnte nicht gespeichert werden", it) }
+
+            // No answer means there is intentionally no usable recording. The call-log hook above
+            // is still enough to create the next Hotbox retry.
+            if (file == null) return@launch
+
             var previousSize = -1L
             var stableChecks = 0
             var attempts = 0
