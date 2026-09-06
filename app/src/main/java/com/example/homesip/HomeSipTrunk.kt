@@ -122,6 +122,7 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
             }
             if (activeCall == null && callState == Call.State.OutgoingInit && pendingNumber != null) activeCall = call
             if (call != activeCall) return
+            HomeSipSmartAutomation.onCallState(appContext, call, callState)
             when (callState) {
                 Call.State.OutgoingInit, Call.State.OutgoingProgress ->
                     _state.value = HomeSipState(HomeSipStatus.DIALING, "Anruf wird aufgebaut …")
@@ -152,7 +153,7 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
     }
 
     private fun core(): Core = core ?: Factory.instance().run {
-        val config = createConfigFromString("[sip]\\nstore_auth_info=0\\n")
+        val config = createConfigFromString("[sip]\nstore_auth_info=0\n")
         createCoreWithConfig(config, appContext).also { created ->
             core = created
             created.addListener(listener)
@@ -241,12 +242,14 @@ class HomeSipTrunk private constructor(private val appContext: Context) {
             val params = requireNotNull(engine.createCallParams(null))
             params.mediaEncryption = MediaEncryption.SRTP
             engine.setMediaEncryptionMandatory(true)
+            HomeSipSmartAutomation.prepareCall(appContext, number, params)
             _state.value = HomeSipState(HomeSipStatus.DIALING, "Anruf wird aufgebaut …")
             activeCall = requireNotNull(engine.inviteAddressWithParams(destination, params)) {
                 "SIP-Anruf konnte nicht initialisiert werden"
             }
         } catch (error: Exception) {
             pendingNumber = null
+            HomeSipSmartAutomation.cancelPrepared()
             _state.value = HomeSipState(HomeSipStatus.ERROR, error.message ?: "Anruf konnte nicht gestartet werden")
             stopCallService()
         }
