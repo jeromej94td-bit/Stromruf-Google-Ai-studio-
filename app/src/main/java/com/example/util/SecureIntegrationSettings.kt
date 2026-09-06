@@ -28,7 +28,7 @@ class SecureIntegrationSettings(context: Context) {
             try {
                 // Delete old file and try to recreate
                 context.deleteSharedPreferences("stromruf_secure_integrations")
-                
+
                 val masterKey = MasterKey.Builder(context)
                     .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                     .build()
@@ -76,6 +76,21 @@ class SecureIntegrationSettings(context: Context) {
 
     fun clearOpenAiKey() {
         prefs.edit().remove("openai_api_key").apply()
+    }
+
+    fun saveGroqKey(key: String) {
+        prefs.edit().putString("groq_api_key", key.trim()).apply()
+    }
+
+    fun getGroqKey(): String? {
+        val custom = prefs.getString("groq_api_key", null)?.takeIf { it.isNotBlank() }
+        if (!custom.isNullOrBlank()) return custom
+        val buildKey = runCatching { com.example.BuildConfig.GROQ_API_KEY }.getOrNull()
+        return if (!buildKey.isNullOrBlank() && buildKey != "MY_GROQ_API_KEY") buildKey else null
+    }
+
+    fun clearGroqKey() {
+        prefs.edit().remove("groq_api_key").apply()
     }
 
     fun saveDefaultMailProvider(provider: String) {
