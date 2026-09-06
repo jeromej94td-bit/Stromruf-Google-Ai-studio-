@@ -36,6 +36,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.example.homesip.HomeSipCallUiState
 import com.example.homesip.HomeSipSettings
 import com.example.homesip.HomeSipStatus
 import com.example.homesip.HomeSipTrunk
@@ -64,7 +65,10 @@ fun HomeSipTrunkCard() {
     var settingsOpen by remember { mutableStateOf(false) }
 
     val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
-        if (allowed) client.startCall(destination)
+        if (allowed) {
+            HomeSipCallUiState.prepare(destination, smartCall = false)
+            client.startCall(destination)
+        }
     }
 
     SectionHeader("SIP-TRUNK · EASYBELL")
