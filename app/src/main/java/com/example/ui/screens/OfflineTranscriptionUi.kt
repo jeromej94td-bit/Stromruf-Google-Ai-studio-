@@ -12,9 +12,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.transcription.offline.LocalGemma
 import com.example.transcription.offline.LocalTranscripts
+import com.example.util.SecureIntegrationSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -26,8 +28,12 @@ import java.io.File
 fun OfflineTranscriptionSetup() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val secure = remember { SecureIntegrationSettings(context) }
+    var groqKey by remember { mutableStateOf(secure.getGroqKey().orEmpty()) }
+    var groqSaved by remember { mutableStateOf(secure.getGroqKey()?.isNotBlank() == true) }
     var ready by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Modellstatus wird geladen …") }
+    var status by remember { mutableStateOf("Fallback-Modellstatus wird geladen …") }
+
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) { LocalTranscripts.resume(context) }
         while (true) {
@@ -39,17 +45,56 @@ fun OfflineTranscriptionSetup() {
             delay(1500)
         }
     }
+
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Kostenlos transkribieren · Deutsch", style = MaterialTheme.typography.titleMedium)
-            Text(if (ready) "Bereit. Neue Gespräche über eine Minute werden nach dem Auflegen auf dem Handy transkribiert."
-                else "Einmal etwa 60 MB herunterladen. Danach funktioniert die Transkription ohne Internet und ohne API-Gebühren.")
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Haupttranskription · Groq Whisper Large v3", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Nach dem Auflegen wird das Gespräch automatisch an Groq Whisper Large v3 gesendet. Deutsch ist fest eingestellt; danach erstellt Stromruf wie bisher Notiz, Supabase-Eintrag und ggf. Wiedervorlage.",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            OutlinedTextField(
+                value = groqKey,
+                onValueChange = { groqKey = it; groqSaved = false },
+                label = { Text("Groq API-Key") },
+                placeholder = { Text("gsk_…") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    secure.saveGroqKey(groqKey)
+                    groqSaved = groqKey.isNotBlank()
+                }, enabled = groqKey.isNotBlank()) {
+                    Text(if (groqSaved) "Groq-Key gespeichert" else "Groq-Key speichern")
+                }
+                if (groqSaved) {
+                    OutlinedButton(onClick = {
+                        secure.clearGroqKey()
+                        groqKey = ""
+                        groqSaved = false
+                    }) { Text("Entfernen") }
+                }
+            }
+            Text(
+                if (groqSaved) "Aktiv: Groq Whisper Large v3 ist der automatische Haupttranskriptor."
+                else "Ohne Groq-Key verwendet Stromruf automatisch den lokalen Whisper-Small-Fallback.",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            HorizontalDivider()
+            Text("Offline-Fallback · Whisper Small", style = MaterialTheme.typography.titleSmall)
+            Text(
+                if (ready) "Fallback ist bereit. Wenn Groq oder Internet ausfällt, kann die Aufnahme lokal transkribiert werden."
+                else "Optional einmal etwa 190 MB laden. Das Modell wird nur als Ausfallsicherung benötigt.",
+                style = MaterialTheme.typography.bodySmall
+            )
             Text(status, style = MaterialTheme.typography.bodySmall)
             if (!ready) Button(onClick = {
                 scope.launch(Dispatchers.IO) { LocalTranscripts.download(context) }
-            }) { Text("Schnelles Deutsch-Modell laden / fortsetzen") }
-            Text("Die Verarbeitung läuft abschnittsweise und zeigt nach jedem kurzen Abschnitt Fortschritt. Während eines Smart Calls pausiert sie automatisch.",
-                style = MaterialTheme.typography.bodySmall)
+            }) { Text("Offline-Fallback laden / fortsetzen") }
         }
     }
 }
@@ -74,7 +119,10 @@ fun OfflineRecordingTranscript(file: File) {
     }
     val state = snapshot.optString("state")
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(localError ?: snapshot.optString("message", "Lokales Deutsch-Transkript"), style = MaterialTheme.typography.bodySmall)
+        Text(localError ?: snapshot.optString("message", "Groq Whisper Large v3"), style = MaterialTheme.typography.bodySmall)
+        snapshot.optString("transcriptionSource").takeIf { it.isNotBlank() && it != "pending" }?.let {
+            Text("Quelle: $it", style = MaterialTheme.typography.labelSmall)
+        }
         snapshot.optString("syncMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         snapshot.optString("followUpMessage").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         snapshot.optString("summary").takeIf { it.isNotBlank() }?.let { Text("Notiz: $it", style = MaterialTheme.typography.bodySmall, maxLines = 6) }
@@ -85,14 +133,14 @@ fun OfflineRecordingTranscript(file: File) {
                     runCatching { LocalTranscripts.request(context, file) }.exceptionOrNull()?.message
                 }
             }
-        }) { Text(if (state == "error") "Lokal erneut versuchen" else "Kostenlos auf Deutsch transkribieren") }
+        }) { Text(if (state == "error") "Erneut transkribieren" else "Mit Groq Whisper Large v3 transkribieren") }
         if (snapshot.optString("text").isNotBlank()) TextButton(onClick = { showText = true }) {
-            Text(if (state == "done") "Deutsch-Transkript öffnen" else "Bisherigen Text öffnen")
+            Text(if (state == "done") "Transkript öffnen" else "Bisherigen Text öffnen")
         }
     }
     if (showText) AlertDialog(
         onDismissRequest = { showText = false },
-        title = { Text("Gesprächstext · Deutsch") },
+        title = { Text("Gesprächstext") },
         text = {
             SelectionContainer {
                 Column(Modifier.heightIn(max = 450.dp).verticalScroll(rememberScrollState())) {
