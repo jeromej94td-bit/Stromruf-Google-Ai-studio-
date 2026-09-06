@@ -53,7 +53,9 @@ class PrimaryTranscriptionWorker(
             if (groq.isSuccess) {
                 val transcript = groq.getOrThrow().trim()
                 if (transcript.isNotBlank()) {
-                    val durationMs = runCatching { PcmWave(file).use { it.durationMs } }.getOrDefault(0L)
+                    val wavDurationMs = runCatching { PcmWave(file).use { it.durationMs } }.getOrDefault(0L)
+                    val callDurationMs = job.optLong("callDurationSeconds").coerceAtLeast(0L) * 1000L
+                    val durationMs = maxOf(wavDurationMs, callDurationMs)
                     val fallbackSummary = GermanCallSummary.create(transcript)
                     val gemma = LocalGemma.analyze(context, transcript).getOrNull()
                     val nextAction = gemma?.nextAction.orEmpty()
@@ -71,7 +73,7 @@ class PrimaryTranscriptionWorker(
                             "Groq Whisper Large v3 + lokale Gemma-Notiz fertig"
                         else
                             "Groq Whisper Large v3 Transkript fertig")
-                        .put("syncMessage", "Zusammenfassung wird vorbereitet")
+                        .put("syncMessage", "Zusammenfassung und Termin werden automatisch verarbeitet")
                     LocalTranscripts.write(context, name, job)
                     LocalTranscripts.enqueueNoteSync(context, name)
                     return@withContext Result.success()
