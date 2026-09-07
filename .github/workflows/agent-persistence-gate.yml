@@ -1,0 +1,39 @@
+name: Agent persistence gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  persistence-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate persistence contract
+        run: python tools/test_agent_persistence_contract.py
+
+      - name: Validate Git diff hygiene
+        run: git diff --check HEAD^
+        if: github.event_name == 'push'
+
+      - name: Reject tracked local-only artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden="$(git ls-files | grep -E '(^|/)(debug\.keystore|local\.properties|\.env)$|\.apk$' || true)"
+          if [ -n "$forbidden" ]; then
+            echo "::error::Local-only or sensitive artifacts must not be tracked:"
+            echo "$forbidden"
+            exit 1
+          fi

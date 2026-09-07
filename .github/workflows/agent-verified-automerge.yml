@@ -1,0 +1,73 @@
+name: Agent verified auto-merge
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+jobs:
+  merge-agent-verified:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      contains(github.event.pull_request.body || '', '<!-- agent-persist: verified -->')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Wait for required checks and merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request;
+            const sha = pr.head.sha;
+            const required = ['persistence-contract', 'assemble-debug'];
+            const accepted = new Set(['success', 'neutral', 'skipped']);
+
+            for (let attempt = 0; attempt < 90; attempt++) {
+              const { data } = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: sha,
+                per_page: 100,
+              });
+              const checks = new Map(data.check_runs.map(run => [run.name, run]));
+              const failed = required.filter(name => {
+                const run = checks.get(name);
+                return run && run.status === 'completed' && !accepted.has(run.conclusion);
+              });
+              if (failed.length) {
+                core.setFailed(`Required checks failed: ${failed.join(', ')}`);
+                return;
+              }
+
+              const pending = required.filter(name => {
+                const run = checks.get(name);
+                return !run || run.status !== 'completed';
+              });
+              if (!pending.length) {
+                await github.rest.pulls.merge({
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                  merge_method: 'squash',
+                  sha,
+                });
+                core.info(`Merged verified agent PR #${pr.number} at ${sha}`);
+                return;
+              }
+
+              core.info(`Waiting for: ${pending.join(', ')}`);
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+
+            core.setFailed('Timed out waiting for required checks.');
