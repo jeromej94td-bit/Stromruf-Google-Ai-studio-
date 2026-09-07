@@ -33,6 +33,8 @@ def main() -> None:
 
     for command in ("git diff --check", "fetch", "merge-base", "--is-ancestor"):
         require(script, command, "scripts/agent_persistence.ps1")
+    require(script, "refs/heads/$branch:refs/remotes/$Remote/$branch", "scripts/agent_persistence.ps1")
+    require(script, "refs/heads/$BaseBranch:refs/remotes/$Remote/$BaseBranch", "scripts/agent_persistence.ps1")
 
     for needle in (
         "pull_request_target",
