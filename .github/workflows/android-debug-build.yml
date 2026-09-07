@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/gradle-wrapper-debug-build
+      - build/pr55-device-update-20260907
   pull_request:
     branches:
       - main
