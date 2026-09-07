@@ -44,6 +44,10 @@ def main() -> None:
         "persistence-contract",
         "assemble-debug",
         "merge_method: 'squash'",
+        "actions: write",
+        "createWorkflowDispatch",
+        "workflow_id: 'android-debug-build.yml'",
+        "ref: 'main'",
     ):
         require(automerge, needle, ".github/workflows/agent-verified-automerge.yml")
 
