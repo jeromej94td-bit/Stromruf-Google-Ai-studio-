@@ -37,6 +37,21 @@ class GermanFollowUpPlannerTest {
         assertEquals(20, due.get(Calendar.MINUTE))
     }
 
+    @Test fun `recognizes spoken relative hours and same day callback windows`() {
+        val now = Calendar.getInstance().apply { set(2026, Calendar.SEPTEMBER, 7, 8, 0, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+        val relative = GermanFollowUpPlanner.plan("Rufen Sie mich in zwei Stunden an.", now)
+        assertNotNull(relative)
+        assertEquals(now + 2L * 60L * 60L * 1000L, relative!!.dueAt)
+
+        val window = GermanFollowUpPlanner.plan("Rufen Sie mich zwischen 10 und 11 Uhr an.", now)
+        assertNotNull(window)
+        val due = Calendar.getInstance().apply { timeInMillis = window!!.dueAt }
+        val end = Calendar.getInstance().apply { timeInMillis = window!!.windowEndAt!! }
+        assertEquals(10, due.get(Calendar.HOUR_OF_DAY))
+        assertEquals(5, due.get(Calendar.MINUTE))
+        assertEquals(11, end.get(Calendar.HOUR_OF_DAY))
+    }
+
     @Test fun `does not invent a follow up without callback intent`() {
         org.junit.Assert.assertNull(GermanFollowUpPlanner.plan("Der Kunde hat einen Stromverbrauch von 80000 kWh."))
     }
