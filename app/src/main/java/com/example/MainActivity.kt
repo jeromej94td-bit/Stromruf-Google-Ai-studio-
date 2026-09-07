@@ -10105,7 +10105,8 @@ fun AddNeukundeDialog(
     onDismiss: () -> Unit,
     onConfirm: (String, String, String?, String?, String?, String?, String?, Long?, String?, String) -> Unit
 ) {
-    var customerNumber by remember { mutableStateOf("KD-${(10000..99999).random()}") }
+    val context = LocalContext.current
+    var customerNumber by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
     var customerName by remember { mutableStateOf("") }
     var company by remember { mutableStateOf("") }
@@ -10114,13 +10115,43 @@ fun AddNeukundeDialog(
     var meterNumber by remember { mutableStateOf("") }
     var consumption by remember { mutableStateOf("") }
     var energyType by remember { mutableStateOf("Strom") }
-    var routine by remember { mutableStateOf("Gewerbe") }
+    var showMore by remember { mutableStateOf(false) }
+    var autoFilled by remember { mutableStateOf<String?>(null) }
+    var validation by remember { mutableStateOf<String?>(null) }
+
+    val clipboard = remember {
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+    }
+    fun readClipboard() {
+        val raw = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+        val parsed = com.example.leads.LeadClipboardParser.parse(raw)
+        when {
+            customerNumber.isBlank() && parsed.customerNumber != null -> {
+                customerNumber = parsed.customerNumber; autoFilled = "Kundennummer"
+            }
+            phone.isBlank() && parsed.phone != null -> {
+                phone = parsed.phone; autoFilled = "Telefonnummer"
+            }
+            email.isBlank() && parsed.email != null -> {
+                email = parsed.email; autoFilled = "E-Mail"
+            }
+        }
+    }
+    DisposableEffect(clipboard) {
+        val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener { readClipboard() }
+        clipboard.addPrimaryClipChangedListener(listener)
+        readClipboard()
+        onDispose { clipboard.removePrimaryClipChangedListener(listener) }
+    }
+    LaunchedEffect(autoFilled) {
+        if (autoFilled != null) { kotlinx.coroutines.delay(1800); autoFilled = null }
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
-            border = BorderStroke(1.dp, Color(0xFF334155)),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0C1B2A)),
+            border = BorderStroke(1.dp, Color(0xFF39C6FF).copy(alpha = 0.55f)),
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(8.dp)
@@ -10132,9 +10163,9 @@ fun AddNeukundeDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "Neukunde anlegen 👤",
+                    text = "Neuer Lead",
                     color = Color.White,
-                    fontSize = 18.sp,
+                    fontSize = 24.sp,
                     fontWeight = FontWeight.Bold
                 )
 
@@ -10143,11 +10174,12 @@ fun AddNeukundeDialog(
                     onValueChange = { customerNumber = it },
                     label = { Text("Kundennummer") },
                     singleLine = true,
+                    supportingText = { if (autoFilled == "Kundennummer") Text("Aus Zwischenablage übernommen") },
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.White,
                         unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF00FF87),
-                        unfocusedBorderColor = Color(0xFF334155)
+                        focusedBorderColor = Color(0xFF39C6FF),
+                        unfocusedBorderColor = if (autoFilled == "Kundennummer") Color(0xFF39C6FF) else Color(0xFF334155)
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -10155,14 +10187,15 @@ fun AddNeukundeDialog(
                 OutlinedTextField(
                     value = phone,
                     onValueChange = { phone = it },
-                    label = { Text("Telefonnummer *") },
+                    label = { Text("Telefonnummer") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    supportingText = { if (autoFilled == "Telefonnummer") Text("Aus Zwischenablage übernommen") },
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.White,
                         unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF00FF87),
-                        unfocusedBorderColor = Color(0xFF334155)
+                        focusedBorderColor = Color(0xFF39C6FF),
+                        unfocusedBorderColor = if (autoFilled == "Telefonnummer") Color(0xFF39C6FF) else Color(0xFF334155)
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -10175,7 +10208,7 @@ fun AddNeukundeDialog(
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.White,
                         unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF00FF87),
+                        focusedBorderColor = Color(0xFF39C6FF),
                         unfocusedBorderColor = Color(0xFF334155)
                     ),
                     modifier = Modifier.fillMaxWidth()
@@ -10189,7 +10222,7 @@ fun AddNeukundeDialog(
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.White,
                         unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF00FF87),
+                        focusedBorderColor = Color(0xFF39C6FF),
                         unfocusedBorderColor = Color(0xFF334155)
                     ),
                     modifier = Modifier.fillMaxWidth()
@@ -10201,14 +10234,33 @@ fun AddNeukundeDialog(
                     label = { Text("E-Mail") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    supportingText = { if (autoFilled == "E-Mail") Text("Aus Zwischenablage übernommen") },
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.White,
                         unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF00FF87),
-                        unfocusedBorderColor = Color(0xFF334155)
+                        focusedBorderColor = Color(0xFF39C6FF),
+                        unfocusedBorderColor = if (autoFilled == "E-Mail") Color(0xFF39C6FF) else Color(0xFF334155)
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                Text("Telefonnummer oder E-Mail genügt.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                TextButton(onClick = { showMore = !showMore }) {
+                    Text(if (showMore) "Weniger Angaben" else "Weitere Kundendaten", color = Color(0xFF39C6FF))
+                }
+                AnimatedVisibility(showMore) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedTextField(deliveryAddress, { deliveryAddress = it }, label = { Text("Lieferadresse") }, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(meterNumber, { meterNumber = it }, label = { Text("Zählernummer") }, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(consumption, { consumption = it.filter(Char::isDigit) }, label = { Text("Verbrauch kWh") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("Strom", "Gas", "Beide").forEach { value ->
+                                FilterChip(selected = energyType == value, onClick = { energyType = value }, label = { Text(value) })
+                            }
+                        }
+                    }
+                }
+                validation?.let { Text(it, color = Color(0xFFFFA24B), fontSize = 12.sp) }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -10221,7 +10273,7 @@ fun AddNeukundeDialog(
                     Spacer(Modifier.width(8.dp))
                     Button(
                         onClick = {
-                            if (phone.isNotBlank()) {
+                            if (phone.isNotBlank() || email.contains('@')) {
                                 onConfirm(
                                     customerNumber.trim(),
                                     phone.trim(),
@@ -10232,14 +10284,14 @@ fun AddNeukundeDialog(
                                     meterNumber.ifBlank { null },
                                     consumption.toLongOrNull(),
                                     energyType,
-                                    routine
+                                    "Keine"
                                 )
-                            }
+                            } else validation = "Bitte Telefonnummer oder gültige E-Mail eintragen."
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00FF87)),
-                        shape = RoundedCornerShape(8.dp)
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF39C6FF)),
+                        shape = RoundedCornerShape(14.dp)
                     ) {
-                        Text("Speichern 🚀", color = Color(0xFF0F172A), fontWeight = FontWeight.Bold)
+                        Text("Lead speichern", color = Color(0xFF071421), fontWeight = FontWeight.Bold)
                     }
                 }
             }

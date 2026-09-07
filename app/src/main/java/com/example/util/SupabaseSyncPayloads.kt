@@ -68,6 +68,18 @@ object SupabaseSyncPayloads {
             put("phone", item.phone)
             put("call_attempts", item.callAttempts)
             put("status", item.status)
+            put("customer_name", item.customerName ?: JSONObject.NULL)
+            put("company", item.company ?: JSONObject.NULL)
+            put("email", item.email ?: JSONObject.NULL)
+            put("delivery_address", item.deliveryAddress ?: JSONObject.NULL)
+            put("meter_number", item.meterNumber ?: JSONObject.NULL)
+            put("consumption", item.consumption ?: JSONObject.NULL)
+            put("energy_type", item.energyType ?: JSONObject.NULL)
+            put("next_action_at", item.nextActionAt ?: JSONObject.NULL)
+            put("offer_sent_at", item.offerSentAt ?: JSONObject.NULL)
+            put("completed_at", item.completedAt ?: JSONObject.NULL)
+            put("archived_at", item.archivedAt ?: JSONObject.NULL)
+            put("updated_at_ms", item.updatedAt)
             if (userId != null) {
                 put("user_id", userId)
             }
@@ -81,7 +93,19 @@ object SupabaseSyncPayloads {
             customerNumber = json.getString("customer_number"),
             phone = json.getString("phone"),
             callAttempts = json.getInt("call_attempts"),
-            status = json.getString("status")
+            status = json.getString("status"),
+            customerName = json.optNullableString("customer_name"),
+            company = json.optNullableString("company"),
+            email = json.optNullableString("email"),
+            deliveryAddress = json.optNullableString("delivery_address"),
+            meterNumber = json.optNullableString("meter_number"),
+            consumption = json.optNullableLong("consumption"),
+            energyType = json.optNullableString("energy_type"),
+            nextActionAt = json.optNullableLong("next_action_at"),
+            offerSentAt = json.optNullableLong("offer_sent_at"),
+            completedAt = json.optNullableLong("completed_at"),
+            archivedAt = json.optNullableLong("archived_at"),
+            updatedAt = json.optLong("updated_at_ms", json.optLong("date_created"))
         )
     }
 
@@ -110,3 +134,9 @@ object SupabaseSyncPayloads {
         )
     }
 }
+
+private fun JSONObject.optNullableString(key: String): String? =
+    if (!has(key) || isNull(key)) null else optString(key).trim().takeIf { it.isNotEmpty() && it != "null" }
+
+private fun JSONObject.optNullableLong(key: String): Long? =
+    if (!has(key) || isNull(key)) null else optLong(key)

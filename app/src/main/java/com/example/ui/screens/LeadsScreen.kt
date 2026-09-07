@@ -178,6 +178,11 @@ fun LeadsScreen(
     val neukunden by viewModel.neukunden.collectAsState()
     val angebote by viewModel.heisseAngebote.collectAsState()
     val hotBoxLists by viewModel.hotBoxLists.collectAsState()
+
+    // Keep one durable reminder per lead in sync with the persisted workflow state.
+    LaunchedEffect(neukunden) {
+        neukunden.forEach { com.example.leads.LeadAutomation.schedule(context, it) }
+    }
     val selectedFocusList by viewModel.selectedHotBoxListName.collectAsState()
     val selectedHotBoxListNames by viewModel.selectedHotBoxListNames.collectAsState()
 
@@ -222,8 +227,9 @@ fun LeadsScreen(
     val isAutoCallPaused by viewModel.isAutoCallPaused.collectAsState()
     val autoCallCountdown by viewModel.autoCallCountdown.collectAsState()
     val nextHotBoxId by viewModel.nextHotBoxContactId.collectAsState()
+    val lastCalledHotBoxId by viewModel.lastCalledHotBoxContactId.collectAsState()
 
-    var segment by remember { mutableStateOf(0) } // 0 Fokus, 1 Neukunden, 2 Angebote, 3 Kontakte
+    var segment by remember { mutableStateOf(0) } // 0 Hotbox, 1 Neukunden, 2 Angebote, 3 Kontakte
     var zeitraum by remember { mutableStateOf(Zeitraum.TAGE7) }
     var statusFilter by remember { mutableStateOf("Alle") }
     var searchQuery by remember { mutableStateOf("") }
@@ -313,7 +319,7 @@ fun LeadsScreen(
         }
         item {
             SegmentedControl(
-                options = listOf("Fokus", "Neukunden", "Angebote", "Kontakte"),
+                options = listOf("Hotbox", "Neukunden", "Angebote", "Kontakte"),
                 selectedIndex = segment,
                 onSelect = { segment = it }
             )
@@ -466,7 +472,7 @@ fun LeadsScreen(
                     accent = ThemeAccent
                 ) {
                     Column(Modifier.padding(14.dp)) {
-                        val nextContact = open.firstOrNull { it.id == nextHotBoxId } ?: open.firstOrNull()
+                        val nextContact = eligibleNow.firstOrNull { it.id == nextHotBoxId } ?: eligibleNow.firstOrNull()
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
@@ -480,11 +486,28 @@ fun LeadsScreen(
                                 )
                                 if (nextContact != null) {
                                     Spacer(Modifier.height(4.dp))
+                                    val nextAttempts = callLogs.count {
+                                        it.phone.filter(Char::isDigit).takeLast(10) == nextContact.phone.filter(Char::isDigit).takeLast(10)
+                                    }
                                     Text(
                                         "Als nächstes: ${nextContact.name}",
                                         style = MaterialTheme.typography.bodyMedium, color = ThemeAccent,
-                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                        modifier = Modifier.clickable { onOpenContact(nextContact) }
                                     )
+                                    Text(
+                                        listOfNotNull(
+                                            nextContact.customerNumber?.let { "Kd.-Nr. $it" },
+                                            "$nextAttempts Versuche",
+                                            "Antippen für Infos"
+                                        ).joinToString(" · "),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextMuted,
+                                        modifier = Modifier.clickable { onOpenContact(nextContact) }
+                                    )
+                                } else if (open.isNotEmpty()) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("Wartet auf das nächste Erreichbarkeitsfenster", style = MaterialTheme.typography.bodySmall, color = WarnAmber)
                                 }
                             }
                             IconButton(onClick = {
@@ -517,6 +540,7 @@ fun LeadsScreen(
                                 val targetContact = contacts.find { it.id == nextHotBoxId } ?: contacts.firstOrNull { it.isHotBox }
                                 if (targetContact != null) {
                                     val digitsOnly = CustomerNumberExtractor.extractCustomerNumber(
+                                        targetContact.customerNumber,
                                         targetContact.name,
                                         targetContact.company,
                                         targetContact.callReason,
@@ -553,6 +577,24 @@ fun LeadsScreen(
                             }
                         )
                     }
+                }
+            }
+            val lastHotBoxLog = callLogs.filter { it.callType.equals("hotbox", ignoreCase = true) }
+                .maxByOrNull { it.timestamp }
+            val previousHotBoxContact = contacts.firstOrNull { it.id == lastCalledHotBoxId }
+                ?: lastHotBoxLog?.let { log ->
+                    val key = log.phone.filter(Char::isDigit).takeLast(10)
+                    contacts.firstOrNull { it.phone.filter(Char::isDigit).takeLast(10) == key }
+                }
+            if (previousHotBoxContact != null) {
+                item {
+                    PreviousHotBoxCallCard(
+                        contact = previousHotBoxContact,
+                        callLogs = callLogs,
+                        onOpen = { onOpenContact(previousHotBoxContact) },
+                        onCall = { viewModel.initiateCall(previousHotBoxContact.phone, previousHotBoxContact.name, previousHotBoxContact.id) },
+                        onEditReachability = { contactToEditInLeads = previousHotBoxContact }
+                    )
                 }
             }
             item {
@@ -607,6 +649,7 @@ fun LeadsScreen(
                         onClick = { onOpenContact(c) },
                         onLongClick = {
                             val digits = CustomerNumberExtractor.extractCustomerNumber(
+                                c.customerNumber,
                                 c.name,
                                 c.company,
                                 c.callReason,
@@ -681,148 +724,64 @@ fun LeadsScreen(
 
         // ================= SEGMENT: NEUKUNDEN =================
         if (segment == 1) {
+            val startOfWeek = Calendar.getInstance().apply {
+                firstDayOfWeek = Calendar.MONDAY
+                set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+                set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            val activeLeads = neukunden.filter {
+                it.status in com.example.leads.LeadWorkflow.active && it.archivedAt == null
+            }.sortedWith(compareBy<com.example.database.NeukundeEntity> { it.nextActionAt ?: Long.MIN_VALUE }
+                .thenByDescending { it.dateCreated })
+            val nextCall = activeLeads.firstOrNull {
+                it.status == com.example.leads.LeadWorkflow.CALL && it.phone.isNotBlank()
+            }
+            val reviewCount = neukunden.count {
+                it.status in setOf(com.example.leads.LeadWorkflow.DONE, com.example.leads.LeadWorkflow.ARCHIVED)
+            }
+
+            item { LeadWeekBanner(neukunden.count { it.dateCreated >= startOfWeek }, onAddNeukunde) }
+            item { LeadTaskGrid(neukunden) }
             item {
-                ChipRow(
-                    options = Zeitraum.entries.map { it.label },
-                    selected = zeitraum.label,
-                    onSelect = { zeitraum = Zeitraum.fromLabel(it) },
-                    accent = ThemeSecondary
+                NextLeadCallCard(
+                    lead = nextCall,
+                    onOpen = { lead -> contacts.firstOrNull { it.id == lead.id }?.let(onOpenContact) },
+                    onCall = { lead ->
+                        viewModel.incrementNeukundeCallAttempts(lead)
+                        viewModel.initiateCall(lead.phone, "Kd. ${lead.customerNumber}", lead.id)
+                    }
                 )
             }
             item {
-                ChipRow(
-                    options = neukundenStatusOptions,
-                    selected = statusFilter,
-                    onSelect = { statusFilter = it },
-                    accent = ThemeAccent
-                )
-            }
-            val filtered = neukunden
-                .filter { zeitraum.matches(it.dateCreated) }
-                .filter { statusFilter == "Alle" || it.status == statusFilter }
-                .sortedByDescending { it.dateCreated }
-            item { 
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    SectionHeader("NEUKUNDEN · ${filtered.size}") 
-                    PrimaryButton(
-                        text = "Neuer Lead 👤+",
-                        onClick = onAddNeukunde,
-                        modifier = Modifier.fillMaxWidth(),
-                        icon = Icons.Default.PersonAdd
-                    )
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Offene Kunden", color = TextPrimary, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                    Text("${activeLeads.size}", color = ThemeAccent, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                 }
             }
-            if (filtered.isEmpty()) {
-                item {
-                    EmptyState(
-                        Icons.Default.PersonAdd, "Keine Neukunden im Zeitraum",
-                        "Passe Zeitraum oder Status an – oder lege einen neuen Lead an.",
-                        actionLabel = "Neuer Lead", onAction = onAddNeukunde
-                    )
-                }
+            if (activeLeads.isEmpty()) {
+                item { EmptyState(
+                    icon = Icons.Default.PersonAdd,
+                    title = "Alles erledigt",
+                    subtitle = "Lege einen neuen Lead an oder öffne die Prüfliste.",
+                    actionLabel = "Neuer Lead",
+                    onAction = onAddNeukunde
+                ) }
             } else {
-                items(filtered.size) { i ->
-                    val n = filtered[i]
-                    val statusTone = when (n.status) {
-                        "Anrufen" -> BadgeTone.Info
-                        "Datenmail schreiben" -> BadgeTone.Warn
-                        "Angebot erstellen" -> BadgeTone.Success
-                        else -> BadgeTone.Neutral
-                    }
-                    val displayName = if (!n.customerName.isNullOrBlank()) {
-                        if (!n.company.isNullOrBlank()) "${n.customerName} (${n.company})" else n.customerName
-                    } else if (!n.company.isNullOrBlank()) {
-                        n.company
-                    } else {
-                        "Kd.-Nr. ${n.customerNumber}"
-                    }
-
-                    val detailsText = buildString {
-                        append(n.phone)
-                        if (!n.deliveryAddress.isNullOrBlank()) {
-                            append(" | 📍 ")
-                            append(n.deliveryAddress)
-                        }
-                        if (n.consumption != null) {
-                            append(" | 📊 ")
-                            val decimalFormat = java.text.NumberFormat.getIntegerInstance(java.util.Locale.GERMANY)
-                            append(decimalFormat.format(n.consumption))
-                            append(" kWh")
-                            if (!n.energyType.isNullOrBlank()) {
-                                append(" (")
-                                append(n.energyType)
-                                append(")")
-                            }
-                        }
-                    }
-
-                    PersonRow(
-                        title = displayName,
-                        subtitle = detailsText,
-                        leadingIcon = Icons.Default.PersonAdd,
-                        leadingTint = ThemeSecondary,
-                        onClick = { 
-                            onOpenContact(
-                                ContactEntity(
-                                    id = n.id,
-                                    name = n.customerName ?: "Kunde ${n.customerNumber}",
-                                    phone = n.phone,
-                                    company = n.company,
-                                    email = n.email,
-                                    lastCallAt = n.dateCreated,
-                                    lastOutcome = null,
-                                    isHotBox = false
-                                )
-                            )
+                items(activeLeads, key = { "lead-${it.id}" }) { lead ->
+                    LeadCustomerCard(
+                        lead = lead,
+                        onOpen = { contacts.firstOrNull { c -> c.id == lead.id }?.let(onOpenContact) },
+                        onCall = {
+                            viewModel.incrementNeukundeCallAttempts(it)
+                            viewModel.initiateCall(it.phone, "Kd. ${it.customerNumber}", it.id)
                         },
-                        onLongClick = {
-                            val digits = CustomerNumberExtractor.extractCustomerNumber(
-                                n.customerNumber,
-                                n.customerName,
-                                n.company,
-                                n.phone
-                            ) ?: ""
-                            if (digits.isNotEmpty()) {
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                val clip = android.content.ClipData.newPlainText("Kundennummer", digits)
-                                clipboard.setPrimaryClip(clip)
-                                Toast.makeText(context, "Kundennummer $digits kopiert! 📋", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Keine Kundennummer gefunden", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        badge = {
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                StatusBadge(n.status, statusTone)
-                                StatusBadge("${n.callAttempts} Versuche", BadgeTone.Neutral)
-                                StatusBadge("Vor ${daysAgo(n.dateCreated)} T.", BadgeTone.Neutral)
-                            }
-                        },
-                        trailing = {
-                            Row {
-                                IconButton(onClick = {
-                                    viewModel.incrementNeukundeCallAttempts(n)
-                                    viewModel.initiateCall(n.phone, "Kd. ${n.customerNumber}", null)
-                                }, modifier = Modifier.size(38.dp)) {
-                                    Icon(Icons.Default.Phone, "Anrufen",
-                                        tint = ThemeAccent, modifier = Modifier.size(19.dp))
-                                }
-                                IconButton(onClick = {
-                                    viewModel.advanceNeukundeStatus(n) {
-                                        Toast.makeText(context, "Lead abgeschlossen", Toast.LENGTH_SHORT).show()
-                                    }
-                                }, modifier = Modifier.size(38.dp)) {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowForward, "Nächster Schritt",
-                                        tint = ThemeSecondary, modifier = Modifier.size(19.dp))
-                                }
-                            }
-                        }
+                        onMissed = { viewModel.markNeukundeNotReached(it) },
+                        onAdvance = { viewModel.advanceNeukundeStatus(it) }
                     )
                 }
             }
+            item { LeadReviewTray(reviewCount) }
         }
 
         // ================= SEGMENT: HEISSE ANGEBOTE =================

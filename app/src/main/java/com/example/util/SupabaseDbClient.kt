@@ -85,7 +85,8 @@ object SupabaseDbClient {
                                 hotBoxEndHour = if (obj.isNull("hot_box_end_hour")) null else obj.getInt("hot_box_end_hour"),
                                 hotBoxWeekdays = obj.optString("hot_box_weekdays", null).takeIf { it != "null" && it.isNotEmpty() },
                                 callReason = obj.optString("call_reason", null).takeIf { it != "null" && it.isNotEmpty() },
-                                hotBoxListName = obj.optString("hot_box_list_name", null).takeIf { it != "null" && it.isNotEmpty() }
+                                hotBoxListName = obj.optString("hot_box_list_name", null).takeIf { it != "null" && it.isNotEmpty() },
+                                customerNumber = obj.optString("customer_number", null).takeIf { it != "null" && it.isNotEmpty() }
                             )
                         )
                     }
@@ -120,6 +121,7 @@ object SupabaseDbClient {
                 put("hot_box_weekdays", contact.hotBoxWeekdays ?: JSONObject.NULL)
                 put("call_reason", contact.callReason ?: JSONObject.NULL)
                 put("hot_box_list_name", contact.hotBoxListName ?: JSONObject.NULL)
+                put("customer_number", contact.customerNumber ?: JSONObject.NULL)
                 if (userId != null) {
                     put("user_id", userId)
                 }
@@ -801,8 +803,11 @@ object SupabaseDbClient {
             remotePromised.forEach { localDao.insertPromisedAnnahme(it) }
             if (remotePromised.isNotEmpty()) localDao.deletePromisedAnnahmenNotIn(remotePromised.map { it.id })
             
-            remoteNeukunden.forEach { localDao.insertNeukunde(it) }
-            if (remoteNeukunden.isNotEmpty()) localDao.deleteNeukundenNotIn(remoteNeukunden.map { it.id })
+            remoteNeukunden.forEach { remote ->
+                val local = localDao.getNeukundeById(remote.id)
+                if (local == null || remote.updatedAt >= local.updatedAt) localDao.insertNeukunde(remote)
+            }
+            // Leads are retained unless the user explicitly deletes them.
             
             remoteHeisse.forEach { localDao.insertHeissAngebot(it) }
             if (remoteHeisse.isNotEmpty()) localDao.deleteHeisseAngeboteNotIn(remoteHeisse.map { it.id })
@@ -865,8 +870,11 @@ object SupabaseDbClient {
             if (remotePromised.isNotEmpty()) localDao.deletePromisedAnnahmenNotIn(remotePromised.map { it.id })
 
             val remoteNeukunden = fetchNeukunden(context)
-            remoteNeukunden.forEach { localDao.insertNeukunde(it) }
-            if (remoteNeukunden.isNotEmpty()) localDao.deleteNeukundenNotIn(remoteNeukunden.map { it.id })
+            remoteNeukunden.forEach { remote ->
+                val local = localDao.getNeukundeById(remote.id)
+                if (local == null || remote.updatedAt >= local.updatedAt) localDao.insertNeukunde(remote)
+            }
+            // Leads are retained unless the user explicitly deletes them.
 
             val remoteHeisse = fetchHeisseAngebote(context)
             remoteHeisse.forEach { localDao.insertHeissAngebot(it) }

@@ -146,8 +146,17 @@ interface StromrufDao {
     @Query("SELECT * FROM neukunden")
     suspend fun getAllNeukundenList(): List<NeukundeEntity>
 
+    @Query("SELECT * FROM neukunden WHERE id = :id LIMIT 1")
+    suspend fun getNeukundeById(id: String): NeukundeEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertNeukunde(neukunde: NeukundeEntity)
+
+    @Transaction
+    suspend fun insertNeukundeAndContact(neukunde: NeukundeEntity, contact: ContactEntity) {
+        insertContact(contact)
+        insertNeukunde(neukunde)
+    }
 
     @Query("DELETE FROM neukunden WHERE id = :id")
     suspend fun deleteNeukundeById(id: String)
