@@ -30,6 +30,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -44,6 +46,10 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.database.AiCallEntity
 import com.example.database.ContactEntity
+import com.example.ui.design.breathing
+import com.example.ui.design.metallicBrush
+import com.example.ui.design.pulsingAura
+import com.example.ui.theme.*
 import com.example.viewmodel.StromrufViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -57,6 +63,7 @@ fun AiAnrufScreen(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val theme = LocalThemeConfig.current
     var activeTab by remember { mutableStateOf("dialer") } // "dialer" or "notes"
     var showTestDialog by remember { mutableStateOf(false) }
 
@@ -64,166 +71,123 @@ fun AiAnrufScreen(
     val aiCalls by viewModel.aiCalls.collectAsState()
     val contacts by viewModel.contacts.collectAsState()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF10B981))
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Diktat & Call-Notizen",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 18.sp,
-                            color = Color.White
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onDismiss) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowBack,
-                            contentDescription = "Schließen",
-                            tint = Color.White
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF0F172A)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        theme.baseBackground,
+                        theme.glowColor1.copy(alpha = 0.20f),
+                        theme.baseBackground,
+                        theme.glowColor2.copy(alpha = 0.14f)
+                    )
                 )
             )
-        },
-        containerColor = Color(0xFF0F172A)
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            // Tab Switcher
-            Row(
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(
+                                text = "STROMRUF",
+                                fontSize = 10.sp,
+                                letterSpacing = 2.2.sp,
+                                fontWeight = FontWeight.Black,
+                                color = theme.primaryColor
+                            )
+                            Text(
+                                text = "Call Studio",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 22.sp,
+                                color = TextPrimary
+                            )
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(
+                            onClick = onDismiss,
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .clip(CircleShape)
+                                .background(GraphiteLight)
+                                .border(1.dp, BorderSubtle, CircleShape)
+                        ) {
+                            Icon(Icons.Default.ArrowBack, "Schließen", tint = TextPrimary)
+                        }
+                    },
+                    actions = {
+                        Row(
+                            modifier = Modifier
+                                .padding(end = 12.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(SuccessDim)
+                                .border(1.dp, SuccessGreen.copy(alpha = 0.35f), RoundedCornerShape(50))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(Modifier.size(7.dp).clip(CircleShape).background(SuccessGreen))
+                            Spacer(Modifier.width(7.dp))
+                            Text("BEREIT", fontSize = 10.sp, fontWeight = FontWeight.Black, color = SuccessGreen)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                )
+            },
+            containerColor = Color.Transparent
+        ) { paddingValues ->
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .background(
-                        Color(0xFF1E293B).copy(alpha = 0.5f),
-                        RoundedCornerShape(12.dp)
-                    )
-                    .padding(4.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .fillMaxSize()
+                    .padding(paddingValues)
             ) {
-                Box(
+                Row(
                     modifier = Modifier
-                        .weight(1.1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (activeTab == "dialer") Color(0xFF334155) else Color.Transparent)
-                        .clickable { activeTab = "dialer" }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                        .shadow(18.dp, RoundedCornerShape(18.dp), ambientColor = theme.auraColor.copy(alpha = 0.18f))
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Graphite.copy(alpha = 0.92f))
+                        .border(1.dp, BorderStrong, RoundedCornerShape(18.dp))
+                        .padding(5.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    PremiumCallTab(
+                        label = "Anrufen",
+                        icon = Icons.Default.Phone,
+                        selected = activeTab == "dialer",
+                        modifier = Modifier.weight(1f),
+                        onClick = { activeTab = "dialer" }
+                    )
+                    PremiumCallTab(
+                        label = "Notizen · ${aiCalls.size}",
+                        icon = Icons.Default.List,
+                        selected = activeTab == "notes",
+                        modifier = Modifier.weight(1f),
+                        onClick = { activeTab = "notes" }
+                    )
+                    IconButton(
+                        onClick = { showTestDialog = true },
+                        modifier = Modifier
+                            .padding(start = 4.dp)
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(AiVioletDim)
+                            .border(1.dp, AiViolet.copy(alpha = 0.32f), RoundedCornerShape(13.dp))
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Phone,
-                            contentDescription = null,
-                            tint = if (activeTab == "dialer") Color(0xFF10B981) else Color.White.copy(alpha = 0.6f),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Neuer Anruf & Diktat",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (activeTab == "dialer") Color.White else Color.White.copy(alpha = 0.6f)
-                        )
+                        Icon(Icons.Default.Mic, "Spracherkennung testen", tint = AiViolet, modifier = Modifier.size(19.dp))
                     }
                 }
 
-                Box(
-                    modifier = Modifier
-                        .weight(1.1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (activeTab == "notes") Color(0xFF334155) else Color.Transparent)
-                        .clickable { activeTab = "notes" }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.List,
-                            contentDescription = null,
-                            tint = if (activeTab == "notes") Color(0xFF10B981) else Color.White.copy(alpha = 0.6f),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Gespeicherte Notizen (${aiCalls.size})",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (activeTab == "notes") Color.White else Color.White.copy(alpha = 0.6f)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(4.dp))
-
-                Box(
-                    modifier = Modifier
-                        .weight(0.8f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF2563EB).copy(alpha = 0.25f))
-                        .clickable { showTestDialog = true }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Mic,
-                            contentDescription = "Testen",
-                            tint = Color(0xFF60A5FA),
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "STT Test",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF60A5FA)
-                        )
-                    }
-                }
-            }
-
-            // Crossfade for Tab Content
-            Crossfade(
-                targetState = activeTab,
-                animationSpec = tween(300),
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) { tab ->
-                when (tab) {
-                    "dialer" -> {
-                        DialerAndDictationTab(
-                            contacts = contacts,
-                            viewModel = viewModel
-                        )
-                    }
-                    "notes" -> {
-                        SavedNotesTab(
-                            aiCalls = aiCalls,
-                            viewModel = viewModel
-                        )
+                Crossfade(
+                    targetState = activeTab,
+                    animationSpec = tween(350),
+                    modifier = Modifier.weight(1f).fillMaxWidth()
+                ) { tab ->
+                    when (tab) {
+                        "dialer" -> DialerAndDictationTab(contacts = contacts, viewModel = viewModel)
+                        else -> SavedNotesTab(aiCalls = aiCalls, viewModel = viewModel)
                     }
                 }
             }
@@ -233,6 +197,38 @@ fun AiAnrufScreen(
     if (showTestDialog) {
         STTTestDialog(
             onDismiss = { showTestDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun PremiumCallTab(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val theme = LocalThemeConfig.current
+    val scale by animateFloatAsState(if (selected) 1f else 0.97f, tween(180), label = "callTabScale")
+    Row(
+        modifier = modifier
+            .scale(scale)
+            .clip(RoundedCornerShape(13.dp))
+            .background(if (selected) metallicBrush() else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent)))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 11.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, null, tint = if (selected) theme.onAccent else TextMuted, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(7.dp))
+        Text(
+            label,
+            color = if (selected) theme.onAccent else TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.ExtraBold,
+            maxLines = 1
         )
     }
 }
@@ -379,6 +375,69 @@ fun DialerAndDictationTab(
         }
     }
 
+    PremiumDialerContent(
+        contacts = contacts,
+        dialNumber = dialNumber,
+        selectedContactName = selectedContactName,
+        contactsExpanded = isContactsDropdownExpanded,
+        activeCallPresent = activeCall != null,
+        isDictating = isDictating,
+        speechErrorText = speechErrorText,
+        noteText = noteText,
+        onToggleContacts = { isContactsDropdownExpanded = !isContactsDropdownExpanded },
+        onContactSelected = { contact ->
+            dialNumber = contact.phone
+            selectedContactName = contact.name
+            isContactsDropdownExpanded = false
+        },
+        onNumberChange = { number ->
+            dialNumber = number
+            selectedContactName = contacts.find { it.phone == number }?.name.orEmpty()
+        },
+        onStartCall = {
+            if (dialNumber.isBlank()) {
+                Toast.makeText(context, "Bitte geben Sie eine Rufnummer ein", Toast.LENGTH_SHORT).show()
+            } else {
+                viewModel.initiateCall(dialNumber, selectedContactName, callType = "ai_anruf")
+                Toast.makeText(context, "Anruf wird gestartet...", Toast.LENGTH_SHORT).show()
+                val recordAudioStatus = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                if (recordAudioStatus == PackageManager.PERMISSION_GRANTED) startSpeechToText()
+                else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        },
+        onToggleDictation = {
+            if (isDictating) stopSpeechToText()
+            else {
+                val status = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                if (status == PackageManager.PERMISSION_GRANTED) startSpeechToText()
+                else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        },
+        onNoteChange = { noteText = it },
+        onClearNote = { noteText = "" },
+        onSaveNote = {
+            if (noteText.isBlank()) {
+                Toast.makeText(context, "Bitte geben Sie Text ein oder diktieren Sie etwas.", Toast.LENGTH_SHORT).show()
+            } else {
+                val newCall = AiCallEntity(
+                    id = UUID.randomUUID().toString(),
+                    phone = dialNumber.ifBlank { "Unbekannt" },
+                    contactName = selectedContactName.ifBlank { "Unbekannter Partner" },
+                    timestamp = System.currentTimeMillis(),
+                    audioFilePath = null,
+                    transcript = noteText,
+                    durationSeconds = 0,
+                    notes = "Anrufs-Notiz"
+                )
+                viewModel.saveAiCall(newCall)
+                Toast.makeText(context, "Notiz erfolgreich gespeichert! 💾", Toast.LENGTH_SHORT).show()
+                noteText = ""
+                stopSpeechToText()
+            }
+        }
+    )
+
+    /* Alte Oberfläche bleibt vorübergehend als nicht gerenderter Rückfallpfad im Quelltext.
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -799,6 +858,402 @@ fun DialerAndDictationTab(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Notiz Speichern", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    */
+}
+
+@Composable
+private fun PremiumDialerContent(
+    contacts: List<ContactEntity>,
+    dialNumber: String,
+    selectedContactName: String,
+    contactsExpanded: Boolean,
+    activeCallPresent: Boolean,
+    isDictating: Boolean,
+    speechErrorText: String?,
+    noteText: String,
+    onToggleContacts: () -> Unit,
+    onContactSelected: (ContactEntity) -> Unit,
+    onNumberChange: (String) -> Unit,
+    onStartCall: () -> Unit,
+    onToggleDictation: () -> Unit,
+    onNoteChange: (String) -> Unit,
+    onClearNote: () -> Unit,
+    onSaveNote: () -> Unit
+) {
+    val theme = LocalThemeConfig.current
+    val liveTransition = rememberInfiniteTransition(label = "liveSignal")
+    val liveScale by liveTransition.animateFloat(
+        initialValue = 0.82f,
+        targetValue = 1.14f,
+        animationSpec = infiniteRepeatable(tween(850, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "liveScale"
+    )
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 36.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .shadow(24.dp, RoundedCornerShape(24.dp))
+                    .testTag("ai_contact_selector_card"),
+                colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                shape = RoundedCornerShape(24.dp),
+                border = BorderStroke(1.dp, theme.primaryColor.copy(alpha = 0.26f))
+            ) {
+                Column(
+                    Modifier
+                        .background(
+                            Brush.linearGradient(
+                                listOf(
+                                    theme.glowColor1.copy(alpha = 0.26f),
+                                    Graphite.copy(alpha = 0.96f),
+                                    theme.glowColor2.copy(alpha = 0.18f)
+                                )
+                            )
+                        )
+                        .padding(20.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(42.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(theme.primaryColor.copy(alpha = 0.14f))
+                                .border(1.dp, theme.primaryColor.copy(alpha = 0.30f), RoundedCornerShape(14.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Person, null, tint = theme.primaryColor, modifier = Modifier.size(22.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("NEUER ANRUF", color = theme.primaryColor, fontSize = 10.sp, letterSpacing = 1.7.sp, fontWeight = FontWeight.Black)
+                            Text(
+                                if (selectedContactName.isBlank()) "Wen möchtest du erreichen?" else selectedContactName,
+                                color = TextPrimary,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (activeCallPresent) {
+                            Row(
+                                Modifier.clip(RoundedCornerShape(50)).background(SuccessDim)
+                                    .padding(horizontal = 9.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(Modifier.size(6.dp).scale(liveScale).clip(CircleShape).background(SuccessGreen))
+                                Spacer(Modifier.width(6.dp))
+                                Text("LIVE", color = SuccessGreen, fontSize = 9.sp, fontWeight = FontWeight.Black)
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(18.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(SlateElevated.copy(alpha = 0.86f))
+                            .border(1.dp, BorderSubtle, RoundedCornerShape(16.dp))
+                            .clickable(onClick = onToggleContacts)
+                            .padding(horizontal = 15.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Contacts, null, tint = TextSecondary, modifier = Modifier.size(19.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            if (selectedContactName.isBlank()) "Kontakt aus Adressbuch wählen" else dialNumber,
+                            modifier = Modifier.weight(1f),
+                            color = if (selectedContactName.isBlank()) TextSecondary else theme.primaryColor,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Icon(
+                            if (contactsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            null,
+                            tint = TextMuted
+                        )
+                    }
+
+                    AnimatedVisibility(visible = contactsExpanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                        Column(
+                            Modifier
+                                .padding(top = 8.dp)
+                                .fillMaxWidth()
+                                .heightIn(max = 190.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(ObsidianSoft)
+                                .border(1.dp, BorderSubtle, RoundedCornerShape(14.dp))
+                        ) {
+                            if (contacts.isEmpty()) {
+                                Text("Noch keine Kontakte vorhanden", color = TextMuted, fontSize = 13.sp, modifier = Modifier.padding(16.dp))
+                            } else {
+                                LazyColumn {
+                                    items(contacts) { contact ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().clickable { onContactSelected(contact) }.padding(14.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                Modifier.size(32.dp).clip(CircleShape).background(theme.primaryColor.copy(alpha = 0.14f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(contact.name.take(1).uppercase(), color = theme.primaryColor, fontWeight = FontWeight.Black)
+                                            }
+                                            Spacer(Modifier.width(10.dp))
+                                            Text(contact.name, color = TextPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1)
+                                            Text(contact.phone, color = TextMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = dialNumber,
+                    onValueChange = onNumberChange,
+                    placeholder = { Text("Rufnummer eingeben", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = TextMuted) },
+                    leadingIcon = { Icon(Icons.Default.Phone, null, tint = theme.primaryColor.copy(alpha = 0.8f)) },
+                    trailingIcon = {
+                        if (dialNumber.isNotEmpty()) {
+                            IconButton(onClick = { onNumberChange(dialNumber.dropLast(1)) }) {
+                                Icon(Icons.Default.Backspace, "Letzte Ziffer löschen", tint = TextSecondary)
+                            }
+                        }
+                    },
+                    textStyle = MaterialTheme.typography.headlineMedium.copy(
+                        color = TextPrimary,
+                        fontFamily = FontFamily.Monospace,
+                        textAlign = TextAlign.Center,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 1.2.sp
+                    ),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth().testTag("ai_dial_number_field"),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = Graphite.copy(alpha = 0.94f),
+                        unfocusedContainerColor = Graphite.copy(alpha = 0.78f),
+                        focusedBorderColor = theme.primaryColor,
+                        unfocusedBorderColor = BorderStrong,
+                        cursorColor = theme.primaryColor
+                    )
+                )
+
+                Spacer(Modifier.height(18.dp))
+
+                PremiumKeypad(onDigit = { onNumberChange(dialNumber + it) })
+
+                Spacer(Modifier.height(24.dp))
+
+                Box(
+                    modifier = Modifier
+                        .size(86.dp)
+                        .pulsingAura(theme.auraColor, enabled = dialNumber.isNotBlank(), maxRadiusFactor = 0.72f)
+                        .breathing(enabled = dialNumber.isNotBlank())
+                        .shadow(22.dp, CircleShape)
+                        .clip(CircleShape)
+                        .background(metallicBrush())
+                        .clickable(onClick = onStartCall)
+                        .testTag("ai_start_real_call_btn"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Call, "Anrufen", tint = theme.onAccent, modifier = Modifier.size(34.dp))
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    if (dialNumber.isBlank()) "RUFNUMMER EINGEBEN" else "ANTIPPEN ZUM ANRUFEN",
+                    color = if (dialNumber.isBlank()) TextMuted else theme.primaryColor,
+                    fontSize = 10.sp,
+                    letterSpacing = 1.6.sp,
+                    fontWeight = FontWeight.Black
+                )
+            }
+        }
+
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("ai_notepad_card"),
+                colors = CardDefaults.cardColors(containerColor = Graphite.copy(alpha = 0.94f)),
+                border = BorderStroke(1.dp, if (isDictating) CriticalRed.copy(alpha = 0.45f) else BorderSubtle),
+                shape = RoundedCornerShape(24.dp)
+            ) {
+                Column(Modifier.padding(18.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(44.dp)
+                                .pulsingAura(CriticalRed, enabled = isDictating, maxRadiusFactor = 0.55f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (isDictating) CriticalRedDim else AiVioletDim)
+                                .border(1.dp, if (isDictating) CriticalRed.copy(alpha = 0.45f) else AiViolet.copy(alpha = 0.28f), RoundedCornerShape(14.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.GraphicEq, null, tint = if (isDictating) CriticalRed else AiViolet, modifier = Modifier.size(23.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("LIVE ASSIST", color = if (isDictating) CriticalRed else AiViolet, fontSize = 10.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.Black)
+                            Text(
+                                if (isDictating) "Ich höre mit …" else "Gesprächsnotiz",
+                                color = TextPrimary,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                        Button(
+                            onClick = onToggleDictation,
+                            colors = ButtonDefaults.buttonColors(containerColor = if (isDictating) CriticalRed else AiViolet),
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 13.dp, vertical = 10.dp)
+                        ) {
+                            Icon(if (isDictating) Icons.Default.Stop else Icons.Default.Mic, null, tint = Color.White, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (isDictating) "Stop" else "Diktat", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    if (isDictating) {
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth().height(28.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            listOf(0.45f, 0.75f, 1f, 0.62f, 0.88f, 0.52f, 0.72f).forEachIndexed { index, height ->
+                                Box(
+                                    Modifier
+                                        .padding(horizontal = 3.dp)
+                                        .width(4.dp)
+                                        .fillMaxHeight(height * (0.82f + (liveScale - 0.82f) * if (index % 2 == 0) 1f else 0.55f))
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(Brush.verticalGradient(listOf(CriticalRed, AiViolet)))
+                                )
+                            }
+                        }
+                    }
+
+                    if (!speechErrorText.isNullOrBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(speechErrorText, color = CriticalRed, fontSize = 12.sp)
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = noteText,
+                        onValueChange = onNoteChange,
+                        placeholder = {
+                            Text("Live-Transkript und wichtige Gesprächsnotizen erscheinen hier …", color = TextMuted, fontSize = 13.sp)
+                        },
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary, lineHeight = 21.sp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 150.dp, max = 280.dp).testTag("ai_note_text_input"),
+                        shape = RoundedCornerShape(17.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = ObsidianSoft.copy(alpha = 0.72f),
+                            unfocusedContainerColor = ObsidianSoft.copy(alpha = 0.62f),
+                            focusedBorderColor = if (isDictating) CriticalRed.copy(alpha = 0.55f) else AiViolet.copy(alpha = 0.55f),
+                            unfocusedBorderColor = BorderSubtle,
+                            cursorColor = theme.primaryColor
+                        )
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = onClearNote,
+                            modifier = Modifier.weight(0.8f),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, BorderStrong),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary)
+                        ) {
+                            Icon(Icons.Default.DeleteOutline, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Leeren", fontSize = 12.sp)
+                        }
+                        Button(
+                            onClick = onSaveNote,
+                            modifier = Modifier.weight(1.2f).testTag("ai_save_note_btn"),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = theme.primaryColor)
+                        ) {
+                            Icon(Icons.Default.Done, null, tint = theme.onAccent, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text("Notiz sichern", color = theme.onAccent, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(SlateElevated.copy(alpha = 0.44f)).padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.AutoAwesome, null, tint = theme.primaryColor, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    "Für beste Mitschrift nach dem Anruf zur App zurückkehren und den Lautsprecher aktivieren.",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PremiumKeypad(onDigit: (String) -> Unit) {
+    val theme = LocalThemeConfig.current
+    val rows = listOf(
+        listOf("1" to "", "2" to "ABC", "3" to "DEF"),
+        listOf("4" to "GHI", "5" to "JKL", "6" to "MNO"),
+        listOf("7" to "PQRS", "8" to "TUV", "9" to "WXYZ"),
+        listOf("*" to "", "0" to "+", "#" to "")
+    )
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Graphite.copy(alpha = 0.70f)),
+        border = BorderStroke(1.dp, BorderSubtle),
+        shape = RoundedCornerShape(24.dp)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            rows.forEach { row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    row.forEach { (digit, letters) ->
+                        Column(
+                            modifier = Modifier
+                                .size(68.dp)
+                                .clip(CircleShape)
+                                .background(Brush.verticalGradient(listOf(SlateHigh.copy(alpha = 0.92f), SlateElevated.copy(alpha = 0.92f))))
+                                .border(1.dp, BorderStrong, CircleShape)
+                                .clickable { onDigit(digit) },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(digit, color = TextPrimary, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+                            if (letters.isNotEmpty()) {
+                                Text(letters, color = theme.primaryColor.copy(alpha = 0.78f), fontSize = 8.sp, letterSpacing = 1.2.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
@@ -1320,3 +1775,4 @@ fun STTTestDialog(
         containerColor = Color(0xFF1E293B)
     )
 }
+
