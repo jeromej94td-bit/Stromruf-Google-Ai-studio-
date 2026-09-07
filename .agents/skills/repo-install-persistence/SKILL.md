@@ -9,7 +9,7 @@ description: Use when Stromruf work mentions installation, update, APK, ADB, bui
 
 **Local-only fixes are not completion.** The durable product state is GitHub `main`, not a working tree, worktree, local commit, APK, patch, or phone installation.
 
-Repository: `jeromej94td-bit/Stromruf-Google-Ai-studio-`  
+Repository: `jeromej94td-bit/Stromruf-Google-Ai-studio-`
 Package: `com.aistudio.stromruf.gkrfws`
 
 ## Mandatory flow
