@@ -12,6 +12,7 @@ permissions:
   contents: write
   pull-requests: write
   checks: read
+  actions: write
 
 jobs:
   merge-agent-verified:
@@ -22,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Wait for required checks and merge
+      - name: Wait for required checks, merge, and dispatch main build
         uses: actions/github-script@v7
         with:
           script: |
@@ -55,14 +56,25 @@ jobs:
                 return !run || run.status !== 'completed';
               });
               if (!pending.length) {
-                await github.rest.pulls.merge({
+                const { data: mergeResult } = await github.rest.pulls.merge({
                   owner,
                   repo,
                   pull_number: pr.number,
                   merge_method: 'squash',
                   sha,
                 });
-                core.info(`Merged verified agent PR #${pr.number} at ${sha}`);
+                if (!mergeResult.merged) {
+                  core.setFailed(`GitHub did not merge PR #${pr.number}: ${mergeResult.message || 'unknown reason'}`);
+                  return;
+                }
+
+                await github.rest.actions.createWorkflowDispatch({
+                  owner,
+                  repo,
+                  workflow_id: 'android-debug-build.yml',
+                  ref: 'main',
+                });
+                core.info(`Merged verified agent PR #${pr.number} at ${sha} and dispatched the main Android build.`);
                 return;
               }
 
