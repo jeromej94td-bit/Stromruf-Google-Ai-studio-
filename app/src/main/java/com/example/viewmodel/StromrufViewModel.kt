@@ -476,7 +476,12 @@ class StromrufViewModel(private val repository: StromrufRepository) : ViewModel(
     ): ContactEntity? {
         val due = followUps
             .asSequence()
-            .filter { isDynamicHotBoxFollowUp(it) && it.dueAt <= now }
+            .filter { followUp ->
+                if (!isDynamicHotBoxFollowUp(followUp) || followUp.dueAt > now) return@filter false
+                val windowEnd = Regex("smart-callback-window-end=(\\d+)")
+                    .find(followUp.note.orEmpty())?.groupValues?.getOrNull(1)?.toLongOrNull()
+                windowEnd == null || now <= windowEnd
+            }
             .sortedBy { it.dueAt }
             .toList()
         return due.firstNotNullOfOrNull { followUp ->
