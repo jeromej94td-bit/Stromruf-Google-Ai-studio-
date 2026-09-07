@@ -44,7 +44,8 @@ if ($Mode -eq 'Branch') {
         throw "Tracked changes remain uncommitted:`n$($trackedDirty -join "`n")"
     }
 
-    Invoke-Git fetch $Remote $branch | Out-Null
+    $branchRefSpec = "refs/heads/${branch}:refs/remotes/${Remote}/${branch}"
+    Invoke-Git fetch $Remote $branchRefSpec | Out-Null
     $localSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
     $remoteSha = (Invoke-Git rev-parse "$Remote/$branch" | Select-Object -First 1).Trim()
     if ($localSha -ne $remoteSha) {
@@ -59,7 +60,8 @@ if ([string]::IsNullOrWhiteSpace($CommitSha)) {
     throw '-CommitSha is required in Main mode.'
 }
 
-Invoke-Git fetch $Remote $BaseBranch | Out-Null
+$baseRefSpec = "refs/heads/${BaseBranch}:refs/remotes/${Remote}/${BaseBranch}"
+Invoke-Git fetch $Remote $baseRefSpec | Out-Null
 & git merge-base --is-ancestor $CommitSha "$Remote/$BaseBranch"
 if ($LASTEXITCODE -ne 0) {
     throw "Commit $CommitSha is not contained in $Remote/$BaseBranch."
