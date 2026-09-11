@@ -1636,6 +1636,7 @@ fun StromrufMainDashboard(
 
         if (showAddNeukundeDialog) {
             AddNeukundeDialog(
+                contacts = contacts,
                 onDismiss = { showAddNeukundeDialog = false },
                 onConfirm = { customerNumber, phone, customerName, company, email, deliveryAddress, meterNumber, consumption, energyType, routine ->
                     viewModel.saveNeukunde(
@@ -2737,7 +2738,10 @@ fun AnrufTabContent(
                             FilledTonalButton(
                                 onClick = {
                                     dialogPhone = quickPhone
-                                    dialogCustomerNumber = "KD-${(10000..99999).random()}"
+                                    dialogCustomerNumber = contacts
+                                        .firstOrNull { arePhoneNumbersMatching(it.phone, quickPhone) }
+                                        ?.customerNumber
+                                        .orEmpty()
                                     showAddNeukundeDialog = true
                                 },
                                 shape = RoundedCornerShape(8.dp),
@@ -2805,7 +2809,13 @@ fun AnrufTabContent(
 
                                         OutlinedTextField(
                                             value = dialogPhone,
-                                            onValueChange = { dialogPhone = it },
+                                            onValueChange = { newPhone ->
+                                                dialogPhone = newPhone
+                                                dialogCustomerNumber = contacts
+                                                    .firstOrNull { arePhoneNumbersMatching(it.phone, newPhone) }
+                                                    ?.customerNumber
+                                                    .orEmpty()
+                                            },
                                             label = { Text("Telefonnummer") },
                                             singleLine = true,
                                             modifier = Modifier.fillMaxWidth(),
@@ -10103,7 +10113,8 @@ fun HistorieTabContent(
 @Composable
 fun AddNeukundeDialog(
     onDismiss: () -> Unit,
-    onConfirm: (String, String, String?, String?, String?, String?, String?, Long?, String?, String) -> Unit
+    onConfirm: (String, String, String?, String?, String?, String?, String?, Long?, String?, String) -> Unit,
+    contacts: List<ContactEntity> = emptyList()
 ) {
     val context = LocalContext.current
     var customerNumber by remember { mutableStateOf("") }
@@ -10130,7 +10141,13 @@ fun AddNeukundeDialog(
                 customerNumber = parsed.customerNumber; autoFilled = "Kundennummer"
             }
             phone.isBlank() && parsed.phone != null -> {
-                phone = parsed.phone; autoFilled = "Telefonnummer"
+                val newPhone = parsed.phone
+                phone = newPhone
+                customerNumber = contacts
+                    .firstOrNull { arePhoneNumbersMatching(it.phone, newPhone) }
+                    ?.customerNumber
+                    .orEmpty()
+                autoFilled = "Telefonnummer"
             }
             email.isBlank() && parsed.email != null -> {
                 email = parsed.email; autoFilled = "E-Mail"
@@ -10186,7 +10203,14 @@ fun AddNeukundeDialog(
 
                 OutlinedTextField(
                     value = phone,
-                    onValueChange = { phone = it },
+                    onValueChange = { newPhone ->
+                        phone = newPhone
+                        customerNumber = contacts
+                            .firstOrNull { arePhoneNumbersMatching(it.phone, newPhone) }
+                            ?.customerNumber
+                            .orEmpty()
+                        validation = null
+                    },
                     label = { Text("Telefonnummer") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
