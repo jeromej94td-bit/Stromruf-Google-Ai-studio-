@@ -117,38 +117,90 @@ fun LeadWeekBanner(weekCount: Int, onAdd: () -> Unit) {
     }
 }
 
-@Composable
-fun LeadTaskGrid(leads: List<NeukundeEntity>) {
-    val active = leads.filter { it.status in LeadWorkflow.active && it.archivedAt == null }
-    Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp))
-            .background(SlateHigh.copy(alpha = .42f)).border(1.dp, BorderSubtle, RoundedCornerShape(24.dp))
-            .padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text("Heute", color = TextPrimary, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            LeadTaskTile(Icons.Default.Phone, active.count { it.status == LeadWorkflow.CALL }, "anrufen", Teal, Modifier.weight(1f))
-            LeadTaskTile(Icons.Default.Email, active.count { it.status == LeadWorkflow.MAIL }, "Datenmails", Cyan, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            LeadTaskTile(Icons.Default.Send, active.count { it.status in setOf(LeadWorkflow.OFFER, LeadWorkflow.OFFER_SENT) }, "Angebote", Gold, Modifier.weight(1f))
-            LeadTaskTile(Icons.Default.Schedule, active.count { it.status == LeadWorkflow.FOLLOW_UP }, "nachfassen", Violet, Modifier.weight(1f))
-        }
+enum class LeadStage(val label: String, val color: Color) {
+    NEW("Neu", Cyan),
+    CALL("Anrufen", Teal),
+    MAIL("Mail", Cyan),
+    OFFER("Angebot", Gold),
+    FOLLOW_UP("Nachfassen", Violet);
+
+    fun matches(lead: NeukundeEntity): Boolean = when (this) {
+        NEW -> lead.status == LeadWorkflow.CALL && lead.callAttempts == 0
+        CALL -> lead.status == LeadWorkflow.CALL
+        MAIL -> lead.status == LeadWorkflow.MAIL
+        OFFER -> lead.offerSentAt != null && lead.archivedAt == null && lead.completedAt == null
+        FOLLOW_UP -> lead.status == LeadWorkflow.FOLLOW_UP
     }
 }
 
 @Composable
-private fun LeadTaskTile(icon: ImageVector, count: Int, label: String, color: Color, modifier: Modifier) {
-    Row(
-        modifier.clip(RoundedCornerShape(18.dp)).background(color.copy(alpha = .13f))
-            .border(1.dp, color.copy(alpha = .7f), RoundedCornerShape(18.dp)).padding(13.dp),
-        verticalAlignment = Alignment.CenterVertically
+fun LeadTaskGrid(
+    leads: List<NeukundeEntity>,
+    selectedStage: LeadStage? = null,
+    onSelectStage: (LeadStage?) -> Unit = {}
+) {
+    val active = leads.filter { it.status in LeadWorkflow.active && it.archivedAt == null }
+    val stages = listOf(LeadStage.NEW, LeadStage.CALL, LeadStage.MAIL, LeadStage.OFFER, LeadStage.FOLLOW_UP)
+
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp))
+            .background(Brush.horizontalGradient(listOf(Color(0xFF081728), Color(0xFF0B2036))))
+            .border(1.dp, Cyan.copy(alpha = .38f), RoundedCornerShape(24.dp))
+            .padding(vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Box(Modifier.size(39.dp).clip(RoundedCornerShape(12.dp)).background(color.copy(alpha = .18f)), contentAlignment = Alignment.Center) {
-            Icon(icon, null, tint = color, modifier = Modifier.size(21.dp))
+        Text("Pipeline", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            stages.forEach { stage ->
+                val count = active.count { stage.matches(it) }
+                val selected = selectedStage == stage
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.weight(1f).combinedClickable(
+                        onClick = { onSelectStage(if (selected) null else stage) },
+                        onLongClick = { onSelectStage(if (selected) null else stage) }
+                    )
+                ) {
+                    Box(
+                        modifier = Modifier.size(if (selected) 58.dp else 52.dp)
+                            .clip(CircleShape)
+                            .background(stage.color.copy(alpha = if (selected) .28f else .12f))
+                            .border(if (selected) 2.dp else 1.dp, stage.color.copy(alpha = if (selected) .95f else .55f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            when (stage) {
+                                LeadStage.NEW -> Icons.Default.PersonAdd
+                                LeadStage.CALL -> Icons.Default.Phone
+                                LeadStage.MAIL -> Icons.Default.Email
+                                LeadStage.OFFER -> Icons.Default.Description
+                                LeadStage.FOLLOW_UP -> Icons.Default.Schedule
+                            },
+                            null,
+                            tint = stage.color,
+                            modifier = Modifier.size(23.dp)
+                        )
+                        Surface(modifier = Modifier.align(Alignment.BottomEnd), color = stage.color, shape = CircleShape) {
+                            Text("$count", color = Color(0xFF071421), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                    }
+                    Spacer(Modifier.height(7.dp))
+                    Text(stage.label, color = if (selected) TextPrimary else TextSecondary, fontSize = 11.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+                }
+            }
         }
-        Spacer(Modifier.width(10.dp))
-        Column { Text("$count", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold); Text(label, color = TextSecondary, fontSize = 12.sp) }
+        if (selectedStage != null) {
+            Text(
+                "${selectedStage.label}: ${active.count { selectedStage.matches(it) }} Kunden · antippen zum Zurücksetzen",
+                color = selectedStage.color,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+        }
     }
 }
 
