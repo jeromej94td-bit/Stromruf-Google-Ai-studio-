@@ -133,6 +133,7 @@ enum class LeadStage(val label: String, val color: Color) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LeadTaskGrid(
     leads: List<NeukundeEntity>,
